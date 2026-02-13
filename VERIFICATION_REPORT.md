@@ -49,7 +49,7 @@
 
 ### 3. Web App Integration
 
-**Base URL:** `http://127.0.0.1:5500/docs` (configurable via `WEB_BASE_URL` constant)
+**Base URL:** `http://127.0.0.1:5500` (configurable via `WEB_BASE_URL` constant)
 
 **Link Mappings:**
 - ✅ "Open Settings" → `/Settings.html`

@@ -10,7 +10,7 @@
 
 ### 1. Start Local Web Server
 
-The extension expects the web app to be running at `http://127.0.0.1:5500/docs`.
+The extension expects the web app to be running at `http://127.0.0.1:5500`.
 
 **Option A: Using Python**
 ```bash
@@ -70,7 +70,7 @@ http-server -p 5500
 2. Verify new tab opens
 
 **Expected Results:**
-- [ ] New tab opens to `http://127.0.0.1:5500/docs/Account.html`
+- [ ] New tab opens to `http://127.0.0.1:5500/Account.html`
 - [ ] Account page displays with login form
 - [ ] Quick login form appears in popup (dev mode)
 
@@ -107,7 +107,7 @@ http-server -p 5500
 1. While logged in, click "Open Settings →" button
 
 **Expected Results:**
-- [ ] New tab opens to `http://127.0.0.1:5500/docs/Settings.html`
+- [ ] New tab opens to `http://127.0.0.1:5500/Settings.html`
 - [ ] Settings page displays correctly
 - [ ] Popup closes (normal Chrome extension behavior)
 
@@ -117,7 +117,7 @@ http-server -p 5500
 1. Open popup, click "Reset Filters" link
 
 **Expected Results:**
-- [ ] New tab opens to `http://127.0.0.1:5500/docs/Settings.html#filters`
+- [ ] New tab opens to `http://127.0.0.1:5500/Settings.html#filters`
 - [ ] Page scrolls to filters section
 - [ ] Filters section briefly highlights (green border)
 
@@ -127,7 +127,7 @@ http-server -p 5500
 1. Open popup, click "Manage Account" link
 
 **Expected Results:**
-- [ ] New tab opens to `http://127.0.0.1:5500/docs/Account.html`
+- [ ] New tab opens to `http://127.0.0.1:5500/Account.html`
 - [ ] Account page displays
 
 ### Test 8: Create Account Link (Logged Out)
@@ -137,7 +137,7 @@ http-server -p 5500
 2. In logged out state, click "No account? Create one here."
 
 **Expected Results:**
-- [ ] New tab opens to `http://127.0.0.1:5500/docs/Account.html#create`
+- [ ] New tab opens to `http://127.0.0.1:5500/Account.html#create`
 - [ ] Account page displays with "Create Account" tab active
 
 ### Test 9: Log Out
@@ -281,7 +281,7 @@ chrome.storage.local.set({
 
 ### Issue: Web pages don't open
 - Verify local web server is running on port 5500
-- Check URL in browser: http://127.0.0.1:5500/docs/Settings.html
+- Check URL in browser: http://127.0.0.1:5500/Settings.html
 - Update WEB_BASE_URL in popup.js if using different port
 
 ### Issue: Icon doesn't change

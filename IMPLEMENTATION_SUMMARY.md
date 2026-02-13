@@ -51,7 +51,7 @@ This document summarizes the implementation of the ISweep Chrome Extension popup
 
 ### C) WEB SETTINGS LINKING ✅
 
-Single constant for web app base URL: `WEB_BASE_URL = 'http://127.0.0.1:5500/docs'`
+Single constant for web app base URL: `WEB_BASE_URL = 'http://127.0.0.1:5500'`
 
 Link implementations:
 - ✅ "Open Settings →" → `${WEB_BASE}/Settings.html`
@@ -251,7 +251,7 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
 
 **URL Configuration:**
 ```javascript
-const WEB_BASE_URL = 'http://127.0.0.1:5500/docs';
+const WEB_BASE_URL = 'http://127.0.0.1:5500';
 ```
 
 **Link Handlers:**
@@ -342,7 +342,7 @@ Comprehensive testing guide includes 15+ test cases:
 - ✅ First click shows login state
 - ✅ "Log in with Email" opens website AND supports inline login (dev)
 - ✅ After login: shows "Welcome back" + status dot + "Open Settings →"
-- ✅ "Open Settings" opens http://127.0.0.1:5500/docs/Settings.html
+- ✅ "Open Settings" opens http://127.0.0.1:5500/Settings.html
 - ✅ "Reset Filters" opens Settings page anchored to filters section
 - ✅ "Log Out" clears auth and returns to login state
 - ✅ Enabled/Paused status text changes based on stored flag

@@ -22,7 +22,7 @@ Safe content filtering for a better browsing experience.
 ### Web App Base URL
 
 The extension is configured to connect to the ISweep web app at:
-- **Development**: `http://127.0.0.1:5500/docs`
+- **Development**: `http://127.0.0.1:5500`
 
 To change the base URL, edit `WEB_BASE_URL` in `popup.js`.
 
@@ -46,7 +46,7 @@ To change the base URL, edit `WEB_BASE_URL` in `popup.js`.
 - [ ] Quick login form accepts email and logs in
 - [ ] Logged in state shows user name and initials
 - [ ] Status shows "ISweep is Active" with green dot
-- [ ] "Open Settings" opens `http://127.0.0.1:5500/docs/Settings.html`
+- [ ] "Open Settings" opens `http://127.0.0.1:5500/Settings.html`
 - [ ] "Reset Filters" opens Settings page with #filters anchor
 - [ ] "Manage Account" opens Account page
 - [ ] "Log Out" clears auth and returns to login state

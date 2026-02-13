@@ -185,10 +185,12 @@
     // Highlight filters section if hash is present
     if (window.location.hash === '#filters') {
       setTimeout(() => {
-        document.getElementById('filters').scrollIntoView({ behavior: 'smooth' });
-        document.getElementById('filters').style.border = '2px solid #14b8a6';
+        const filtersSection = document.getElementById('filters');
+        filtersSection.scrollIntoView({ behavior: 'smooth' });
+        const originalBorder = filtersSection.style.border;
+        filtersSection.style.border = '2px solid #14b8a6';
         setTimeout(() => {
-          document.getElementById('filters').style.border = 'none';
+          filtersSection.style.border = originalBorder;
         }, 2000);
       }, 500);
     }

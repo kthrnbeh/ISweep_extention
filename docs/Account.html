@@ -181,8 +181,8 @@
     
     <div class="card">
       <div class="tabs">
-        <button class="tab active" onclick="showTab('login')">Login</button>
-        <button class="tab" onclick="showTab('create')">Create Account</button>
+        <button class="tab active" onclick="showTab('login', event)">Login</button>
+        <button class="tab" onclick="showTab('create', event)">Create Account</button>
       </div>
       
       <!-- Login Tab -->
@@ -249,12 +249,21 @@
   </div>
   
   <script>
-    function showTab(tabName) {
+    function showTab(tabName, event) {
       // Update tabs
       document.querySelectorAll('.tab').forEach(tab => {
         tab.classList.remove('active');
       });
-      event.target.classList.add('active');
+      if (event && event.target) {
+        event.target.classList.add('active');
+      } else {
+        // Fallback: activate tab based on tabName
+        document.querySelectorAll('.tab').forEach((tab, index) => {
+          if ((tabName === 'login' && index === 0) || (tabName === 'create' && index === 1)) {
+            tab.classList.add('active');
+          }
+        });
+      }
       
       // Update content
       document.querySelectorAll('.tab-content').forEach(content => {

@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ISweep Account</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+    
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Helvetica', 'Arial', sans-serif;
+      background: #f9fafb;
+      color: #1f2937;
+      padding: 40px 20px;
+    }
+    
+    .container {
+      max-width: 600px;
+      margin: 0 auto;
+    }
+    
+    .header {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 32px;
+      padding-bottom: 24px;
+      border-bottom: 2px solid #e5e7eb;
+      justify-content: center;
+    }
+    
+    .logo {
+      font-size: 32px;
+    }
+    
+    h1 {
+      font-size: 28px;
+      color: #14b8a6;
+      font-weight: 600;
+    }
+    
+    .card {
+      background: white;
+      border-radius: 12px;
+      padding: 32px;
+      box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+      text-align: center;
+    }
+    
+    .card h2 {
+      font-size: 24px;
+      margin-bottom: 16px;
+      color: #1f2937;
+    }
+    
+    .card p {
+      color: #6b7280;
+      line-height: 1.6;
+      margin-bottom: 24px;
+    }
+    
+    .form-group {
+      margin-bottom: 20px;
+      text-align: left;
+    }
+    
+    .form-group label {
+      display: block;
+      margin-bottom: 8px;
+      color: #374151;
+      font-weight: 500;
+    }
+    
+    .form-group input {
+      width: 100%;
+      padding: 12px;
+      border: 1px solid #e5e7eb;
+      border-radius: 8px;
+      font-size: 14px;
+      font-family: inherit;
+    }
+    
+    .form-group input:focus {
+      outline: none;
+      border-color: #14b8a6;
+      box-shadow: 0 0 0 3px rgba(20, 184, 166, 0.1);
+    }
+    
+    .btn {
+      width: 100%;
+      padding: 12px 24px;
+      border: none;
+      border-radius: 8px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      margin-bottom: 12px;
+    }
+    
+    .btn-primary {
+      background: #14b8a6;
+      color: white;
+    }
+    
+    .btn-primary:hover {
+      background: #0d9488;
+    }
+    
+    .btn-secondary {
+      background: #f3f4f6;
+      color: #374151;
+    }
+    
+    .btn-secondary:hover {
+      background: #e5e7eb;
+    }
+    
+    .divider {
+      text-align: center;
+      margin: 24px 0;
+      color: #9ca3af;
+      font-size: 14px;
+    }
+    
+    .success-message {
+      background: #d1fae5;
+      color: #065f46;
+      padding: 12px 16px;
+      border-radius: 8px;
+      margin-top: 16px;
+      display: none;
+    }
+    
+    .success-message.show {
+      display: block;
+    }
+    
+    .tabs {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 24px;
+      border-bottom: 2px solid #e5e7eb;
+    }
+    
+    .tab {
+      padding: 12px 24px;
+      background: transparent;
+      border: none;
+      border-bottom: 2px solid transparent;
+      cursor: pointer;
+      font-weight: 500;
+      color: #6b7280;
+      margin-bottom: -2px;
+    }
+    
+    .tab.active {
+      color: #14b8a6;
+      border-bottom-color: #14b8a6;
+    }
+    
+    .tab-content {
+      display: none;
+    }
+    
+    .tab-content.active {
+      display: block;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <span class="logo">🧹</span>
+      <h1>ISweep Account</h1>
+    </div>
+    
+    <div class="card">
+      <div class="tabs">
+        <button class="tab active" onclick="showTab('login')">Login</button>
+        <button class="tab" onclick="showTab('create')">Create Account</button>
+      </div>
+      
+      <!-- Login Tab -->
+      <div id="login" class="tab-content active">
+        <h2>Welcome Back</h2>
+        <p>Sign in to your ISweep account</p>
+        
+        <form onsubmit="handleLogin(event)">
+          <div class="form-group">
+            <label for="loginEmail">Email Address</label>
+            <input type="email" id="loginEmail" placeholder="your@email.com" required>
+          </div>
+          
+          <div class="form-group">
+            <label for="loginPassword">Password</label>
+            <input type="password" id="loginPassword" placeholder="Enter your password" required>
+          </div>
+          
+          <button type="submit" class="btn btn-primary">Sign In</button>
+        </form>
+        
+        <div class="divider">or</div>
+        
+        <button class="btn btn-secondary" onclick="handleGoogleLogin()">
+          Continue with Google
+        </button>
+        
+        <div class="success-message" id="loginSuccess">✓ Login successful! You can close this window.</div>
+      </div>
+      
+      <!-- Create Account Tab -->
+      <div id="create" class="tab-content">
+        <h2>Create Your Account</h2>
+        <p>Start filtering content safely</p>
+        
+        <form onsubmit="handleCreateAccount(event)">
+          <div class="form-group">
+            <label for="createName">Full Name</label>
+            <input type="text" id="createName" placeholder="John Doe" required>
+          </div>
+          
+          <div class="form-group">
+            <label for="createEmail">Email Address</label>
+            <input type="email" id="createEmail" placeholder="your@email.com" required>
+          </div>
+          
+          <div class="form-group">
+            <label for="createPassword">Password</label>
+            <input type="password" id="createPassword" placeholder="Create a password" required>
+          </div>
+          
+          <button type="submit" class="btn btn-primary">Create Account</button>
+        </form>
+        
+        <div class="divider">or</div>
+        
+        <button class="btn btn-secondary" onclick="handleGoogleLogin()">
+          Sign up with Google
+        </button>
+        
+        <div class="success-message" id="createSuccess">✓ Account created! You can close this window.</div>
+      </div>
+    </div>
+  </div>
+  
+  <script>
+    function showTab(tabName) {
+      // Update tabs
+      document.querySelectorAll('.tab').forEach(tab => {
+        tab.classList.remove('active');
+      });
+      event.target.classList.add('active');
+      
+      // Update content
+      document.querySelectorAll('.tab-content').forEach(content => {
+        content.classList.remove('active');
+      });
+      document.getElementById(tabName).classList.add('active');
+    }
+    
+    function handleLogin(event) {
+      event.preventDefault();
+      const email = document.getElementById('loginEmail').value;
+      
+      // Show success message
+      const message = document.getElementById('loginSuccess');
+      message.classList.add('show');
+      
+      // In a real implementation, this would communicate with the extension
+      // For demo purposes, we'll just show a success message
+      console.log('Login attempt:', email);
+      
+      // Simulate extension communication
+      setTimeout(() => {
+        alert('Demo: In production, this would communicate with the extension to complete login.');
+      }, 1000);
+    }
+    
+    function handleCreateAccount(event) {
+      event.preventDefault();
+      const name = document.getElementById('createName').value;
+      const email = document.getElementById('createEmail').value;
+      
+      // Show success message
+      const message = document.getElementById('createSuccess');
+      message.classList.add('show');
+      
+      console.log('Create account:', name, email);
+      
+      // Simulate extension communication
+      setTimeout(() => {
+        alert('Demo: In production, this would communicate with the extension to complete registration.');
+      }, 1000);
+    }
+    
+    function handleGoogleLogin() {
+      alert('Demo: Google OAuth would be implemented here.');
+    }
+    
+    // Check for hash and show appropriate tab
+    if (window.location.hash === '#create') {
+      document.querySelector('.tab:nth-child(2)').click();
+    }
+  </script>
+</body>
+</html>

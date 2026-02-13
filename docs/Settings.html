@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ISweep Settings</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+    
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Helvetica', 'Arial', sans-serif;
+      background: #f9fafb;
+      color: #1f2937;
+      padding: 40px 20px;
+    }
+    
+    .container {
+      max-width: 900px;
+      margin: 0 auto;
+    }
+    
+    .header {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 32px;
+      padding-bottom: 24px;
+      border-bottom: 2px solid #e5e7eb;
+    }
+    
+    .logo {
+      font-size: 32px;
+    }
+    
+    h1 {
+      font-size: 28px;
+      color: #14b8a6;
+      font-weight: 600;
+    }
+    
+    .card {
+      background: white;
+      border-radius: 12px;
+      padding: 24px;
+      margin-bottom: 24px;
+      box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+    }
+    
+    .card h2 {
+      font-size: 20px;
+      margin-bottom: 16px;
+      color: #1f2937;
+    }
+    
+    .card p {
+      color: #6b7280;
+      line-height: 1.6;
+      margin-bottom: 12px;
+    }
+    
+    .filters-section {
+      margin-top: 24px;
+      padding-top: 24px;
+      border-top: 1px solid #e5e7eb;
+    }
+    
+    .filter-option {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 12px;
+      margin-bottom: 8px;
+      background: #f9fafb;
+      border-radius: 8px;
+    }
+    
+    .filter-option input[type="checkbox"] {
+      width: 20px;
+      height: 20px;
+      cursor: pointer;
+    }
+    
+    .filter-option label {
+      cursor: pointer;
+      flex: 1;
+    }
+    
+    .btn {
+      padding: 12px 24px;
+      border: none;
+      border-radius: 8px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+    
+    .btn-primary {
+      background: #14b8a6;
+      color: white;
+    }
+    
+    .btn-primary:hover {
+      background: #0d9488;
+    }
+    
+    .success-message {
+      background: #d1fae5;
+      color: #065f46;
+      padding: 12px 16px;
+      border-radius: 8px;
+      margin-top: 16px;
+      display: none;
+    }
+    
+    .success-message.show {
+      display: block;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <span class="logo">🧹</span>
+      <h1>ISweep Settings</h1>
+    </div>
+    
+    <div class="card">
+      <h2>General Settings</h2>
+      <p>Configure your ISweep content filtering preferences.</p>
+      <p>This is a demo page for testing the Chrome extension integration.</p>
+    </div>
+    
+    <div class="card" id="filters">
+      <h2>Content Filters</h2>
+      <p>Select which types of content you want to filter:</p>
+      
+      <div class="filters-section">
+        <div class="filter-option">
+          <input type="checkbox" id="filter1" checked>
+          <label for="filter1">Inappropriate Images</label>
+        </div>
+        
+        <div class="filter-option">
+          <input type="checkbox" id="filter2" checked>
+          <label for="filter2">Violent Content</label>
+        </div>
+        
+        <div class="filter-option">
+          <input type="checkbox" id="filter3" checked>
+          <label for="filter3">Adult Content</label>
+        </div>
+        
+        <div class="filter-option">
+          <input type="checkbox" id="filter4">
+          <label for="filter4">Profanity</label>
+        </div>
+      </div>
+      
+      <button class="btn btn-primary" onclick="saveSettings()">Save Filter Settings</button>
+      <div class="success-message" id="successMessage">✓ Settings saved successfully!</div>
+    </div>
+    
+    <div class="card">
+      <h2>About ISweep</h2>
+      <p>ISweep helps you browse the internet safely by filtering inappropriate content.</p>
+      <p>Version: 1.0.0 (Demo)</p>
+    </div>
+  </div>
+  
+  <script>
+    function saveSettings() {
+      const message = document.getElementById('successMessage');
+      message.classList.add('show');
+      
+      setTimeout(() => {
+        message.classList.remove('show');
+      }, 3000);
+    }
+    
+    // Highlight filters section if hash is present
+    if (window.location.hash === '#filters') {
+      setTimeout(() => {
+        document.getElementById('filters').scrollIntoView({ behavior: 'smooth' });
+        document.getElementById('filters').style.border = '2px solid #14b8a6';
+        setTimeout(() => {
+          document.getElementById('filters').style.border = 'none';
+        }, 2000);
+      }, 500);
+    }
+  </script>
+</body>
+</html>

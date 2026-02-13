@@ -18,3 +18,7 @@
 # Temporary files
 tmp/
 temp/
+
+# Preview/test files
+preview.html
+test-popup.js

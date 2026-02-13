@@ -1,7 +1,7 @@
 // ISweep Chrome Extension Popup JavaScript
 
 // Constants
-const ISWEEP_FRONTEND_URL = 'https://isweep.app'; // Update with actual frontend URL
+const ISWEEP_FRONTEND_URL = 'https://isweep.app'; // Replace with actual ISweep frontend URL
 const LOGIN_URL = `${ISWEEP_FRONTEND_URL}/login`;
 const SETTINGS_URL = `${ISWEEP_FRONTEND_URL}/docs/Settings.html`;
 const CREATE_ACCOUNT_URL = `${ISWEEP_FRONTEND_URL}/signup`;

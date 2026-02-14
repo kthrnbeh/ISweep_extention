@@ -1,170 +1,285 @@
-// ISweep Chrome Extension Popup JavaScript
+// ISweep Chrome Extension - Popup Controller
+// Handles UI state, authentication flow, and user interactions
 
-// Constants
-const ISWEEP_FRONTEND_URL = 'https://isweep.app'; // Replace with actual ISweep frontend URL
-const LOGIN_URL = `${ISWEEP_FRONTEND_URL}/login`;
-const SETTINGS_URL = `${ISWEEP_FRONTEND_URL}/docs/Settings.html`;
-const CREATE_ACCOUNT_URL = `${ISWEEP_FRONTEND_URL}/signup`;
-const MANAGE_ACCOUNT_URL = `${ISWEEP_FRONTEND_URL}/account`;
-const RESET_FILTERS_URL = `${ISWEEP_FRONTEND_URL}/#filters`;
+// Configuration - Web App Base URL
+// IMPORTANT: Update this URL to match your ISweep frontend deployment
+// Development: Use your local frontend dev server (e.g., 'http://127.0.0.1:5500/docs')
+// Production: Use your deployed frontend URL (e.g., 'https://isweep.example.com')
+const WEB_BASE_URL = 'http://127.0.0.1:5500/docs';
 
-// DOM Elements
-const loggedOutView = document.getElementById('logged-out-view');
-const loggedInView = document.getElementById('logged-in-view');
-const loginBtn = document.getElementById('login-btn');
-const createAccountLink = document.getElementById('create-account-link');
-const settingsBtn = document.getElementById('settings-btn');
-const toggleStatusBtn = document.getElementById('toggle-status-btn');
-const statusIndicator = document.getElementById('status-indicator');
-const statusText = document.getElementById('status-text');
-const resetFiltersLink = document.getElementById('reset-filters-link');
-const manageAccountLink = document.getElementById('manage-account-link');
-const logoutLink = document.getElementById('logout-link');
+// Storage Keys
+const STORAGE_KEYS = {
+  AUTH: 'isweepAuth',
+  ENABLED: 'isweepEnabled'
+};
 
-// Initialize popup
-document.addEventListener('DOMContentLoaded', initializePopup);
+// DOM Elements - Logged Out State
+const stateLoggedOut = document.getElementById('stateLoggedOut');
+const btnLogin = document.getElementById('btnLogin');
+const linkCreateAccount = document.getElementById('linkCreateAccount');
+const quickLoginForm = document.getElementById('quickLoginForm');
+const emailInput = document.getElementById('emailInput');
+const btnQuickLogin = document.getElementById('btnQuickLogin');
+const btnCancelQuickLogin = document.getElementById('btnCancelQuickLogin');
 
-async function initializePopup() {
-  // Check authentication state
-  const isAuthenticated = await checkAuthState();
+// DOM Elements - Logged In State
+const stateLoggedIn = document.getElementById('stateLoggedIn');
+const userAvatar = document.getElementById('userAvatar');
+const userInitials = document.getElementById('userInitials');
+const userName = document.getElementById('userName');
+const statusDot = document.getElementById('statusDot');
+const statusText = document.getElementById('statusText');
+const btnOpenSettings = document.getElementById('btnOpenSettings');
+const linkResetFilters = document.getElementById('linkResetFilters');
+const linkManageAccount = document.getElementById('linkManageAccount');
+const linkLogout = document.getElementById('linkLogout');
+
+/**
+ * Initialize popup on load
+ * Loads auth and enabled state from chrome.storage.local
+ * Renders the appropriate UI state
+ */
+document.addEventListener('DOMContentLoaded', async () => {
+  console.log('[ISweep Popup] Initializing...');
   
-  if (isAuthenticated) {
-    showLoggedInView();
-    await loadStatus();
-  } else {
-    showLoggedOutView();
-  }
-  
-  // Setup event listeners
-  setupEventListeners();
-}
-
-// Authentication state management
-async function checkAuthState() {
-  return new Promise((resolve) => {
-    chrome.storage.local.get(['isAuthenticated', 'authToken'], (result) => {
-      resolve(result.isAuthenticated === true && result.authToken);
-    });
-  });
-}
-
-async function clearAuthState() {
-  return new Promise((resolve) => {
-    chrome.storage.local.remove(['isAuthenticated', 'authToken', 'userEmail'], () => {
-      resolve();
-    });
-  });
-}
-
-// Status management
-async function loadStatus() {
-  return new Promise((resolve) => {
-    chrome.storage.local.get(['isweepStatus'], (result) => {
-      const status = result.isweepStatus || 'active';
-      updateStatusUI(status);
-      resolve(status);
-    });
-  });
-}
-
-async function toggleStatus() {
-  const currentStatus = await loadStatus();
-  const newStatus = currentStatus === 'active' ? 'paused' : 'active';
-  
-  return new Promise((resolve) => {
-    chrome.storage.local.set({ isweepStatus: newStatus }, () => {
-      updateStatusUI(newStatus);
-      resolve(newStatus);
-    });
-  });
-}
-
-function updateStatusUI(status) {
-  if (status === 'active') {
-    statusIndicator.classList.remove('paused');
-    statusIndicator.classList.add('active');
-    statusText.textContent = 'ISweep Active';
-  } else {
-    statusIndicator.classList.remove('active');
-    statusIndicator.classList.add('paused');
-    statusText.textContent = 'ISweep Paused';
-  }
-}
-
-// View management
-function showLoggedOutView() {
-  loggedOutView.classList.remove('hidden');
-  loggedInView.classList.add('hidden');
-}
-
-function showLoggedInView() {
-  loggedOutView.classList.add('hidden');
-  loggedInView.classList.remove('hidden');
-}
-
-// Event listeners
-function setupEventListeners() {
-  // Logged out view
-  loginBtn.addEventListener('click', handleLogin);
-  createAccountLink.addEventListener('click', handleCreateAccount);
-  
-  // Logged in view
-  settingsBtn.addEventListener('click', handleOpenSettings);
-  toggleStatusBtn.addEventListener('click', handleToggleStatus);
-  resetFiltersLink.addEventListener('click', handleResetFilters);
-  manageAccountLink.addEventListener('click', handleManageAccount);
-  logoutLink.addEventListener('click', handleLogout);
-}
-
-// Event handlers
-function handleLogin(e) {
-  e.preventDefault();
-  chrome.tabs.create({ url: LOGIN_URL });
-}
-
-function handleCreateAccount(e) {
-  e.preventDefault();
-  chrome.tabs.create({ url: CREATE_ACCOUNT_URL });
-}
-
-function handleOpenSettings(e) {
-  e.preventDefault();
-  chrome.tabs.create({ url: SETTINGS_URL });
-}
-
-async function handleToggleStatus(e) {
-  e.preventDefault();
-  await toggleStatus();
-}
-
-function handleResetFilters(e) {
-  e.preventDefault();
-  chrome.tabs.create({ url: RESET_FILTERS_URL });
-}
-
-function handleManageAccount(e) {
-  e.preventDefault();
-  chrome.tabs.create({ url: MANAGE_ACCOUNT_URL });
-}
-
-async function handleLogout(e) {
-  e.preventDefault();
-  
-  // Confirm logout
-  if (confirm('Are you sure you want to log out?')) {
-    await clearAuthState();
-    showLoggedOutView();
-  }
-}
-
-// Listen for storage changes (e.g., when user logs in from web)
-chrome.storage.onChanged.addListener((changes, areaName) => {
-  if (areaName === 'local') {
-    if (changes.isAuthenticated || changes.authToken) {
-      initializePopup();
+  try {
+    // Load stored data from chrome.storage.local
+    const result = await chrome.storage.local.get([STORAGE_KEYS.AUTH, STORAGE_KEYS.ENABLED]);
+    
+    const authData = result[STORAGE_KEYS.AUTH];
+    const isEnabled = result[STORAGE_KEYS.ENABLED] !== false; // Default to true if not set
+    
+    console.log('[ISweep Popup] Auth data:', authData ? 'Present' : 'None');
+    console.log('[ISweep Popup] Enabled state:', isEnabled);
+    
+    if (authData && authData.email) {
+      // User is logged in - show logged in state
+      renderLoggedInState(authData, isEnabled);
+    } else {
+      // User is logged out - show login state
+      renderLoggedOutState();
     }
-    if (changes.isweepStatus) {
-      updateStatusUI(changes.isweepStatus.newValue);
-    }
+    
+    // Set up event listeners
+    setupEventListeners();
+    
+  } catch (error) {
+    console.error('[ISweep Popup] Error initializing:', error);
+    renderLoggedOutState(); // Fallback to logged out state
   }
 });
+
+/**
+ * Render the Logged Out state
+ */
+function renderLoggedOutState() {
+  console.log('[ISweep Popup] Rendering logged out state');
+  stateLoggedOut.classList.remove('hidden');
+  stateLoggedIn.classList.add('hidden');
+}
+
+/**
+ * Render the Logged In state
+ * @param {Object} authData - User authentication data {email, displayName, initials, loggedInAt}
+ * @param {boolean} isEnabled - Whether ISweep filtering is enabled
+ */
+function renderLoggedInState(authData, isEnabled) {
+  console.log('[ISweep Popup] Rendering logged in state');
+  
+  // Update user display name
+  const displayName = authData.displayName || authData.email.split('@')[0];
+  userName.textContent = displayName;
+  
+  // Update avatar initials
+  const initials = authData.initials || getInitials(displayName);
+  userInitials.textContent = initials;
+  
+  // Update status based on enabled state
+  if (isEnabled) {
+    statusDot.classList.remove('paused');
+    statusText.textContent = 'ISweep is Active';
+  } else {
+    statusDot.classList.add('paused');
+    statusText.textContent = 'ISweep is Paused';
+  }
+  
+  // Show logged in state, hide logged out state
+  stateLoggedIn.classList.remove('hidden');
+  stateLoggedOut.classList.add('hidden');
+}
+
+/**
+ * Extract initials from a name or email
+ * @param {string} name - Name or email to extract initials from
+ * @returns {string} Initials (up to 2 characters)
+ */
+function getInitials(name) {
+  if (!name) return '--';
+  
+  const parts = name.split(/[\s@._-]+/).filter(p => p.length > 0);
+  
+  if (parts.length === 0) return '--';
+  if (parts.length === 1) return parts[0].substring(0, 2).toUpperCase();
+  
+  return (parts[0][0] + parts[1][0]).toUpperCase();
+}
+
+/**
+ * Set up all event listeners for buttons and links
+ */
+function setupEventListeners() {
+  // Logged Out State Events
+  btnLogin.addEventListener('click', handleLoginClick);
+  linkCreateAccount.addEventListener('click', handleCreateAccountClick);
+  btnQuickLogin.addEventListener('click', handleQuickLogin);
+  btnCancelQuickLogin.addEventListener('click', handleCancelQuickLogin);
+  
+  // Logged In State Events
+  btnOpenSettings.addEventListener('click', handleOpenSettings);
+  linkResetFilters.addEventListener('click', handleResetFilters);
+  linkManageAccount.addEventListener('click', handleManageAccount);
+  linkLogout.addEventListener('click', handleLogout);
+  
+  // Allow Enter key in email input
+  emailInput.addEventListener('keypress', (e) => {
+    if (e.key === 'Enter') {
+      handleQuickLogin();
+    }
+  });
+}
+
+/**
+ * Handle "Log in with Email" button click
+ * Opens web app login page in new tab and shows quick login form
+ */
+function handleLoginClick(e) {
+  e.preventDefault();
+  console.log('[ISweep Popup] Login button clicked');
+  
+  // Open web app login/account page in new tab
+  chrome.tabs.create({ url: `${WEB_BASE_URL}/Account.html` });
+  
+  // Also show quick login form for development
+  quickLoginForm.classList.remove('hidden');
+  emailInput.focus();
+}
+
+/**
+ * Handle "Create one here" link click
+ * Opens web app account creation page
+ */
+function handleCreateAccountClick(e) {
+  e.preventDefault();
+  console.log('[ISweep Popup] Create account link clicked');
+  chrome.tabs.create({ url: `${WEB_BASE_URL}/Account.html#create` });
+}
+
+/**
+ * Handle quick login (development mode)
+ * Saves email to chrome.storage.local and renders logged in state
+ */
+async function handleQuickLogin() {
+  const email = emailInput.value.trim();
+  
+  if (!email || !email.includes('@')) {
+    alert('Please enter an email address containing @');
+    return;
+  }
+  
+  console.log('[ISweep Popup] Quick login for:', email);
+  
+  // Extract display name from email
+  const displayName = email.split('@')[0];
+  const initials = getInitials(displayName);
+  
+  // Create auth data object
+  const authData = {
+    email: email,
+    displayName: displayName,
+    initials: initials,
+    loggedInAt: new Date().toISOString()
+  };
+  
+  try {
+    // Save to chrome.storage.local
+    await chrome.storage.local.set({
+      [STORAGE_KEYS.AUTH]: authData,
+      [STORAGE_KEYS.ENABLED]: true // Enable filtering on login
+    });
+    
+    console.log('[ISweep Popup] Auth data saved successfully');
+    
+    // Render logged in state
+    renderLoggedInState(authData, true);
+    
+    // Hide quick login form
+    quickLoginForm.classList.add('hidden');
+    emailInput.value = '';
+    
+  } catch (error) {
+    console.error('[ISweep Popup] Error saving auth data:', error);
+    alert('Failed to save login information. Please try again.');
+  }
+}
+
+/**
+ * Handle cancel quick login
+ */
+function handleCancelQuickLogin(e) {
+  e.preventDefault();
+  quickLoginForm.classList.add('hidden');
+  emailInput.value = '';
+}
+
+/**
+ * Handle "Open Settings" button click
+ * Opens ISweep Settings page in new tab
+ */
+function handleOpenSettings(e) {
+  e.preventDefault();
+  console.log('[ISweep Popup] Opening Settings page');
+  chrome.tabs.create({ url: `${WEB_BASE_URL}/Settings.html` });
+}
+
+/**
+ * Handle "Reset Filters" link click
+ * Opens Settings page with filters section anchor
+ */
+function handleResetFilters(e) {
+  e.preventDefault();
+  console.log('[ISweep Popup] Opening Reset Filters');
+  chrome.tabs.create({ url: `${WEB_BASE_URL}/Settings.html#filters` });
+}
+
+/**
+ * Handle "Manage Account" link click
+ * Opens Account page
+ */
+function handleManageAccount(e) {
+  e.preventDefault();
+  console.log('[ISweep Popup] Opening Manage Account');
+  chrome.tabs.create({ url: `${WEB_BASE_URL}/Account.html` });
+}
+
+/**
+ * Handle "Log Out" link click
+ * Clears auth data and renders logged out state
+ */
+async function handleLogout(e) {
+  e.preventDefault();
+  console.log('[ISweep Popup] Logging out');
+  
+  try {
+    // Remove auth data from storage
+    await chrome.storage.local.remove(STORAGE_KEYS.AUTH);
+    
+    console.log('[ISweep Popup] Logged out successfully');
+    
+    // Render logged out state
+    renderLoggedOutState();
+    
+  } catch (error) {
+    console.error('[ISweep Popup] Error logging out:', error);
+    alert('Failed to log out. Please try again.');
+  }
+}

@@ -8,44 +8,81 @@
 </head>
 <body>
   <!-- Logged Out State -->
-  <div id="logged-out-view" class="view hidden">
-    <div class="logo-container">
-      <svg class="logo" width="120" height="120" viewBox="0 0 120 120" fill="none" xmlns="http://www.w3.org/2000/svg">
-        <circle cx="60" cy="60" r="50" fill="#4CAF50" opacity="0.1"/>
-        <path d="M60 30C43.43 30 30 43.43 30 60C30 76.57 43.43 90 60 90C76.57 90 90 76.57 90 60C90 43.43 76.57 30 60 30ZM55 75L35 55L40.41 49.59L55 64.17L79.59 39.58L85 45L55 75Z" fill="#4CAF50"/>
-      </svg>
+  <div id="stateLoggedOut" class="state-container hidden">
+    <!-- Header with Logo -->
+    <div class="header">
+      <div class="logo-container">
+        <div class="logo-icon">🧹</div>
+        <span class="logo-text">ISweep</span>
+      </div>
     </div>
-    <h2 class="title">Sign in to Enable ISweep</h2>
-    <button id="login-btn" class="primary-btn">Log in with Email</button>
-    <a href="#" id="create-account-link" class="link">Create an account</a>
+
+    <!-- Main Content -->
+    <div class="content">
+      <h1 class="title">Sign in to Enable ISweep</h1>
+      <p class="subtitle">Login to enable safe content filtering.</p>
+      
+      <!-- Primary Action -->
+      <button id="btnLogin" class="btn btn-primary">Log in with Email</button>
+      
+      <!-- Secondary Link -->
+      <div class="secondary-links">
+        <a href="#" id="linkCreateAccount" class="link-secondary">No account? Create one here.</a>
+      </div>
+
+      <!-- Quick Email Login (Dev Mode) -->
+      <div id="quickLoginForm" class="quick-login hidden">
+        <input type="email" id="emailInput" placeholder="Enter your email" class="email-input">
+        <button id="btnQuickLogin" class="btn btn-secondary">Sign In</button>
+        <button id="btnCancelQuickLogin" class="btn-link">Cancel</button>
+      </div>
+    </div>
+
+    <!-- Footer -->
+    <div class="footer">
+      <span>© 2025 ISweep Inc.</span>
+    </div>
   </div>
 
   <!-- Logged In State -->
-  <div id="logged-in-view" class="view hidden">
+  <div id="stateLoggedIn" class="state-container hidden">
+    <!-- Header with Logo and Avatar -->
     <div class="header">
-      <div class="logo-small-container">
-        <svg class="logo-small" width="32" height="32" viewBox="0 0 120 120" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <circle cx="60" cy="60" r="50" fill="#4CAF50" opacity="0.1"/>
-          <path d="M60 30C43.43 30 30 43.43 30 60C30 76.57 43.43 90 60 90C76.57 90 90 76.57 90 60C90 43.43 76.57 30 60 30ZM55 75L35 55L40.41 49.59L55 64.17L79.59 39.58L85 45L55 75Z" fill="#4CAF50"/>
-        </svg>
+      <div class="logo-container">
+        <div class="logo-icon">🧹</div>
+        <span class="logo-text">ISweep</span>
       </div>
-      <h3 class="welcome">Welcome to ISweep</h3>
+      <div class="avatar-circle" id="userAvatar">
+        <span id="userInitials">--</span>
+      </div>
     </div>
 
-    <div class="status-container">
-      <div id="status-indicator" class="status active">
-        <span class="status-dot"></span>
-        <span id="status-text">ISweep Active</span>
+    <!-- Main Content -->
+    <div class="content">
+      <h2 class="greeting">Welcome back, <span id="userName">User</span>!</h2>
+      
+      <!-- Status Indicator -->
+      <div class="status-container">
+        <span class="status-dot" id="statusDot"></span>
+        <span class="status-text" id="statusText">ISweep is Active</span>
       </div>
-      <button id="toggle-status-btn" class="toggle-btn">Toggle</button>
+
+      <!-- Primary Action -->
+      <button id="btnOpenSettings" class="btn btn-primary">Open Settings →</button>
+      
+      <!-- Secondary Links -->
+      <div class="secondary-links-row">
+        <a href="#" id="linkResetFilters" class="link-secondary">Reset Filters</a>
+        <span class="link-divider">|</span>
+        <a href="#" id="linkManageAccount" class="link-secondary">Manage Account</a>
+        <span class="link-divider">|</span>
+        <a href="#" id="linkLogout" class="link-secondary">Log Out</a>
+      </div>
     </div>
 
-    <button id="settings-btn" class="primary-btn">Open Settings →</button>
-
-    <div class="links-container">
-      <a href="#" id="reset-filters-link" class="link">Reset Filters</a>
-      <a href="#" id="manage-account-link" class="link">Manage Account</a>
-      <a href="#" id="logout-link" class="link logout-link">Log Out</a>
+    <!-- Footer -->
+    <div class="footer">
+      <span>© 2025 ISweep Inc.</span>
     </div>
   </div>
 

@@ -1,24 +1,6 @@
 # ISweep Chrome Extension
 
-Smart, customizable content filtering for a safer and more controlled browsing experience.
-
-ISweep gives users the ability to manage filtering preferences, control active/paused states, and seamlessly connect to their ISweep web dashboard — all directly from the Chrome toolbar.
-
----
-
-## Overview
-
-The ISweep Chrome Extension provides:
-
-• Two-state popup interface (Logged Out / Logged In)  
-• Secure local authentication using Chrome storage  
-• Active / Paused filtering control  
-• Toolbar icon state indicators  
-• Direct integration with the ISweep web application  
-
-Built using Chrome Extension Manifest v3.
-
----
+Safe content filtering for a better browsing experience.
 
 ## Features
 

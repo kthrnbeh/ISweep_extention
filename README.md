@@ -2,162 +2,136 @@
 
 Safe content filtering for a better browsing experience.
 
-## 🚀 Quick Start
+## Features
 
-### Installation
+- **Two-State Popup UI**: Clean login and logged-in states
+- **User Authentication**: Local storage-based auth with email login
+- **Enabled/Paused Status**: Visual indicators for filtering state
+- **Web Settings Integration**: Direct links to ISweep web app settings
+- **Icon State Management**: Dynamic icon changes based on enabled state
 
-1. **Load the Extension in Chrome:**
-   ```bash
-   # Navigate to chrome://extensions/
-   # Enable "Developer mode"
-   # Click "Load unpacked"
-   # Select the isweep-chrome-extension/ folder
-   ```
+## Installation
 
-2. **Configure Frontend URL:**
-   - Open `isweep-chrome-extension/popup.js`
-   - Update `WEB_BASE_URL` to point to your ISweep frontend:
-     - Development: `http://127.0.0.1:5500` (or your local dev server)
-     - Production: `https://your-frontend-domain.com`
+1. Open Chrome and navigate to `chrome://extensions/`
+2. Enable "Developer mode" (toggle in top right)
+3. Click "Load unpacked"
+4. Select the repository root folder (`ISweep_extention/`)
 
-3. **Test the Extension:**
-   - Click the ISweep icon in Chrome toolbar
-   - Follow the testing guide in `TESTING.md`
+## Development Setup
 
-## 📚 Documentation
+### Web App Base URL
 
-- **[Extension README](isweep-chrome-extension/README.md)** - Extension-specific documentation
-- **[Testing Guide](TESTING.md)** - Comprehensive manual testing procedures
-- **[Implementation Summary](IMPLEMENTATION_SUMMARY.md)** - Detailed implementation overview
-- **[UI Preview](UI_PREVIEW.md)** - Visual representation of UI states
+The extension is configured to connect to the ISweep web app at:
+- **Development**: `http://127.0.0.1:5500/docs`
 
-## ✨ Features
+To change the base URL, edit `WEB_BASE_URL` in `popup.js`.
 
-### Two-State Popup UI
-- **Logged Out State:** Clean login interface with email authentication
-- **Logged In State:** User dashboard with status indicators and quick actions
+### Testing the Extension
 
-### User Authentication
-- Local storage-based authentication (`chrome.storage.local`)
-- Quick email login for development
-- Web app integration for production login
+1. Load the extension in Chrome (see Installation above)
+2. Click the ISweep icon in the toolbar to open the popup
+3. **Logged Out State**: Click "Log in with Email"
+   - Option 1: Opens web app login page in new tab
+   - Option 2: Use quick login form (dev mode) - enter any email
+4. **Logged In State**: After login, you'll see:
+   - Welcome message with your name
+   - Active/Paused status indicator
+   - "Open Settings" button → opens web Settings page
+   - Secondary links: Reset Filters, Manage Account, Log Out
 
-### Status Management
-- Visual indicators for active/paused filtering
-- Dynamic icon changes based on enabled state
-- Persistent state across browser sessions
+### Manual Test Checklist
 
-### Web App Integration
-- Direct links to ISweep Settings page
-- Account management integration
-- Filter reset functionality
+- [ ] Popup shows login state on first open
+- [ ] "Log in with Email" opens web app Account page
+- [ ] Quick login form accepts email and logs in
+- [ ] Logged in state shows user name and initials
+- [ ] Status shows "ISweep is Active" with green dot
+- [ ] "Open Settings" opens `http://127.0.0.1:5500/docs/Settings.html`
+- [ ] "Reset Filters" opens Settings page with #filters anchor
+- [ ] "Manage Account" opens Account page
+- [ ] "Log Out" clears auth and returns to login state
+- [ ] Icon badge updates based on enabled state
+- [ ] State persists across popup close/reopen
+- [ ] State persists across browser restart
 
-## 📁 Project Structure
+## File Structure
 
 ```
 ISweep_extention/
-├── isweep-chrome-extension/    # Main extension folder
-│   ├── manifest.json           # Chrome Extension v3 manifest
-│   ├── popup.html              # Popup UI (logged out/in states)
-│   ├── popup.css               # Professional styling
-│   ├── popup.js                # State management & logic
-│   ├── background.js           # Service worker for icon mgmt
-│   ├── plumbing.js             # Content script for filtering
-│   ├── options.html/js         # Options page (placeholder)
-│   ├── icons/                  # Extension icons
-│   └── README.md               # Extension documentation
-├── TESTING.md                  # Testing guide (15+ test cases)
-├── IMPLEMENTATION_SUMMARY.md   # Detailed implementation docs
-├── UI_PREVIEW.md               # UI mockups and previews
-└── README.md                   # This file
+├── manifest.json          # Extension manifest (Chrome Extension v3)
+├── popup.html            # Popup UI with two states
+├── popup.css             # Styling matching ISweep web aesthetic
+├── popup.js              # Popup logic and event handlers
+├── background.js         # Service worker for icon management
+├── plumbing.js           # Content script for page filtering
+├── options.html          # Options page (placeholder)
+├── options.js            # Options logic (placeholder)
+├── icons/                # Extension icons (enabled/disabled states)
+│   ├── icon-16.png
+│   ├── icon-48.png
+│   ├── icon-128.png
+│   ├── icon-disabled-16.png
+│   ├── icon-disabled-48.png
+│   └── icon-disabled-128.png
+├── CONFIG.md             # Configuration guide
+├── TESTING.md            # Testing guide
+└── README.md             # This file
 ```
 
-**Note:** Frontend web pages (Settings, Account, etc.) are maintained in a separate repository: `ISweep_frontend`
+## Storage Schema
 
-## 🎯 Key Requirements Met
+The extension uses `chrome.storage.local` for data persistence:
 
-✅ Minimal two-state popup (Logged Out / Logged In)  
-✅ Styling matches ISweep Settings page aesthetic  
-✅ Authentication with chrome.storage.local  
-✅ Web Settings integration with direct links  
-✅ Enabled/Paused state management  
-✅ Icon state switching (ON/OFF)  
-✅ Well-commented, production-ready code  
-✅ Comprehensive testing documentation  
-
-## 🧪 Testing
-
-The extension includes a comprehensive testing guide with 15+ manual test cases covering:
-
-- Login/logout flows
-- State persistence
-- Web app integration
-- Icon state management
-- Content script functionality
-- Error handling
-
-See **[TESTING.md](TESTING.md)** for detailed test procedures.
-
-## 🔧 Development
-
-### Prerequisites
-- Google Chrome or Chromium browser
-- ISweep frontend running (from ISweep_frontend repository)
-- Text editor or IDE
-
-### Local Development
-```bash
-# Clone the extension repository
-git clone https://github.com/kthrnbeh/ISweep_extention.git
-cd ISweep_extention
-
-# Clone and run the frontend separately (see ISweep_frontend repository)
-# Example: cd ../ISweep_frontend && python3 -m http.server 5500
-
-# Load extension in Chrome
-# chrome://extensions/ → Enable Developer mode → Load unpacked → Select isweep-chrome-extension/
+### `isweepAuth`
+```javascript
+{
+  email: string,          // User's email address
+  displayName: string,    // Display name (extracted from email)
+  initials: string,       // User initials for avatar
+  loggedInAt: string      // ISO timestamp of login
+}
 ```
 
-### Web App URL Configuration
+### `isweepEnabled`
+```javascript
+boolean  // true = filtering active, false = paused
+```
 
-**Important:** Update `WEB_BASE_URL` in `isweep-chrome-extension/popup.js` to match your frontend deployment:
+## Web App Integration
+
+### Required Web App Pages
+
+The extension links to these pages on the ISweep web app:
+
+- `/Settings.html` - Main settings page
+- `/Settings.html#filters` - Settings page, filters section
+- `/Account.html` - Account management
+- `/Account.html#create` - Account creation
+
+### URL Configuration
+
+All web app URLs are configured via `WEB_BASE_URL` constant in `popup.js`:
 
 ```javascript
-// Development - point to your local frontend dev server
-const WEB_BASE_URL = 'http://127.0.0.1:5500';
+// Development
+const WEB_BASE_URL = 'http://127.0.0.1:5500/docs';
 
-// Production - point to your deployed frontend
+// Production  
 // const WEB_BASE_URL = 'https://isweep.example.com';
 ```
 
-The extension expects the following pages to be available at your frontend URL:
-- `/Settings.html` - Main settings and filter configuration
-- `/Account.html` - User account and authentication
+For production, update this to your production domain.
 
-## 📊 Statistics
+## Future Enhancements
 
-- **Total Files:** 21
-- **Lines of Code:** ~1,100+
-- **Test Cases:** 15+
-- **Documentation Pages:** 5
+- [ ] Implement actual content filtering in `plumbing.js`
+- [ ] Add filter statistics and counters
+- [ ] Implement OAuth or SSO for production login
+- [ ] Add advanced settings in options page
+- [ ] Add whitelist/blacklist management
+- [ ] Implement sync across devices (chrome.storage.sync)
+- [ ] Add notification system for blocked content
 
-## 🔮 Future Enhancements
-
-- OAuth/SSO integration for production
-- Actual content filtering algorithms
-- Statistics dashboard
-- Dark mode support
-- Cross-device sync
-- Custom filter rules
-
-## 📝 License
+## License
 
 © 2025 ISweep Inc.
-
-## 🤝 Contributing
-
-This is a private repository. For contributions, please contact the repository owner.
-
-## 📧 Support
-
-For issues or questions, please create an issue in this repository or contact the development team.

@@ -3,9 +3,9 @@
 
 // Configuration - Web App Base URL
 // IMPORTANT: Update this URL to match your ISweep frontend deployment
-// Development: Use your local frontend dev server (e.g., 'http://127.0.0.1:5500')
+// Development: Use your local frontend dev server (e.g., 'http://127.0.0.1:5500/docs')
 // Production: Use your deployed frontend URL (e.g., 'https://isweep.example.com')
-const WEB_BASE_URL = 'http://127.0.0.1:5500';
+const WEB_BASE_URL = 'http://127.0.0.1:5500/docs';
 
 // Storage Keys
 const STORAGE_KEYS = {

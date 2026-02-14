@@ -12,7 +12,7 @@ The ISweep Chrome Extension requires a connection to the ISweep frontend web app
 
 ```javascript
 // Development Example (local dev server)
-const WEB_BASE_URL = 'http://127.0.0.1:5500';
+const WEB_BASE_URL = 'http://127.0.0.1:5500/docs';
 
 // Production Example (deployed frontend)
 const WEB_BASE_URL = 'https://isweep.example.com';

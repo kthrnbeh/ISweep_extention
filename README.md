@@ -1,137 +1,89 @@
 # ISweep Chrome Extension
 
-Safe content filtering for a better browsing experience.
+Smart, customizable content filtering for a safer and more controlled browsing experience.
+
+ISweep gives users the ability to manage filtering preferences, control active/paused states, and seamlessly connect to their ISweep web dashboard — all directly from the Chrome toolbar.
+
+---
+
+## Overview
+
+The ISweep Chrome Extension provides:
+
+• Two-state popup interface (Logged Out / Logged In)  
+• Secure local authentication using Chrome storage  
+• Active / Paused filtering control  
+• Toolbar icon state indicators  
+• Direct integration with the ISweep web application  
+
+Built using Chrome Extension Manifest v3.
+
+---
 
 ## Features
 
-- **Two-State Popup UI**: Clean login and logged-in states
-- **User Authentication**: Local storage-based auth with email login
-- **Enabled/Paused Status**: Visual indicators for filtering state
-- **Web Settings Integration**: Direct links to ISweep web app settings
-- **Icon State Management**: Dynamic icon changes based on enabled state
+### Secure Authentication
+Users log in through the ISweep web platform. Authentication state is securely stored using `chrome.storage.local` and persists across sessions.
 
-## Installation
+### Active / Paused Control
+Users can enable or pause filtering directly from the popup. The extension icon updates automatically to reflect the current state.
 
-1. Open Chrome and navigate to `chrome://extensions/`
-2. Enable "Developer mode" (toggle in top right)
-3. Click "Load unpacked"
-4. Select the repository root folder (`ISweep_extention/`)
+### Web App Integration
+Quick access links inside the popup:
+• Open Settings  
+• Manage Account  
+• Reset Filters  
+• Log Out  
 
-## Development Setup
+---
 
-### Web App Base URL
+## How It Works
 
-The extension is configured to connect to the ISweep web app at:
-- **Development**: `http://127.0.0.1:5500/docs`
+1. Install the extension from the Chrome Web Store.
+2. Click the ISweep icon in the Chrome toolbar.
+3. Sign in to your ISweep account.
+4. Manage filtering status or open your dashboard.
 
-To change the base URL, edit `WEB_BASE_URL` in `popup.js`.
+The extension communicates with the ISweep web application for account and settings management.
 
-### Testing the Extension
+---
 
-1. Load the extension in Chrome (see Installation above)
-2. Click the ISweep icon in the toolbar to open the popup
-3. **Logged Out State**: Click "Log in with Email"
-   - Option 1: Opens web app login page in new tab
-   - Option 2: Use quick login form (dev mode) - enter any email
-4. **Logged In State**: After login, you'll see:
-   - Welcome message with your name
-   - Active/Paused status indicator
-   - "Open Settings" button → opens web Settings page
-   - Secondary links: Reset Filters, Manage Account, Log Out
+## Permissions Used
 
-### Manual Test Checklist
+This extension uses the following permissions:
 
-- [ ] Popup shows login state on first open
-- [ ] "Log in with Email" opens web app Account page
-- [ ] Quick login form accepts email and logs in
-- [ ] Logged in state shows user name and initials
-- [ ] Status shows "ISweep is Active" with green dot
-- [ ] "Open Settings" opens `http://127.0.0.1:5500/docs/Settings.html`
-- [ ] "Reset Filters" opens Settings page with #filters anchor
-- [ ] "Manage Account" opens Account page
-- [ ] "Log Out" clears auth and returns to login state
-- [ ] Icon badge updates based on enabled state
-- [ ] State persists across popup close/reopen
-- [ ] State persists across browser restart
+• `storage` — to securely store login and filtering state  
+• `activeTab` — to interact with the currently active tab  
+• `scripting` — to inject content scripts for filtering behavior  
+• `host_permissions` — required to apply filtering functionality on supported pages  
 
-## File Structure
+No personal data is sold or shared.
 
-```
-ISweep_extention/
-├── manifest.json          # Extension manifest (Chrome Extension v3)
-├── popup.html            # Popup UI with two states
-├── popup.css             # Styling matching ISweep web aesthetic
-├── popup.js              # Popup logic and event handlers
-├── background.js         # Service worker for icon management
-├── plumbing.js           # Content script for page filtering
-├── options.html          # Options page (placeholder)
-├── options.js            # Options logic (placeholder)
-├── icons/                # Extension icons (enabled/disabled states)
-│   ├── icon-16.png
-│   ├── icon-48.png
-│   ├── icon-128.png
-│   ├── icon-disabled-16.png
-│   ├── icon-disabled-48.png
-│   └── icon-disabled-128.png
-├── CONFIG.md             # Configuration guide
-├── TESTING.md            # Testing guide
-└── README.md             # This file
-```
+---
 
-## Storage Schema
+## Privacy
 
-The extension uses `chrome.storage.local` for data persistence:
+ISweep does not collect or transmit personal browsing data.
 
-### `isweepAuth`
-```javascript
-{
-  email: string,          // User's email address
-  displayName: string,    // Display name (extracted from email)
-  initials: string,       // User initials for avatar
-  loggedInAt: string      // ISO timestamp of login
-}
-```
+Authentication state and filtering preferences are stored locally using Chrome’s storage API.
 
-### `isweepEnabled`
-```javascript
-boolean  // true = filtering active, false = paused
-```
+For full details, please see our Privacy Policy:
+[Insert Privacy Policy URL Here]
 
-## Web App Integration
+---
 
-### Required Web App Pages
+## Support
 
-The extension links to these pages on the ISweep web app:
+For help, questions, or bug reports:
 
-- `/Settings.html` - Main settings page
-- `/Settings.html#filters` - Settings page, filters section
-- `/Account.html` - Account management
-- `/Account.html#create` - Account creation
+• Visit: [Insert Website URL]  
+• Contact: [Insert Support Email]
 
-### URL Configuration
+---
 
-All web app URLs are configured via `WEB_BASE_URL` constant in `popup.js`:
+## Version
 
-```javascript
-// Development
-const WEB_BASE_URL = 'http://127.0.0.1:5500/docs';
+Current Version: 1.0.0  
+Built with Chrome Extension Manifest v3
 
-// Production  
-// const WEB_BASE_URL = 'https://isweep.example.com';
-```
-
-For production, update this to your production domain.
-
-## Future Enhancements
-
-- [ ] Implement actual content filtering in `plumbing.js`
-- [ ] Add filter statistics and counters
-- [ ] Implement OAuth or SSO for production login
-- [ ] Add advanced settings in options page
-- [ ] Add whitelist/blacklist management
-- [ ] Implement sync across devices (chrome.storage.sync)
-- [ ] Add notification system for blocked content
-
-## License
-
-© 2025 ISweep Inc.
+© 2026 ISweep

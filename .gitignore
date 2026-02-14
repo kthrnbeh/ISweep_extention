@@ -1,0 +1,24 @@
+# Chrome extension build artifacts
+*.crx
+*.pem
+
+# macOS
+.DS_Store
+
+# Editor directories and files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+
+# Temporary files
+tmp/
+temp/
+
+# Preview/test files
+preview.html
+test-popup.js

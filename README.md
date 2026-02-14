@@ -1,5 +1,32 @@
 # ISweep Chrome Extension
 
+A Chrome extension for ISweep - Smart content filtering.
+
+## Features
+
+### Logged Out State
+- ISweep logo
+- "Sign in to Enable ISweep" message
+- "Log in with Email" button (opens ISweep login page)
+- "Create an account" link
+
+### Logged In State
+- Welcome message with ISweep logo
+- Active/Paused status indicator (synced with chrome.storage)
+- Toggle button to switch between Active/Paused states
+- "Open Settings →" button (opens ISweep Settings page)
+- Quick access links:
+  - Reset Filters
+  - Manage Account
+  - Log Out
+
+## Installation
+
+1. Clone this repository
+2. Open Chrome and navigate to `chrome://extensions/`
+3. Enable "Developer mode" in the top right corner
+4. Click "Load unpacked"
+5. Select the extension directory
 Safe content filtering for a better browsing experience.
 
 ## Features

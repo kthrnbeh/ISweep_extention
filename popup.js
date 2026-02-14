@@ -182,7 +182,7 @@ async function handleQuickLogin() {
   const email = emailInput.value.trim();
   
   if (!email || !email.includes('@')) {
-    alert('Please enter a valid email address');
+    alert('Please enter an email address containing @');
     return;
   }
   

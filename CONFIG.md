@@ -12,7 +12,7 @@ The ISweep Chrome Extension requires a connection to the ISweep frontend web app
 
 ```javascript
 // Development Example (local dev server)
-const WEB_BASE_URL = 'http://127.0.0.1:5500';
+const WEB_BASE_URL = 'http://127.0.0.1:5500/docs';
 
 // Production Example (deployed frontend)
 const WEB_BASE_URL = 'https://isweep.example.com';
@@ -32,8 +32,10 @@ The extension expects these pages to be available at your frontend URL:
 
 ### Important Notes
 
-- **DO NOT** include `/docs` in the URL path - the extension adds the page paths automatically
-- The frontend repository is maintained separately at: `ISweep_frontend`
+- The `WEB_BASE_URL` includes `/docs` in the path (e.g., `http://127.0.0.1:5500/docs`)
+- The extension appends page paths to this base URL (e.g., `/Settings.html`)
+- Final URLs will be like: `http://127.0.0.1:5500/docs/Settings.html`
+- The frontend repository should have the HTML pages in a `docs` folder or be configured to serve from that path
 - Ensure CORS is properly configured on your frontend if using a different domain
 - For local development, make sure your frontend dev server is running before testing the extension
 

@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ISweep</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <!-- Logged Out State -->
+  <div id="stateLoggedOut" class="state-container hidden">
+    <!-- Header with Logo -->
+    <div class="header">
+      <div class="logo-container">
+        <div class="logo-icon">🧹</div>
+        <span class="logo-text">ISweep</span>
+      </div>
+    </div>
+
+    <!-- Main Content -->
+    <div class="content">
+      <h1 class="title">Sign in to Enable ISweep</h1>
+      <p class="subtitle">Login to enable safe content filtering.</p>
+      
+      <!-- Primary Action -->
+      <button id="btnLogin" class="btn btn-primary">Log in with Email</button>
+      
+      <!-- Secondary Link -->
+      <div class="secondary-links">
+        <a href="#" id="linkCreateAccount" class="link-secondary">No account? Create one here.</a>
+      </div>
+
+      <!-- Quick Email Login (Dev Mode) -->
+      <div id="quickLoginForm" class="quick-login hidden">
+        <input type="email" id="emailInput" placeholder="Enter your email" class="email-input">
+        <button id="btnQuickLogin" class="btn btn-secondary">Sign In</button>
+        <button id="btnCancelQuickLogin" class="btn-link">Cancel</button>
+      </div>
+    </div>
+
+    <!-- Footer -->
+    <div class="footer">
+      <span>© 2025 ISweep Inc.</span>
+    </div>
+  </div>
+
+  <!-- Logged In State -->
+  <div id="stateLoggedIn" class="state-container hidden">
+    <!-- Header with Logo and Avatar -->
+    <div class="header">
+      <div class="logo-container">
+        <div class="logo-icon">🧹</div>
+        <span class="logo-text">ISweep</span>
+      </div>
+      <div class="avatar-circle" id="userAvatar">
+        <span id="userInitials">--</span>
+      </div>
+    </div>
+
+    <!-- Main Content -->
+    <div class="content">
+      <h2 class="greeting">Welcome back, <span id="userName">User</span>!</h2>
+      
+      <!-- Status Indicator -->
+      <div class="status-container">
+        <span class="status-dot" id="statusDot"></span>
+        <span class="status-text" id="statusText">ISweep is Active</span>
+      </div>
+
+      <!-- Primary Action -->
+      <button id="btnOpenSettings" class="btn btn-primary">Open Settings →</button>
+      
+      <!-- Secondary Links -->
+      <div class="secondary-links-row">
+        <a href="#" id="linkResetFilters" class="link-secondary">Reset Filters</a>
+        <span class="link-divider">|</span>
+        <a href="#" id="linkManageAccount" class="link-secondary">Manage Account</a>
+        <span class="link-divider">|</span>
+        <a href="#" id="linkLogout" class="link-secondary">Log Out</a>
+      </div>
+    </div>
+
+    <!-- Footer -->
+    <div class="footer">
+      <span>© 2025 ISweep Inc.</span>
+    </div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

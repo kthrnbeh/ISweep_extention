@@ -22,9 +22,20 @@
 </head>
 <body>
   <h1>🧹 ISweep Options</h1>
-  <p>Advanced settings and configuration will be available here.</p>
-  <p>For now, please use the popup or visit the ISweep Settings page (configure URL in popup.js).</p>
-  
+  <p>Configure your backend URL for local development.</p>
+
+  <form id="backendForm" style="display:flex; flex-direction:column; gap:10px; margin-top:16px;">
+    <label>
+      Backend URL
+      <input type="text" id="backendUrl" placeholder="http://127.0.0.1:5000" style="width:100%; padding:8px;" />
+    </label>
+    <div style="display:flex; gap:10px;">
+      <button type="submit">Save</button>
+      <button type="button" id="testBackend">Test Connection</button>
+    </div>
+    <p id="backendStatus" style="color:#6b7280;"></p>
+  </form>
+
   <script src="options.js"></script>
 </body>
 </html>

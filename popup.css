@@ -2,17 +2,17 @@
 
 /* CSS Variables for easy theming */
 :root {
-  --color-primary: #14b8a6; /* Teal/green primary */
-  --color-primary-hover: #0d9488;
-  --color-primary-active: #0f766e;
+  --color-primary: #30C3D9; /* Logo cyan */
+  --color-primary-hover: #22A9C2;
+  --color-primary-active: #1D94AA;
   --color-text-primary: #1f2937;
   --color-text-secondary: #6b7280;
   --color-text-light: #9ca3af;
   --color-bg-main: #ffffff;
-  --color-bg-secondary: #f9fafb;
+  --color-bg-secondary: #E5F7FB;
   --color-border: #e5e7eb;
   --color-shadow: rgba(0, 0, 0, 0.1);
-  --color-success: #10b981;
+  --color-success: #30C3D9;
   --color-paused: #6b7280;
   --border-radius: 12px;
   --border-radius-small: 8px;
@@ -142,7 +142,7 @@ body {
   height: 10px;
   border-radius: 50%;
   background: var(--color-success);
-  box-shadow: 0 0 0 2px rgba(16, 185, 129, 0.2);
+  box-shadow: 0 0 0 2px rgba(48, 195, 217, 0.2);
 }
 
 .status-dot.paused {
@@ -170,19 +170,19 @@ body {
 }
 
 .btn-primary {
-  background: var(--color-primary);
+  background: linear-gradient(135deg, #30C3D9, #22A9C2);
   color: white;
   box-shadow: 0 2px 4px var(--color-shadow);
 }
 
 .btn-primary:hover {
-  background: var(--color-primary-hover);
+  background: linear-gradient(135deg, #22A9C2, #30C3D9);
   box-shadow: 0 4px 6px var(--color-shadow);
   transform: translateY(-1px);
 }
 
 .btn-primary:active {
-  background: var(--color-primary-active);
+  background: #1D94AA;
   transform: translateY(0);
 }
 
@@ -271,7 +271,7 @@ body {
 .email-input:focus {
   outline: none;
   border-color: var(--color-primary);
-  box-shadow: 0 0 0 3px rgba(20, 184, 166, 0.1);
+  box-shadow: 0 0 0 3px rgba(48, 195, 217, 0.12);
 }
 
 /* Footer */

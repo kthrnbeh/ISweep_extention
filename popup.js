@@ -1,17 +1,47 @@
 // ISweep Chrome Extension - Popup Controller
 // Handles UI state, authentication flow, and user interactions
+// IMPORTANT:
+// chrome.runtime.sendMessage only works inside the extension context.
+// Do NOT test runtime messaging from normal webpage DevTools. Use the extension service worker console instead.
 
 // Configuration - Web App Base URL
-// IMPORTANT: Update this URL to match your ISweep frontend deployment
-// Development: Use your local frontend dev server (e.g., 'http://127.0.0.1:5500/docs')
-// Production: Use your deployed frontend URL (e.g., 'https://isweep.example.com')
-const WEB_BASE_URL = 'http://127.0.0.1:5500/docs';
+// Default to public GitHub Pages; allow override via stored setting for local dev.
+const DEFAULT_FRONTEND_BASE = 'https://kthrnbeh.github.io/ISweep';
 
 // Storage Keys
 const STORAGE_KEYS = {
   AUTH: 'isweepAuth',
-  ENABLED: 'isweepEnabled'
+  ENABLED: 'isweepEnabled',
+  TOKEN: 'isweepToken',
+  USER_ID: 'isweepUserId',
+  PREFS: 'isweepPreferences',
+  BACKEND_URL: 'isweepBackendUrl',
+  FRONTEND_URL: 'isweepFrontendUrl'
 };
+
+// Shared token key used by the site and the bridge content script.
+const TOKEN_KEY = 'isweep_auth_token';
+
+const LOG_PREFIX = '[ISWEEP][POPUP]';
+
+async function getBackendUrl() {
+  const store = await chrome.storage.local.get([STORAGE_KEYS.BACKEND_URL]);
+  return store[STORAGE_KEYS.BACKEND_URL] || 'http://127.0.0.1:5000';
+}
+
+async function getFrontendBaseUrl() {
+  const store = await chrome.storage.local.get([STORAGE_KEYS.FRONTEND_URL]);
+  const base = store[STORAGE_KEYS.FRONTEND_URL] || DEFAULT_FRONTEND_BASE;
+  return base.replace(/\/+$/, '');
+}
+
+async function saveAuthSession({ authData }) {
+  const payload = {
+    [STORAGE_KEYS.AUTH]: authData,
+    [STORAGE_KEYS.ENABLED]: true,
+  };
+  await chrome.storage.local.set(payload);
+}
 
 // DOM Elements - Logged Out State
 const stateLoggedOut = document.getElementById('stateLoggedOut');
@@ -19,6 +49,7 @@ const btnLogin = document.getElementById('btnLogin');
 const linkCreateAccount = document.getElementById('linkCreateAccount');
 const quickLoginForm = document.getElementById('quickLoginForm');
 const emailInput = document.getElementById('emailInput');
+const passwordInput = document.getElementById('passwordInput');
 const btnQuickLogin = document.getElementById('btnQuickLogin');
 const btnCancelQuickLogin = document.getElementById('btnCancelQuickLogin');
 
@@ -30,9 +61,11 @@ const userName = document.getElementById('userName');
 const statusDot = document.getElementById('statusDot');
 const statusText = document.getElementById('statusText');
 const btnOpenSettings = document.getElementById('btnOpenSettings');
+const btnSyncPrefs = document.getElementById('btnSyncPrefs');
 const linkResetFilters = document.getElementById('linkResetFilters');
 const linkManageAccount = document.getElementById('linkManageAccount');
 const linkLogout = document.getElementById('linkLogout');
+const signedInStatus = document.getElementById('signedInStatus');
 
 /**
  * Initialize popup on load
@@ -40,23 +73,38 @@ const linkLogout = document.getElementById('linkLogout');
  * Renders the appropriate UI state
  */
 document.addEventListener('DOMContentLoaded', async () => {
-  console.log('[ISweep Popup] Initializing...');
+  console.log(LOG_PREFIX, 'initializing...');
   
   try {
     // Load stored data from chrome.storage.local
-    const result = await chrome.storage.local.get([STORAGE_KEYS.AUTH, STORAGE_KEYS.ENABLED]);
+    const result = await chrome.storage.local.get([
+      STORAGE_KEYS.AUTH,
+      STORAGE_KEYS.ENABLED,
+      STORAGE_KEYS.TOKEN,
+      STORAGE_KEYS.USER_ID,
+      STORAGE_KEYS.PREFS,
+    ]);
     
-    const authData = result[STORAGE_KEYS.AUTH];
+    let authData = result[STORAGE_KEYS.AUTH];
+    const hasToken = Boolean(result[STORAGE_KEYS.TOKEN]);
     const isEnabled = result[STORAGE_KEYS.ENABLED] !== false; // Default to true if not set
     
-    console.log('[ISweep Popup] Auth data:', authData ? 'Present' : 'None');
-    console.log('[ISweep Popup] Enabled state:', isEnabled);
+    console.log(LOG_PREFIX, 'Auth data:', authData ? 'Present' : 'None', 'token:', hasToken);
+    console.log(LOG_PREFIX, 'Enabled state:', isEnabled);
+
+    // Fallback: if token exists but authData missing, synthesize a minimal auth record so UI shows logged-in.
+    if (!authData && hasToken) {
+      authData = { email: '(signed in)', displayName: 'ISweep user', initials: '--', loggedInAt: new Date().toISOString() };
+    }
     
-    if (authData && authData.email) {
-      // User is logged in - show logged in state
+    if (authData && (authData.email || hasToken)) {
       renderLoggedInState(authData, isEnabled);
+      // Reflect cached prefs status for clarity.
+      if (signedInStatus) {
+        const prefs = result[STORAGE_KEYS.PREFS];
+        signedInStatus.textContent = prefs ? 'Signed in. Preferences cached.' : 'Signed in. No preferences cached yet.';
+      }
     } else {
-      // User is logged out - show login state
       renderLoggedOutState();
     }
     
@@ -64,7 +112,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     setupEventListeners();
     
   } catch (error) {
-    console.error('[ISweep Popup] Error initializing:', error);
+    console.error(LOG_PREFIX, 'Error initializing:', error);
     renderLoggedOutState(); // Fallback to logged out state
   }
 });
@@ -73,7 +121,7 @@ document.addEventListener('DOMContentLoaded', async () => {
  * Render the Logged Out state
  */
 function renderLoggedOutState() {
-  console.log('[ISweep Popup] Rendering logged out state');
+  console.log(LOG_PREFIX, 'rendering logged out state');
   stateLoggedOut.classList.remove('hidden');
   stateLoggedIn.classList.add('hidden');
 }
@@ -84,15 +132,14 @@ function renderLoggedOutState() {
  * @param {boolean} isEnabled - Whether ISweep filtering is enabled
  */
 function renderLoggedInState(authData, isEnabled) {
-  console.log('[ISweep Popup] Rendering logged in state');
+  console.log(LOG_PREFIX, 'rendering logged in state');
   
   // Update user display name
   const displayName = authData.displayName || authData.email.split('@')[0];
   userName.textContent = displayName;
   
   // Update avatar initials
-  const initials = authData.initials || getInitials(displayName);
-  userInitials.textContent = initials;
+  userInitials.textContent = 'KA';
   
   // Update status based on enabled state
   if (isEnabled) {
@@ -102,6 +149,7 @@ function renderLoggedInState(authData, isEnabled) {
     statusDot.classList.add('paused');
     statusText.textContent = 'ISweep is Paused';
   }
+  if (signedInStatus) signedInStatus.textContent = 'Signed in.';
   
   // Show logged in state, hide logged out state
   stateLoggedIn.classList.remove('hidden');
@@ -136,6 +184,9 @@ function setupEventListeners() {
   
   // Logged In State Events
   btnOpenSettings.addEventListener('click', handleOpenSettings);
+  if (btnSyncPrefs) {
+    btnSyncPrefs.addEventListener('click', handleSyncPrefs);
+  }
   linkResetFilters.addEventListener('click', handleResetFilters);
   linkManageAccount.addEventListener('click', handleManageAccount);
   linkLogout.addEventListener('click', handleLogout);
@@ -146,6 +197,59 @@ function setupEventListeners() {
       handleQuickLogin();
     }
   });
+  if (passwordInput) {
+    passwordInput.addEventListener('keypress', (e) => {
+      if (e.key === 'Enter') {
+        handleQuickLogin();
+      }
+    });
+  }
+}
+
+async function handleSyncPrefs(e) {
+  if (e) e.preventDefault();
+  console.log(LOG_PREFIX, 'prefs sync start');
+  try {
+    // Ask the active tab (site) to push its token into extension storage.
+    const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (activeTab?.id) {
+      try {
+        await chrome.tabs.sendMessage(activeTab.id, { type: 'ISWEEP_PULL_TOKEN' });
+      } catch (_) {
+        // ignore; fallback to whatever is already in storage
+      }
+    }
+
+    // Pull token from storage using unified key, fallback to legacy key.
+    const store = await chrome.storage.local.get([TOKEN_KEY, STORAGE_KEYS.TOKEN]);
+    const token = store[TOKEN_KEY] || store[STORAGE_KEYS.TOKEN];
+
+    if (!token) {
+      console.warn(LOG_PREFIX, 'prefs sync failed', 'missing token');
+      alert('Sync failed. Please sign in on the ISweep site, then try again.');
+      return;
+    }
+
+    // Keep legacy key populated for background fetch logic.
+    await chrome.storage.local.set({ [STORAGE_KEYS.TOKEN]: token });
+
+    const res = await chrome.runtime
+      .sendMessage({ type: 'isweep_sync_prefs' })
+      .catch((err) => {
+        console.error(LOG_PREFIX, 'Runtime message failed:', err);
+        return { ok: false, error: 'background not available' };
+      });
+    if (!res || !res.ok) {
+      console.warn(LOG_PREFIX, 'prefs sync failed', res?.error || 'unknown');
+      alert('Sync failed. Are you logged in?');
+      return;
+    }
+    console.log(LOG_PREFIX, 'prefs sync success', res.status || '');
+    alert('Preferences synced.');
+  } catch (err) {
+    console.error(LOG_PREFIX, 'prefs sync failed', err);
+    alert('Sync failed.');
+  }
 }
 
 /**
@@ -154,12 +258,9 @@ function setupEventListeners() {
  */
 function handleLoginClick(e) {
   e.preventDefault();
-  console.log('[ISweep Popup] Login button clicked');
-  
-  // Open web app login/account page in new tab
-  chrome.tabs.create({ url: `${WEB_BASE_URL}/Account.html` });
-  
-  // Also show quick login form for development
+  console.log(LOG_PREFIX, 'login button clicked');
+
+  // Show quick login form inside popup
   quickLoginForm.classList.remove('hidden');
   emailInput.focus();
 }
@@ -170,7 +271,7 @@ function handleLoginClick(e) {
  */
 function handleCreateAccountClick(e) {
   e.preventDefault();
-  console.log('[ISweep Popup] Create account link clicked');
+  console.log(LOG_PREFIX, 'create account link clicked');
   chrome.tabs.create({ url: `${WEB_BASE_URL}/Account.html#create` });
 }
 
@@ -180,45 +281,58 @@ function handleCreateAccountClick(e) {
  */
 async function handleQuickLogin() {
   const email = emailInput.value.trim();
-  
-  if (!email || !email.includes('@')) {
-    alert('Please enter an email address containing @');
+  const password = (passwordInput?.value || '').trim();
+
+  if (!email || !email.includes('@') || !password) {
+    alert('Please enter email and password.');
     return;
   }
-  
-  console.log('[ISweep Popup] Quick login for:', email);
-  
-  // Extract display name from email
-  const displayName = email.split('@')[0];
-  const initials = getInitials(displayName);
-  
-  // Create auth data object
-  const authData = {
-    email: email,
-    displayName: displayName,
-    initials: initials,
-    loggedInAt: new Date().toISOString()
-  };
-  
+
+  console.log(LOG_PREFIX, 'login start');
+
   try {
-    // Save to chrome.storage.local
-    await chrome.storage.local.set({
-      [STORAGE_KEYS.AUTH]: authData,
-      [STORAGE_KEYS.ENABLED]: true // Enable filtering on login
-    });
-    
-    console.log('[ISweep Popup] Auth data saved successfully');
-    
-    // Render logged in state
+    const response = await chrome.runtime
+      .sendMessage({
+        type: 'isweep_login',
+        email,
+        password,
+      })
+      .catch((err) => {
+        console.error(LOG_PREFIX, 'Runtime message failed:', err);
+        return { ok: false, error: 'background not available' };
+      });
+    if (!response || !response.ok) {
+      console.warn(LOG_PREFIX, 'login failed', response?.error || 'unknown');
+      alert('Login failed. Please check your credentials and backend URL.');
+      return;
+    }
+    console.log(LOG_PREFIX, 'login success', response.status || '');
+
+    const displayName = email.split('@')[0];
+    const initials = getInitials(displayName);
+    const authData = {
+      email,
+      displayName,
+      initials,
+      loggedInAt: new Date().toISOString(),
+    };
+
+    await saveAuthSession({ authData });
+    // Reflect prefs presence after background login
+    const store = await chrome.storage.local.get([STORAGE_KEYS.PREFS]);
+    if (signedInStatus) {
+      signedInStatus.textContent = store[STORAGE_KEYS.PREFS]
+        ? 'Signed in. Preferences cached.'
+        : 'Signed in. No preferences cached yet (open Filters and Save).';
+    }
     renderLoggedInState(authData, true);
-    
-    // Hide quick login form
+
     quickLoginForm.classList.add('hidden');
     emailInput.value = '';
-    
+    if (passwordInput) passwordInput.value = '';
   } catch (error) {
-    console.error('[ISweep Popup] Error saving auth data:', error);
-    alert('Failed to save login information. Please try again.');
+    console.error(LOG_PREFIX, 'login failed', error);
+    alert('Login failed. Please check your credentials and backend URL.');
   }
 }
 
@@ -232,33 +346,36 @@ function handleCancelQuickLogin(e) {
 }
 
 /**
- * Handle "Open Settings" button click
- * Opens ISweep Settings page in new tab
+ * Handle "Open Filters" button click
+ * Opens ISweep Filters page in new tab
  */
-function handleOpenSettings(e) {
+async function handleOpenSettings(e) {
   e.preventDefault();
-  console.log('[ISweep Popup] Opening Settings page');
-  chrome.tabs.create({ url: `${WEB_BASE_URL}/Settings.html` });
+  console.log(LOG_PREFIX, 'opening Filters page');
+  const base = await getFrontendBaseUrl();
+  chrome.tabs.create({ url: `${base}/Filter.html` });
 }
 
 /**
  * Handle "Reset Filters" link click
- * Opens Settings page with filters section anchor
+ * Opens Filters page with filters section anchor
  */
-function handleResetFilters(e) {
+async function handleResetFilters(e) {
   e.preventDefault();
-  console.log('[ISweep Popup] Opening Reset Filters');
-  chrome.tabs.create({ url: `${WEB_BASE_URL}/Settings.html#filters` });
+  console.log(LOG_PREFIX, 'opening Reset Filters');
+  const base = await getFrontendBaseUrl();
+  chrome.tabs.create({ url: `${base}/Filter.html#filters` });
 }
 
 /**
  * Handle "Manage Account" link click
  * Opens Account page
  */
-function handleManageAccount(e) {
+async function handleManageAccount(e) {
   e.preventDefault();
-  console.log('[ISweep Popup] Opening Manage Account');
-  chrome.tabs.create({ url: `${WEB_BASE_URL}/Account.html` });
+  console.log(LOG_PREFIX, 'opening Manage Account');
+  const base = await getFrontendBaseUrl();
+  chrome.tabs.create({ url: `${base}/Account.html` });
 }
 
 /**
@@ -267,11 +384,16 @@ function handleManageAccount(e) {
  */
 async function handleLogout(e) {
   e.preventDefault();
-  console.log('[ISweep Popup] Logging out');
+  console.log(LOG_PREFIX, 'logging out');
   
   try {
     // Remove auth data from storage
-    await chrome.storage.local.remove(STORAGE_KEYS.AUTH);
+    await chrome.storage.local.remove([
+      STORAGE_KEYS.AUTH,
+      STORAGE_KEYS.TOKEN,
+      STORAGE_KEYS.USER_ID,
+      STORAGE_KEYS.PREFS,
+    ]);
     
     console.log('[ISweep Popup] Logged out successfully');
     

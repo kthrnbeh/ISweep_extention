@@ -33,6 +33,7 @@
       <!-- Quick Email Login (Dev Mode) -->
       <div id="quickLoginForm" class="quick-login hidden">
         <input type="email" id="emailInput" placeholder="Enter your email" class="email-input">
+        <input type="password" id="passwordInput" placeholder="Enter your password" class="email-input">
         <button id="btnQuickLogin" class="btn btn-secondary">Sign In</button>
         <button id="btnCancelQuickLogin" class="btn-link">Cancel</button>
       </div>
@@ -53,13 +54,14 @@
         <span class="logo-text">ISweep</span>
       </div>
       <div class="avatar-circle" id="userAvatar">
-        <span id="userInitials">--</span>
+        <span id="userInitials">KB</span>
       </div>
     </div>
 
     <!-- Main Content -->
     <div class="content">
       <h2 class="greeting">Welcome back, <span id="userName">User</span>!</h2>
+      <p id="signedInStatus" class="subtitle">Signed in.</p>
       
       <!-- Status Indicator -->
       <div class="status-container">
@@ -68,7 +70,8 @@
       </div>
 
       <!-- Primary Action -->
-      <button id="btnOpenSettings" class="btn btn-primary">Open Settings →</button>
+      <button id="btnOpenSettings" class="btn btn-primary">Open Filters →</button>
+      <button id="btnSyncPrefs" class="btn btn-secondary" style="margin-top:8px;">Sync Preferences</button>
       
       <!-- Secondary Links -->
       <div class="secondary-links-row">

@@ -1,71 +1,37 @@
-# ISweep Chrome Extension
+# ISweep Chrome Extension (dev)
 
-Safe content filtering for a better browsing experience.
+Wires the browser to the ISweep backend: signs in, syncs preferences, and applies decisions (mute/skip/fast_forward) while you watch YouTube captions.
 
-## Features
+## How to run locally
+1) Open Chrome → `chrome://extensions` → toggle **Developer mode**.
+2) Click **Load unpacked** and select the `ISweep_extention/` folder.
+3) Open the extension **Options** page:
+   - Set Backend URL (default `http://127.0.0.1:5000`).
+   - Use **Test Connection** to verify `/health`.
+4) Click the toolbar icon → **Log in with Email**:
+   - Enter the same email/password created via the frontend/backend.
+   - On success we store `isweepToken` + `isweepUserId` in `chrome.storage.local`.
+5) (Optional) Open Settings or Account links to the frontend at `http://127.0.0.1:5500/ISweep_frontend/docs/`.
 
-### Secure Authentication
-Users log in through the ISweep web platform. Authentication state is securely stored using `chrome.storage.local` and persists across sessions.
+## YouTube testing flow
+- Open any YouTube video with captions on (`*://*.youtube.com/watch*`).
+- The content script `youtube_captions.js` watches caption text and sends it to the background.
+- Background posts to `/event` with Bearer token and returns a decision.
+- Actions applied to the `<video>` element:
+  - `mute`: mute temporarily, then restore.
+  - `skip`: `currentTime += duration_seconds`.
+  - `fast_forward`: set `playbackRate = 2x`, then restore.
+- Watch DevTools console for `[ISWEEP]` logs (content + background).
 
-### Active / Paused Control
-Users can enable or pause filtering directly from the popup. The extension icon updates automatically to reflect the current state.
+## Storage keys (chrome.storage.local)
+- `isweepToken`, `isweepUserId`: auth session for backend calls.
+- `isweepBackendUrl`: configured backend base URL.
+- `isweepPreferences`: last downloaded preferences (fallback).
+- `isweepEnabled`: toggle for icon state.
 
-### Web App Integration
-Quick access links inside the popup:
-• Open Settings  
-• Manage Account  
-• Reset Filters  
-• Log Out  
+## Permissions
+- `storage`, `activeTab`, `tabs`, `scripting` + host permissions for backend URLs and YouTube captions.
 
----
-
-## How It Works
-
-1. Install the extension from the Chrome Web Store.
-2. Click the ISweep icon in the Chrome toolbar.
-3. Sign in to your ISweep account.
-4. Manage filtering status or open your dashboard.
-
-The extension communicates with the ISweep web application for account and settings management.
-
----
-
-## Permissions Used
-
-This extension uses the following permissions:
-
-• `storage` — to securely store login and filtering state  
-• `activeTab` — to interact with the currently active tab  
-• `scripting` — to inject content scripts for filtering behavior  
-• `host_permissions` — required to apply filtering functionality on supported pages  
-
-No personal data is sold or shared.
-
----
-
-## Privacy
-
-ISweep does not collect or transmit personal browsing data.
-
-Authentication state and filtering preferences are stored locally using Chrome’s storage API.
-
-For full details, please see our Privacy Policy:
-[Insert Privacy Policy URL Here]
-
----
-
-## Support
-
-For help, questions, or bug reports:
-
-• Visit: [Insert Website URL]  
-• Contact: [Insert Support Email]
-
----
-
-## Version
-
-Current Version: 1.0.0  
-Built with Chrome Extension Manifest v3
-
-© 2026 ISweep
+## Notes
+- Tokens are stored locally for dev; clear via popup logout.
+- If backend is unreachable, decisions default to `none` and logs include the reason.

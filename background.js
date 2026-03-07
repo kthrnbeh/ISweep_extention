@@ -1,11 +1,83 @@
-// ISweep Chrome Extension - Background Service Worker
-// Handles icon state updates based on enabled/disabled status
+/*
+ISWEEP COMPONENT: Extension Background Service Worker
+
+Role: Bridges content scripts and the Flask backend. Receives captions from
+youtube_captions.js, calls /event, and returns playback decisions. Also handles
+auth, prefs sync, and icon state.
+
+System flow:
+  youtube_captions.js -> chrome.runtime.sendMessage('caption') -> handleCaptionDecision
+  handleCaptionDecision -> POST /event -> decision -> content script applies action
+*/
 
 // Storage Keys
 const STORAGE_KEYS = {
   AUTH: 'isweepAuth',
-  ENABLED: 'isweepEnabled'
+  ENABLED: 'isweepEnabled',
+  TOKEN: 'isweepToken',
+  USER_ID: 'isweepUserId',
+  PREFS: 'isweepPreferences',
+  BACKEND_URL: 'isweepBackendUrl'
 };
+
+const TOKEN_KEY = 'isweep_auth_token'; // Shared with site_token_bridge and frontend localStorage
+
+const LOG_PREFIX = '[ISWEEP][BG]';
+
+const DEFAULT_BACKEND = 'http://127.0.0.1:5000';
+
+// Auth/debug helpers (never log full token)
+let didLogBackendHealth = false;
+
+async function logBackendHealthOnce() {
+  if (didLogBackendHealth) return;
+  didLogBackendHealth = true;
+  const backendUrl = await getBackendUrl();
+  try {
+    const res = await fetch(`${backendUrl}/health`);
+    if (res.ok) {
+      const body = await res.json().catch(() => ({}));
+      if (body && body.status === 'ok') {
+        console.log('[ISWEEP][BG][AUTH] Backend reachable', { backendUrl, status: res.status });
+        return;
+      }
+    }
+    console.log('[ISWEEP][BG][AUTH] Backend unreachable', { backendUrl, status: res.status });
+  } catch (err) {
+    console.log('[ISWEEP][BG][AUTH] Backend unreachable', { backendUrl, error: err?.message || String(err) });
+  }
+}
+
+async function getBackendUrl() {
+  const store = await chrome.storage.local.get([STORAGE_KEYS.BACKEND_URL]);
+  return store[STORAGE_KEYS.BACKEND_URL] || DEFAULT_BACKEND;
+}
+
+async function getAuthToken() {
+  const store = await chrome.storage.local.get([STORAGE_KEYS.TOKEN, TOKEN_KEY]);
+  const token = store[TOKEN_KEY] || store[STORAGE_KEYS.TOKEN] || null;
+  const source = store[TOKEN_KEY] ? TOKEN_KEY : (store[STORAGE_KEYS.TOKEN] ? STORAGE_KEYS.TOKEN : null);
+  console.log('[ISWEEP][BG][AUTH] token lookup', {
+    source,
+    hasToken: Boolean(token),
+    length: token ? String(token).length : 0,
+  });
+  return token;
+}
+
+async function fetchPreferences(token, backendUrl) {
+  const res = await fetch(`${backendUrl}/preferences`, {
+    method: 'GET',
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`status ${res.status} ${body}`);
+  }
+  const prefs = await res.json();
+  await chrome.storage.local.set({ [STORAGE_KEYS.PREFS]: prefs });
+  return { prefs, status: res.status };
+}
 
 // Icon paths (will use emoji/text as fallback if actual icons don't exist)
 const ICON_ENABLED = {
@@ -24,7 +96,7 @@ const ICON_DISABLED = {
  * Initialize background service worker
  */
 chrome.runtime.onInstalled.addListener(async (details) => {
-  console.log('[ISweep Background] Extension installed/updated:', details.reason);
+  console.log(LOG_PREFIX, 'installed/updated:', details.reason);
   
   // Set default values if not already set
   const result = await chrome.storage.local.get([STORAGE_KEYS.ENABLED]);
@@ -32,11 +104,12 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   if (result[STORAGE_KEYS.ENABLED] === undefined) {
     // Default to enabled on first install
     await chrome.storage.local.set({ [STORAGE_KEYS.ENABLED]: true });
-    console.log('[ISweep Background] Set default enabled state to true');
+    console.log(LOG_PREFIX, 'set default enabled state to true');
   }
   
   // Update icon based on current state
   updateIcon(result[STORAGE_KEYS.ENABLED] !== false);
+  logBackendHealthOnce();
 });
 
 /**
@@ -48,7 +121,7 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
   // Check if enabled state changed
   if (changes[STORAGE_KEYS.ENABLED]) {
     const newValue = changes[STORAGE_KEYS.ENABLED].newValue;
-    console.log('[ISweep Background] Enabled state changed to:', newValue);
+    console.log(LOG_PREFIX, 'enabled state changed to:', newValue);
     updateIcon(newValue !== false);
   }
 });
@@ -65,10 +138,10 @@ async function updateIcon(isEnabled) {
     // Try to set icon (will fail gracefully if icon files don't exist)
     try {
       await chrome.action.setIcon({ path: iconPath });
-      console.log('[ISweep Background] Icon updated to:', isEnabled ? 'enabled' : 'disabled');
+      console.log(LOG_PREFIX, 'icon updated to:', isEnabled ? 'enabled' : 'disabled');
     } catch (iconError) {
       // If icon files don't exist, set badge text as fallback
-      console.log('[ISweep Background] Icon files not found, using badge fallback');
+      console.log(LOG_PREFIX, 'icon files not found, using badge fallback');
       await chrome.action.setBadgeText({ text: isEnabled ? '✓' : '⏸' });
       await chrome.action.setBadgeBackgroundColor({ 
         color: isEnabled ? '#10b981' : '#6b7280' 
@@ -80,7 +153,7 @@ async function updateIcon(isEnabled) {
     await chrome.action.setTitle({ title });
     
   } catch (error) {
-    console.error('[ISweep Background] Error updating icon:', error);
+    console.error(LOG_PREFIX, 'error updating icon:', error);
   }
 }
 
@@ -88,20 +161,154 @@ async function updateIcon(isEnabled) {
  * Handle messages from content scripts or popup
  */
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  console.log('[ISweep Background] Received message:', message);
-  
+  console.log(LOG_PREFIX, 'received message:', message);
+
   if (message.action === 'updateIcon') {
-    // Allow explicit icon updates from other parts of the extension
     updateIcon(message.enabled !== false);
     sendResponse({ success: true });
+    return; // respond synchronously
+  } else if (message.type === 'caption') {
+    handleCaptionDecision(message.text, message.caption_duration_seconds).then(sendResponse);
+    return true; // async
+  } else if (message.type === 'isweep_login') {
+    handleLogin(message.email, message.password).then(sendResponse);
+    return true; // async
+  } else if (message.type === 'isweep_sync_prefs') {
+    handleSyncPrefs().then(sendResponse);
+    return true; // async
   }
-  
-  return true; // Keep message channel open for async response
+
+  sendResponse({ ok: false, error: 'unknown message' });
+  return; // unknown message handled
 });
 
 // Initial icon update on service worker startup
 chrome.storage.local.get([STORAGE_KEYS.ENABLED]).then((result) => {
   const isEnabled = result[STORAGE_KEYS.ENABLED] !== false;
-  console.log('[ISweep Background] Service worker started, enabled state:', isEnabled);
+  console.log('[ISWEEP][BG] service worker started');
+  console.log(LOG_PREFIX, 'service worker started, enabled state:', isEnabled);
   updateIcon(isEnabled);
+  logBackendHealthOnce();
 });
+
+// Receives caption text from content script, forwards to backend /event, and returns decision.
+async function handleCaptionDecision(text, captionDurationSeconds) {
+  const backendUrl = await getBackendUrl();
+  const token = await getAuthToken();
+  if (!token) {
+    console.warn(LOG_PREFIX, 'missing token; cannot analyze caption');
+    return { action: 'none', reason: 'missing token', duration_seconds: 0, matched_category: null };
+  }
+
+  let res;
+  let responseBody = '';
+  try {
+    console.log('[ISWEEP][EVENT] sending caption to backend', {
+      backendUrl,
+      textPreview: text ? text.slice(0, 60) : '',
+      captionDurationSeconds,
+    });
+    console.log(LOG_PREFIX, 'calling /event', { backendUrl });
+    res = await fetch(`${backendUrl}/event`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ text, caption_duration_seconds: captionDurationSeconds }),
+    });
+
+    responseBody = await res.text();
+    if (!res.ok) {
+      const meta = {
+        backendUrl,
+        status: res.status,
+        body: (responseBody || '').slice(0, 200),
+        error: `status ${res.status}`,
+      };
+      // Chrome “Extensions > Errors” stringifies objects as [object Object]; include JSON string for readability.
+      console.error(`${LOG_PREFIX} /event failed ${JSON.stringify(meta)}`, meta);
+      return { action: 'none', reason: 'Backend unavailable', duration_seconds: 0, matched_category: null };
+    }
+    let decision = {};
+    if (responseBody) {
+      try {
+        decision = JSON.parse(responseBody);
+      } catch (parseErr) {
+        console.error(LOG_PREFIX, 'failed to parse /event response', {
+          backendUrl,
+          body: (responseBody || '').slice(0, 200),
+          error: parseErr?.message || parseErr,
+        });
+        throw new Error('invalid JSON from backend');
+      }
+    }
+    // Expected keys: action, duration_seconds, matched_category, reason
+    console.log('[ISWEEP][EVENT] decision received', decision);
+    console.log(LOG_PREFIX, 'decision received', decision);
+    return decision;
+  } catch (err) {
+    const meta = {
+      backendUrl,
+      status: res?.status,
+      body: (responseBody || '').slice(0, 200),
+      error: err?.message || String(err),
+    };
+    console.error(`${LOG_PREFIX} /event failed ${JSON.stringify(meta)}`, meta);
+    return { action: 'none', reason: 'Backend unavailable', duration_seconds: 0, matched_category: null };
+  }
+}
+
+async function handleLogin(email, password) {
+  const backendUrl = await getBackendUrl();
+  console.log(LOG_PREFIX, 'login start', backendUrl);
+  try {
+    const res = await fetch(`${backendUrl}/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password }),
+    });
+    if (res.status !== 200 && res.status !== 201) {
+      const msg = await res.text();
+      console.warn(LOG_PREFIX, 'login failed', res.status, msg || '');
+      return { ok: false, error: msg || `status ${res.status}` };
+    }
+    const data = await res.json();
+    const token = data.token;
+    const userId = data.user_id;
+    await chrome.storage.local.set({
+      [STORAGE_KEYS.TOKEN]: token,
+      [TOKEN_KEY]: token,
+      [STORAGE_KEYS.USER_ID]: userId,
+      [STORAGE_KEYS.AUTH]: { email, loggedInAt: new Date().toISOString() },
+    });
+    try {
+      await fetchPreferences(token, backendUrl);
+    } catch (prefErr) {
+      console.warn(LOG_PREFIX, 'prefs sync failed after login', prefErr?.message || prefErr);
+    }
+    console.log(LOG_PREFIX, 'login success', res.status);
+    return { ok: true, status: res.status };
+  } catch (err) {
+    console.error(LOG_PREFIX, 'login failed', err?.message || err);
+    return { ok: false, error: err?.message || 'login failed' };
+  }
+}
+
+async function handleSyncPrefs() {
+  const backendUrl = await getBackendUrl();
+  const token = await getAuthToken();
+  if (!token) {
+    console.warn(LOG_PREFIX, 'sync prefs missing token');
+    return { ok: false, error: 'missing token' };
+  }
+  console.log(LOG_PREFIX, 'prefs sync start');
+  try {
+    const result = await fetchPreferences(token, backendUrl);
+    console.log(LOG_PREFIX, 'prefs sync success', result.status);
+    return { ok: true, status: result.status };
+  } catch (err) {
+    console.warn(LOG_PREFIX, 'prefs sync failed', err?.message || err);
+    return { ok: false, error: err?.message || 'sync failed' };
+  }
+}

@@ -6,10 +6,15 @@
   "permissions": [
     "storage",
     "tabs",
-    "activeTab"
+    "activeTab",
+    "scripting"
   ],
   "host_permissions": [
-    "<all_urls>"
+    "<all_urls>",
+    "http://127.0.0.1:5000/*",
+    "http://localhost:5000/*",
+    "http://127.0.0.1:5500/*",
+    "http://localhost:5500/*"
   ],
   "action": {
     "default_popup": "popup.html",
@@ -27,6 +32,19 @@
       "matches": ["<all_urls>"],
       "js": ["plumbing.js"],
       "run_at": "document_start"
+    },
+    {
+      "matches": ["*://*.youtube.com/watch*"],
+      "js": ["youtube_captions.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "http://127.0.0.1:5500/ISweep_frontend/docs/*",
+        "http://localhost:5500/ISweep_frontend/docs/*"
+      ],
+      "js": ["site_token_bridge.js"],
+      "run_at": "document_idle"
     }
   ],
   "options_page": "options.html",

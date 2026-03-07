@@ -15,6 +15,9 @@
   let previousMuteState = null;
   let previousRate = null;
   let muteUntilNextCaption = false;
+  let captionBuffer = '';
+  let bufferTimer = null;
+  const BUFFER_DELAY_MS = 150;
 
   function log(...args) {
     console.log(LOG_PREFIX, ...args);
@@ -48,7 +51,7 @@
       video.muted = true;
       muteUntilNextCaption = true;
       log('Muted; will restore on next caption change (safety cap active)');
-      const safetyMs = Math.min(durationMs > 0 ? durationMs : 2000, 2500); // Cap fallback mute to 2.5s to prevent over-muting.
+      const safetyMs = Math.min(durationMs > 0 ? durationMs : 2000, 2500); // Prevents long mutes if caption timing fails.
       log('Applied mute for', decision.duration_seconds, 'seconds');
       restoreMuteTimeout = setTimeout(() => {
         video.muted = previousMuteState;
@@ -110,26 +113,39 @@
     muteUntilNextCaption = false;
   }
 
-  function handleCaptionText(rawText) {
-    // YouTube can emit multiple DOM updates per caption; ignore empty, tiny, or unchanged text to avoid duplicates.
+  function processEndedCaption(text, durationSeconds, videoTime) {
+    if (!text || durationSeconds === null) return;
+    const words = text.split(/\s+/).filter(Boolean);
+    // Word timing is approximated by dividing total caption duration across words; backend still decides whether to mute.
+    const wordDuration = words.length > 0 ? durationSeconds / words.length : durationSeconds;
+    console.log('[ISWEEP][CAPTION]', {
+      text,
+      duration: Number(durationSeconds || 0),
+      words: words.length,
+      wordDuration,
+      videoTime
+    });
+    sendCaption({ text, caption_duration_seconds: durationSeconds });
+  }
+
+  function processBufferedCaption(rawText) {
+    // YouTube captions arrive incrementally; buffer small DOM updates so we react to stabilized phrases.
     const text = (rawText || '').trim();
     if (!text || text.length < 2 || text === lastCaptionText) return;
 
     const video = findVideo();
     const now = video && typeof video.currentTime === 'number' ? video.currentTime : null;
-    // Duration is how long the previous caption stayed visible; aligns mute length to the word that just finished.
     const prevDuration = captionStartTime !== null && now !== null ? Math.max(0, now - captionStartTime) : null;
 
-    // Restore audio immediately when the caption changes; background safety timeout is only a fallback.
+    // Restore audio immediately when the caption changes; safety timeout is only a fallback.
     restoreMuteAfterCaptionChange();
 
-    // Send the caption that just ended with its measured duration so backend can match mute timing to speech.
+    // Send the caption that just ended with its measured duration so backend can align mute timing to words.
     if (lastCaptionText && prevDuration !== null) {
-      console.log('[ISWEEP][CAPTION]', { text: lastCaptionText, duration: Number(prevDuration || 0), videoTime: now });
-      sendCaption({ text: lastCaptionText, caption_duration_seconds: prevDuration });
+      processEndedCaption(lastCaptionText, prevDuration, now);
     }
 
-    // Start timing the new caption from this moment; its duration will be computed on the next change.
+    // Start timing the new caption from this moment; its duration will be computed on the next stabilized change.
     lastCaptionText = text;
     captionStartTime = now;
     log('Caption started:', text);
@@ -143,11 +159,18 @@
 
   const observer = new MutationObserver(() => {
     const caption = extractCaptionText();
-    if (caption) handleCaptionText(caption);
+    if (!caption) return;
+    captionBuffer = captionBuffer ? `${captionBuffer} ${caption}` : caption;
+    if (bufferTimer) clearTimeout(bufferTimer);
+    bufferTimer = setTimeout(() => {
+      processBufferedCaption(captionBuffer);
+      captionBuffer = '';
+      bufferTimer = null;
+    }, BUFFER_DELAY_MS);
   });
 
   function startObserving() {
-    // Observe the YouTube caption container instead of the whole DOM to cut down on noisy mutations.
+    // Observe the YouTube caption container instead of the whole DOM to cut down on noisy mutations and improve performance.
     const captionsRoot = document.querySelector('.ytp-caption-window-container');
     if (!captionsRoot) {
       setTimeout(startObserving, 1000); // Retry until captions container appears (e.g., when captions are toggled on).

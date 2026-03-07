@@ -32,6 +32,19 @@ Wires the browser to the ISweep backend: signs in, syncs preferences, and applie
 ## Permissions
 - `storage`, `activeTab`, `tabs`, `scripting` + host permissions for backend URLs and YouTube captions.
 
+### Why these permissions exist
+- `storage`: keep user/session prefs and auth tokens locally so filtering stays consistent.
+- `tabs`: inspect tab metadata to target the correct YouTube watch tab when applying playback controls.
+- `activeTab`: limit interaction to the user’s current tab when sending actions.
+- `scripting`: inject the caption listener into YouTube pages to observe captions and relay them to the backend.
+- Host permissions (`localhost`, `127.0.0.1`, and `<all_urls>` for existing scripts): allow talking to the dev backend and loading content scripts on YouTube during development.
+
+> Note: Chrome extensions do not allow comments or fake `_comment_*` keys inside `manifest.json`. Keep explanations here in the README instead.
+
+### Playback-only guarantee
+- ISweep only adjusts live playback state (mute/unmute/skip/fast-forward) based on captions and backend decisions.
+- It never edits, rewrites, or saves media, video files, or caption files.
+
 ## Notes
 - Tokens are stored locally for dev; clear via popup logout.
 - If backend is unreachable, decisions default to `none` and logs include the reason.

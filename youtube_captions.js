@@ -173,11 +173,43 @@
 
   const observer = new MutationObserver(() => {
     const caption = extractCaptionText();
-    if (!caption) return;
-    captionBuffer = captionBuffer ? `${captionBuffer} ${caption}` : caption;
+
+    // If captions disappear, flush the final caption immediately and restore audio; empty snapshots should not debounce.
+    if (!caption) {
+      if (lastCaptionText && captionStartTime !== null) {
+        const video = findVideo();
+        const now = video && typeof video.currentTime === 'number' ? video.currentTime : null;
+        const durationSeconds = now !== null ? Math.max(0, now - captionStartTime) : null;
+        if (durationSeconds !== null) {
+          console.log('[ISWEEP][CAPTION_FLUSH]', {
+            text: lastCaptionText,
+            duration: Number(durationSeconds || 0),
+            reason: 'caption disappeared'
+          });
+          processEndedCaption(lastCaptionText, durationSeconds, now);
+          // A disappearing caption is a boundary; restore audio immediately and rely on safety only as fallback.
+          restoreMuteAfterCaptionChange();
+        }
+      }
+      lastCaptionText = '';
+      captionStartTime = null;
+      captionBuffer = '';
+      if (bufferTimer) {
+        clearTimeout(bufferTimer);
+        bufferTimer = null;
+      }
+      return;
+    }
+
+    // YouTube fires mutations with full caption snapshots; appending them duplicates text and breaks timing.
+    // Keep only the latest observed caption and debounce processing to wait for a stabilized line.
+    captionBuffer = caption;
+
     if (bufferTimer) clearTimeout(bufferTimer);
     bufferTimer = setTimeout(() => {
-      processBufferedCaption(captionBuffer);
+      if (captionBuffer) {
+        processBufferedCaption(captionBuffer);
+      }
       captionBuffer = '';
       bufferTimer = null;
     }, BUFFER_DELAY_MS);

@@ -7,6 +7,7 @@
 
   const LOG_PREFIX = '[ISWEEP][YT]';
   // Track caption text and when it started so we can measure how long words are spoken.
+  // Playback-only: ISweep never edits media or captions; it only controls live playback state (mute/unmute/seek/rate).
   let lastCaptionText = '';
   let captionStartTime = null; // When the current caption started; used to time how long it was spoken.
   let videoEl = null;
@@ -35,6 +36,7 @@
 
   function applyDecision(decision) {
     // Apply backend decision to the video element; mute uses caption-change restore plus safety cap.
+    // Playback-only guard: we only change player state (mute/seek/rate) and never alter the underlying media or captions.
     const video = findVideo();
     if (!video) {
       log('No video element found for decision');
@@ -116,8 +118,14 @@
   function processEndedCaption(text, durationSeconds, videoTime) {
     if (!text || durationSeconds === null) return;
     const words = text.split(/\s+/).filter(Boolean);
-    // Word timing is approximated by dividing total caption duration across words; backend still decides whether to mute.
+    // Approximate per-word timing by spreading total caption duration across words; backend still decides whether to mute.
     const wordDuration = words.length > 0 ? durationSeconds / words.length : durationSeconds;
+    const wordTimings = words.map((word, index) => ({
+      word,
+      index,
+      start: index * wordDuration,
+      end: (index + 1) * wordDuration
+    }));
     console.log('[ISWEEP][CAPTION]', {
       text,
       duration: Number(durationSeconds || 0),
@@ -125,11 +133,17 @@
       wordDuration,
       videoTime
     });
+    // Scheduling metadata for debugging: shows where each word likely lands inside the caption window.
+    console.log('[ISWEEP][WORD_TIMING]', {
+      text,
+      captionDuration: durationSeconds,
+      words: wordTimings
+    });
     sendCaption({ text, caption_duration_seconds: durationSeconds });
   }
 
   function processBufferedCaption(rawText) {
-    // YouTube captions arrive incrementally; buffer small DOM updates so we react to stabilized phrases.
+    // YouTube captions arrive incrementally; buffer small DOM updates so we react to stabilized phrases instead of partial words.
     const text = (rawText || '').trim();
     if (!text || text.length < 2 || text === lastCaptionText) return;
 

@@ -1,14 +1,32 @@
 {
+  "_comment_manifest_version": "Chrome extension manifest format version (3 is current)",
   "manifest_version": 3,
+
+  "_comment_name": "User-facing extension name shown in Chrome UI",
   "name": "ISweep",
+
+  "_comment_version": "Extension semantic version",
   "version": "1.0.0",
+
+  "_comment_description": "Short description displayed in extension listing",
   "description": "Safe content filtering for a better browsing experience",
+
+  "_comment_permissions": "Runtime capabilities requested by the extension",
   "permissions": [
-    "storage",
-    "tabs",
-    "activeTab",
-    "scripting"
+    "storage",    
+    "tabs",       
+    "activeTab",  
+    "scripting"   
   ],
+
+  "_comment_permissions_detail": {
+    "storage": "Persist user settings locally",
+    "tabs": "Enumerate and interact with open tabs",
+    "activeTab": "Temporarily access the active tab when invoked",
+    "scripting": "Inject scripts into pages"
+  },
+
+  "_comment_host_permissions": "Allowed host patterns for content scripts and requests",
   "host_permissions": [
     "<all_urls>",
     "http://127.0.0.1:5000/*",
@@ -16,38 +34,59 @@
     "http://127.0.0.1:5500/*",
     "http://localhost:5500/*"
   ],
+
+  "_comment_action": "Browser action configuration (toolbar button)",
   "action": {
+    "_comment_default_popup": "HTML shown when clicking the toolbar icon",
     "default_popup": "popup.html",
+    "_comment_default_icon": "Icons for different densities in toolbar",
     "default_icon": {
       "16": "icons/icon-16.png",
       "48": "icons/icon-48.png",
       "128": "icons/icon-128.png"
     }
   },
+
+  "_comment_background": "Background service worker entry point",
   "background": {
     "service_worker": "background.js"
   },
+
+  "_comment_content_scripts": "Scripts injected into matched pages",
   "content_scripts": [
     {
+      "_comment_matches": "Inject plumbing on all pages early",
       "matches": ["<all_urls>"],
+      "_comment_js": "Plumbing script sets up messaging bridge",
       "js": ["plumbing.js"],
+      "_comment_run_at": "Run before page load to hook early",
       "run_at": "document_start"
     },
     {
+      "_comment_matches": "YouTube watch pages for caption handling",
       "matches": ["*://*.youtube.com/watch*"],
+      "_comment_js": "Caption scraping for analysis",
       "js": ["youtube_captions.js"],
+      "_comment_run_at": "Run when DOM is ready",
       "run_at": "document_idle"
     },
     {
+      "_comment_matches": "Local docs pages to bridge site token",
       "matches": [
         "http://127.0.0.1:5500/ISweep_frontend/docs/*",
         "http://localhost:5500/ISweep_frontend/docs/*"
       ],
+      "_comment_js": "Bridge script to send site token to extension",
       "js": ["site_token_bridge.js"],
+      "_comment_run_at": "Run after DOM is idle",
       "run_at": "document_idle"
     }
   ],
+
+  "_comment_options_page": "Standalone options page for configuring extension",
   "options_page": "options.html",
+
+  "_comment_icons": "Extension icons used across Chrome surfaces",
   "icons": {
     "16": "icons/icon-16.png",
     "48": "icons/icon-48.png",

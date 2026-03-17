@@ -10,62 +10,62 @@ const DEFAULT_FRONTEND_BASE = 'https://kthrnbeh.github.io/ISweep';
 
 // Storage Keys
 const STORAGE_KEYS = {
-  AUTH: 'isweepAuth',
-  ENABLED: 'isweepEnabled',
-  TOKEN: 'isweepToken',
-  USER_ID: 'isweepUserId',
-  PREFS: 'isweepPreferences',
-  BACKEND_URL: 'isweepBackendUrl',
-  FRONTEND_URL: 'isweepFrontendUrl'
+  AUTH: 'isweepAuth',              // Cached auth info
+  ENABLED: 'isweepEnabled',        // Toggle for filtering
+  TOKEN: 'isweepToken',            // Legacy token key
+  USER_ID: 'isweepUserId',         // Legacy user id key
+  PREFS: 'isweepPreferences',      // Cached preferences
+  BACKEND_URL: 'isweepBackendUrl', // Backend base URL
+  FRONTEND_URL: 'isweepFrontendUrl'// Frontend base URL override
 };
 
 // Shared token key used by the site and the bridge content script.
 const TOKEN_KEY = 'isweep_auth_token';
 
-const LOG_PREFIX = '[ISWEEP][POPUP]';
+const LOG_PREFIX = '[ISWEEP][POPUP]'; // Standard log prefix
 
 async function getBackendUrl() {
-  const store = await chrome.storage.local.get([STORAGE_KEYS.BACKEND_URL]);
-  return store[STORAGE_KEYS.BACKEND_URL] || 'http://127.0.0.1:5000';
+  const store = await chrome.storage.local.get([STORAGE_KEYS.BACKEND_URL]); // Fetch stored backend URL
+  return store[STORAGE_KEYS.BACKEND_URL] || 'http://127.0.0.1:5000'; // Default to local backend
 }
 
 async function getFrontendBaseUrl() {
-  const store = await chrome.storage.local.get([STORAGE_KEYS.FRONTEND_URL]);
-  const base = store[STORAGE_KEYS.FRONTEND_URL] || DEFAULT_FRONTEND_BASE;
-  return base.replace(/\/+$/, '');
+  const store = await chrome.storage.local.get([STORAGE_KEYS.FRONTEND_URL]); // Fetch stored frontend URL
+  const base = store[STORAGE_KEYS.FRONTEND_URL] || DEFAULT_FRONTEND_BASE; // Default to hosted frontend
+  return base.replace(/\/+$/, ''); // Trim trailing slashes
 }
 
 async function saveAuthSession({ authData }) {
   const payload = {
-    [STORAGE_KEYS.AUTH]: authData,
-    [STORAGE_KEYS.ENABLED]: true,
+    [STORAGE_KEYS.AUTH]: authData,   // Persist auth payload
+    [STORAGE_KEYS.ENABLED]: true,    // Enable filtering by default after login
   };
-  await chrome.storage.local.set(payload);
+  await chrome.storage.local.set(payload); // Save to storage
 }
 
 // DOM Elements - Logged Out State
-const stateLoggedOut = document.getElementById('stateLoggedOut');
-const btnLogin = document.getElementById('btnLogin');
-const linkCreateAccount = document.getElementById('linkCreateAccount');
-const quickLoginForm = document.getElementById('quickLoginForm');
-const emailInput = document.getElementById('emailInput');
-const passwordInput = document.getElementById('passwordInput');
-const btnQuickLogin = document.getElementById('btnQuickLogin');
-const btnCancelQuickLogin = document.getElementById('btnCancelQuickLogin');
+const stateLoggedOut = document.getElementById('stateLoggedOut'); // Logged-out container
+const btnLogin = document.getElementById('btnLogin'); // Login button
+const linkCreateAccount = document.getElementById('linkCreateAccount'); // Create account link
+const quickLoginForm = document.getElementById('quickLoginForm'); // Inline login form
+const emailInput = document.getElementById('emailInput'); // Email input field
+const passwordInput = document.getElementById('passwordInput'); // Password input field
+const btnQuickLogin = document.getElementById('btnQuickLogin'); // Submit quick login
+const btnCancelQuickLogin = document.getElementById('btnCancelQuickLogin'); // Cancel quick login
 
 // DOM Elements - Logged In State
-const stateLoggedIn = document.getElementById('stateLoggedIn');
-const userAvatar = document.getElementById('userAvatar');
-const userInitials = document.getElementById('userInitials');
-const userName = document.getElementById('userName');
-const statusDot = document.getElementById('statusDot');
-const statusText = document.getElementById('statusText');
-const btnOpenSettings = document.getElementById('btnOpenSettings');
-const btnSyncPrefs = document.getElementById('btnSyncPrefs');
-const linkResetFilters = document.getElementById('linkResetFilters');
-const linkManageAccount = document.getElementById('linkManageAccount');
-const linkLogout = document.getElementById('linkLogout');
-const signedInStatus = document.getElementById('signedInStatus');
+const stateLoggedIn = document.getElementById('stateLoggedIn'); // Logged-in container
+const userAvatar = document.getElementById('userAvatar'); // Avatar element (not dynamically used yet)
+const userInitials = document.getElementById('userInitials'); // Initials badge
+const userName = document.getElementById('userName'); // Display name text
+const statusDot = document.getElementById('statusDot'); // Status indicator dot
+const statusText = document.getElementById('statusText'); // Status text label
+const btnOpenSettings = document.getElementById('btnOpenSettings'); // Open filters/settings
+const btnSyncPrefs = document.getElementById('btnSyncPrefs'); // Sync prefs button
+const linkResetFilters = document.getElementById('linkResetFilters'); // Reset filters link
+const linkManageAccount = document.getElementById('linkManageAccount'); // Manage account link
+const linkLogout = document.getElementById('linkLogout'); // Logout link
+const signedInStatus = document.getElementById('signedInStatus'); // Status line about prefs cache
 
 /**
  * Initialize popup on load
@@ -85,27 +85,27 @@ document.addEventListener('DOMContentLoaded', async () => {
       STORAGE_KEYS.PREFS,
     ]);
     
-    let authData = result[STORAGE_KEYS.AUTH];
-    const hasToken = Boolean(result[STORAGE_KEYS.TOKEN]);
+    let authData = result[STORAGE_KEYS.AUTH]; // Pull cached auth data
+    const hasToken = Boolean(result[STORAGE_KEYS.TOKEN]); // Legacy token presence
     const isEnabled = result[STORAGE_KEYS.ENABLED] !== false; // Default to true if not set
     
     console.log(LOG_PREFIX, 'Auth data:', authData ? 'Present' : 'None', 'token:', hasToken);
     console.log(LOG_PREFIX, 'Enabled state:', isEnabled);
 
-    // Fallback: if token exists but authData missing, synthesize a minimal auth record so UI shows logged-in.
+    // Fallback: if token exists but authData missing, synthesize minimal auth so UI shows logged-in
     if (!authData && hasToken) {
       authData = { email: '(signed in)', displayName: 'ISweep user', initials: '--', loggedInAt: new Date().toISOString() };
     }
     
     if (authData && (authData.email || hasToken)) {
-      renderLoggedInState(authData, isEnabled);
+      renderLoggedInState(authData, isEnabled); // Show logged-in UI
       // Reflect cached prefs status for clarity.
       if (signedInStatus) {
         const prefs = result[STORAGE_KEYS.PREFS];
         signedInStatus.textContent = prefs ? 'Signed in. Preferences cached.' : 'Signed in. No preferences cached yet.';
       }
     } else {
-      renderLoggedOutState();
+      renderLoggedOutState(); // Show logged-out UI
     }
     
     // Set up event listeners
@@ -122,8 +122,8 @@ document.addEventListener('DOMContentLoaded', async () => {
  */
 function renderLoggedOutState() {
   console.log(LOG_PREFIX, 'rendering logged out state');
-  stateLoggedOut.classList.remove('hidden');
-  stateLoggedIn.classList.add('hidden');
+  stateLoggedOut.classList.remove('hidden'); // Show logged-out view
+  stateLoggedIn.classList.add('hidden'); // Hide logged-in view
 }
 
 /**
@@ -135,11 +135,11 @@ function renderLoggedInState(authData, isEnabled) {
   console.log(LOG_PREFIX, 'rendering logged in state');
   
   // Update user display name
-  const displayName = authData.displayName || authData.email.split('@')[0];
+  const displayName = authData.displayName || authData.email.split('@')[0]; // Prefer displayName else email prefix
   userName.textContent = displayName;
   
   // Update avatar initials
-  userInitials.textContent = 'KA';
+  userInitials.textContent = 'KA'; // Static placeholder initials
   
   // Update status based on enabled state
   if (isEnabled) {
@@ -149,7 +149,7 @@ function renderLoggedInState(authData, isEnabled) {
     statusDot.classList.add('paused');
     statusText.textContent = 'ISweep is Paused';
   }
-  if (signedInStatus) signedInStatus.textContent = 'Signed in.';
+  if (signedInStatus) signedInStatus.textContent = 'Signed in.'; // Basic signed-in indicator
   
   // Show logged in state, hide logged out state
   stateLoggedIn.classList.remove('hidden');
@@ -164,12 +164,12 @@ function renderLoggedInState(authData, isEnabled) {
 function getInitials(name) {
   if (!name) return '--';
   
-  const parts = name.split(/[\s@._-]+/).filter(p => p.length > 0);
+  const parts = name.split(/[\s@._-]+/).filter(p => p.length > 0); // Split on common separators
   
   if (parts.length === 0) return '--';
-  if (parts.length === 1) return parts[0].substring(0, 2).toUpperCase();
+  if (parts.length === 1) return parts[0].substring(0, 2).toUpperCase(); // First two letters
   
-  return (parts[0][0] + parts[1][0]).toUpperCase();
+  return (parts[0][0] + parts[1][0]).toUpperCase(); // First letters of first two parts
 }
 
 /**
@@ -177,19 +177,19 @@ function getInitials(name) {
  */
 function setupEventListeners() {
   // Logged Out State Events
-  btnLogin.addEventListener('click', handleLoginClick);
-  linkCreateAccount.addEventListener('click', handleCreateAccountClick);
-  btnQuickLogin.addEventListener('click', handleQuickLogin);
-  btnCancelQuickLogin.addEventListener('click', handleCancelQuickLogin);
+  btnLogin.addEventListener('click', handleLoginClick); // Open login flow
+  linkCreateAccount.addEventListener('click', handleCreateAccountClick); // Open account creation
+  btnQuickLogin.addEventListener('click', handleQuickLogin); // Submit quick login
+  btnCancelQuickLogin.addEventListener('click', handleCancelQuickLogin); // Cancel quick login
   
   // Logged In State Events
-  btnOpenSettings.addEventListener('click', handleOpenSettings);
+  btnOpenSettings.addEventListener('click', handleOpenSettings); // Open filters/settings page
   if (btnSyncPrefs) {
-    btnSyncPrefs.addEventListener('click', handleSyncPrefs);
+    btnSyncPrefs.addEventListener('click', handleSyncPrefs); // Trigger prefs sync
   }
-  linkResetFilters.addEventListener('click', handleResetFilters);
-  linkManageAccount.addEventListener('click', handleManageAccount);
-  linkLogout.addEventListener('click', handleLogout);
+  linkResetFilters.addEventListener('click', handleResetFilters); // Open reset filters section
+  linkManageAccount.addEventListener('click', handleManageAccount); // Open account page
+  linkLogout.addEventListener('click', handleLogout); // Log out
   
   // Allow Enter key in email input
   emailInput.addEventListener('keypress', (e) => {

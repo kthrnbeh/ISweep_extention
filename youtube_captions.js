@@ -21,17 +21,17 @@
   const BUFFER_DELAY_MS = 150;
 
   function log(...args) {
-    console.log(LOG_PREFIX, ...args);
+    console.log(LOG_PREFIX, ...args); // Namespaced logging for debugging
   }
 
   function findVideo() {
-    if (videoEl && typeof videoEl.paused !== 'undefined') return videoEl;
-    const candidate = document.querySelector('video');
+    if (videoEl && typeof videoEl.paused !== 'undefined') return videoEl; // Return cached video if still valid
+    const candidate = document.querySelector('video'); // Grab first video element
     if (candidate) {
       videoEl = candidate;
       log('Video element attached');
     }
-    return videoEl;
+    return videoEl; // May return null if not found yet
   }
 
   function applyDecision(decision) {
@@ -43,38 +43,38 @@
       return;
     }
 
-    const durationMs = (decision.duration_seconds || 0) * 1000;
+    const durationMs = (decision.duration_seconds || 0) * 1000; // Convert duration to ms
     const action = decision.action || 'none';
     log('Applying action:', action, 'for', decision.duration_seconds, 'seconds');
 
     if (action === 'mute') {
-      if (restoreMuteTimeout) clearTimeout(restoreMuteTimeout);
-      previousMuteState = video.muted;
-      video.muted = true;
-      muteUntilNextCaption = true;
+      if (restoreMuteTimeout) clearTimeout(restoreMuteTimeout); // Clear any pending restore
+      previousMuteState = video.muted; // Remember prior mute state
+      video.muted = true; // Mute video
+      muteUntilNextCaption = true; // Mark to restore on next caption change
       log('Muted; will restore on next caption change (safety cap active)');
       const safetyMs = Math.min(durationMs > 0 ? durationMs : 2000, 2500); // Prevents long mutes if caption timing fails.
       log('Applied mute for', decision.duration_seconds, 'seconds');
       restoreMuteTimeout = setTimeout(() => {
-        video.muted = previousMuteState;
-        muteUntilNextCaption = false;
-        restoreMuteTimeout = null;
+        video.muted = previousMuteState; // Restore prior mute state
+        muteUntilNextCaption = false; // Clear flag
+        restoreMuteTimeout = null; // Clear timer ref
         log('Restored mute state (safety timeout)');
       }, safetyMs);
     } else if (action === 'skip') {
-      video.currentTime = video.currentTime + (decision.duration_seconds || 0);
+      video.currentTime = video.currentTime + (decision.duration_seconds || 0); // Seek forward
       log('Skipped ahead by', decision.duration_seconds, 'seconds');
     } else if (action === 'fast_forward') {
-      if (restoreRateTimeout) clearTimeout(restoreRateTimeout);
-      previousRate = video.playbackRate;
-      video.playbackRate = 2.0;
+      if (restoreRateTimeout) clearTimeout(restoreRateTimeout); // Clear any pending rate restore
+      previousRate = video.playbackRate; // Capture current rate
+      video.playbackRate = 2.0; // Speed up playback
       log('Fast-forwarding at 2x for', decision.duration_seconds, 'seconds');
       restoreRateTimeout = setTimeout(() => {
-        video.playbackRate = previousRate || 1.0;
+        video.playbackRate = previousRate || 1.0; // Restore rate
         log('Restored playback rate');
       }, durationMs || 8000);
     } else {
-      muteUntilNextCaption = false;
+      muteUntilNextCaption = false; // Ensure flag cleared when no action
       log('No action applied');
     }
   }
@@ -104,11 +104,11 @@
     if (!muteUntilNextCaption) return;
     const video = findVideo();
     if (restoreMuteTimeout) {
-      clearTimeout(restoreMuteTimeout);
+      clearTimeout(restoreMuteTimeout); // Cancel safety timer
       restoreMuteTimeout = null;
     }
     if (video && previousMuteState !== null) {
-      video.muted = previousMuteState;
+      video.muted = previousMuteState; // Restore prior mute state
       log('Restored mute state on caption change');
     }
     previousMuteState = null;
@@ -116,8 +116,8 @@
   }
 
   function processEndedCaption(text, durationSeconds, videoTime) {
-    if (!text || durationSeconds === null) return;
-    const words = text.split(/\s+/).filter(Boolean);
+    if (!text || durationSeconds === null) return; // Require both text and duration
+    const words = text.split(/\s+/).filter(Boolean); // Split into words
     // Approximate per-word timing by spreading total caption duration across words; backend still decides whether to mute.
     const wordDuration = words.length > 0 ? durationSeconds / words.length : durationSeconds;
     const wordTimings = words.map((word, index) => ({
@@ -139,17 +139,17 @@
       captionDuration: durationSeconds,
       words: wordTimings
     });
-    sendCaption({ text, caption_duration_seconds: durationSeconds });
+    sendCaption({ text, caption_duration_seconds: durationSeconds }); // Send ended caption with timing
   }
 
   function processBufferedCaption(rawText) {
     // YouTube captions arrive incrementally; buffer small DOM updates so we react to stabilized phrases instead of partial words.
     const text = (rawText || '').trim();
-    if (!text || text.length < 2 || text === lastCaptionText) return;
+    if (!text || text.length < 2 || text === lastCaptionText) return; // Ignore empty/short/duplicate
 
     const video = findVideo();
-    const now = video && typeof video.currentTime === 'number' ? video.currentTime : null;
-    const prevDuration = captionStartTime !== null && now !== null ? Math.max(0, now - captionStartTime) : null;
+    const now = video && typeof video.currentTime === 'number' ? video.currentTime : null; // Current playback time
+    const prevDuration = captionStartTime !== null && now !== null ? Math.max(0, now - captionStartTime) : null; // Duration of previous caption
 
     // Restore audio immediately when the caption changes; safety timeout is only a fallback.
     restoreMuteAfterCaptionChange();
@@ -166,9 +166,9 @@
   }
 
   function extractCaptionText() {
-    const segments = Array.from(document.querySelectorAll('.ytp-caption-segment'));
+    const segments = Array.from(document.querySelectorAll('.ytp-caption-segment')); // Collect caption spans
     if (segments.length === 0) return '';
-    return segments.map((el) => el.textContent.trim()).join(' ').trim();
+    return segments.map((el) => el.textContent.trim()).join(' ').trim(); // Join segments into full line
   }
 
   const observer = new MutationObserver(() => {
@@ -205,7 +205,7 @@
     // Keep only the latest observed caption and debounce processing to wait for a stabilized line.
     captionBuffer = caption;
 
-    if (bufferTimer) clearTimeout(bufferTimer);
+    if (bufferTimer) clearTimeout(bufferTimer); // Reset debounce timer
     bufferTimer = setTimeout(() => {
       if (captionBuffer) {
         processBufferedCaption(captionBuffer);
@@ -222,18 +222,18 @@
       setTimeout(startObserving, 1000); // Retry until captions container appears (e.g., when captions are toggled on).
       return;
     }
-    observer.observe(captionsRoot, { childList: true, subtree: true });
+    observer.observe(captionsRoot, { childList: true, subtree: true }); // Watch caption container for changes
     log('Caption observer attached to caption container');
   }
 
   function init() {
-    findVideo();
-    startObserving();
+    findVideo(); // Cache video element if present
+    startObserving(); // Begin observing captions
   }
 
   if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', init);
+    document.addEventListener('DOMContentLoaded', init); // Wait for DOM if still loading
   } else {
-    init();
+    init(); // DOM ready; start immediately
   }
 })();

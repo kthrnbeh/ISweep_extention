@@ -1,14 +1,14 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta charset="UTF-8"> <!-- Ensure correct character encoding -->
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"> <!-- Responsive on mobile -->
   <title>ISweep</title>
-  <link rel="stylesheet" href="popup.css">
+  <link rel="stylesheet" href="popup.css"> <!-- Popup styles -->
 </head>
 <body>
   <!-- Logged Out State -->
-  <div id="stateLoggedOut" class="state-container hidden">
+  <div id="stateLoggedOut" class="state-container hidden"> <!-- Container shown when user is signed out -->
     <!-- Header with Logo -->
     <div class="header">
       <div class="logo-container">
@@ -31,11 +31,11 @@
       </div>
 
       <!-- Quick Email Login (Dev Mode) -->
-      <div id="quickLoginForm" class="quick-login hidden">
-        <input type="email" id="emailInput" placeholder="Enter your email" class="email-input">
-        <input type="password" id="passwordInput" placeholder="Enter your password" class="email-input">
-        <button id="btnQuickLogin" class="btn btn-secondary">Sign In</button>
-        <button id="btnCancelQuickLogin" class="btn-link">Cancel</button>
+      <div id="quickLoginForm" class="quick-login hidden"> <!-- Inline quick login form -->
+        <input type="email" id="emailInput" placeholder="Enter your email" class="email-input"> <!-- Email input -->
+        <input type="password" id="passwordInput" placeholder="Enter your password" class="email-input"> <!-- Password input -->
+        <button id="btnQuickLogin" class="btn btn-secondary">Sign In</button> <!-- Submit quick login -->
+        <button id="btnCancelQuickLogin" class="btn-link">Cancel</button> <!-- Cancel quick login -->
       </div>
     </div>
 
@@ -46,14 +46,14 @@
   </div>
 
   <!-- Logged In State -->
-  <div id="stateLoggedIn" class="state-container hidden">
+  <div id="stateLoggedIn" class="state-container hidden"> <!-- Container shown when user is signed in -->
     <!-- Header with Logo and Avatar -->
     <div class="header">
       <div class="logo-container">
         <div class="logo-icon">🧹</div>
         <span class="logo-text">ISweep</span>
       </div>
-      <div class="avatar-circle" id="userAvatar">
+      <div class="avatar-circle" id="userAvatar"> <!-- Avatar circle shows initials -->
         <span id="userInitials">KB</span>
       </div>
     </div>
@@ -70,8 +70,8 @@
       </div>
 
       <!-- Primary Action -->
-      <button id="btnOpenSettings" class="btn btn-primary">Open Filters →</button>
-      <button id="btnSyncPrefs" class="btn btn-secondary" style="margin-top:8px;">Sync Preferences</button>
+      <button id="btnOpenSettings" class="btn btn-primary">Open Filters →</button> <!-- Opens Filters page -->
+      <button id="btnSyncPrefs" class="btn btn-secondary" style="margin-top:8px;">Sync Preferences</button> <!-- Sync preferences with backend -->
       
       <!-- Secondary Links -->
       <div class="secondary-links-row">
@@ -89,6 +89,6 @@
     </div>
   </div>
 
-  <script src="popup.js"></script>
+  <script src="popup.js"></script> <!-- Popup controller script -->
 </body>
 </html>

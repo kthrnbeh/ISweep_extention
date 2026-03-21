@@ -13,9 +13,10 @@
   let videoEl = null;
   let restoreMuteTimeout = null;
   let restoreRateTimeout = null;
-  const WORD_PRE_BUFFER_MS = 80; // Tight buffer before matched word
-  const WORD_POST_BUFFER_MS = 120; // Tight buffer after matched word
-  const WORD_GAP_MERGE_MS = 120; // Merge close windows to avoid choppiness
+  const WORD_PRE_BUFFER_MS = 160; // Lead-in before matched word
+  const WORD_POST_BUFFER_MS = 220; // Tail after matched word
+  const WORD_GAP_MERGE_MS = 160; // Merge close windows to avoid choppiness
+  const WORD_LATENCY_COMP_MS = 120; // Pull window earlier to compensate caption/render delay
 
   const LANGUAGE_KEYWORDS = ['hell'];
   const SEXUAL_KEYWORDS = ['sex', 'sexual', 'naked', 'nude', 'explicit', 'rape', 'intercourse', 'seduce', 'seduction'];
@@ -199,14 +200,19 @@
 
       let windows = [];
       const matches = deriveWordMatches(words, payload.text);
+      if (matches.length) {
+        console.log('[ISweep Timing] matched word indexes', matches);
+      }
       if (matches.length && wordTimings.length === words.length && captionStart !== null && captionStart !== undefined) {
         matches.forEach((idx) => {
           const wt = wordTimings[idx];
-          const startSec = Math.max(captionStart + wt.start - WORD_PRE_BUFFER_MS / 1000, 0);
+          const startSec = Math.max(captionStart + wt.start - (WORD_PRE_BUFFER_MS + WORD_LATENCY_COMP_MS) / 1000, 0);
           const endSec = captionStart + wt.end + WORD_POST_BUFFER_MS / 1000;
           windows.push({ start: startSec, end: endSec });
         });
+        console.log('[ISweep Timing] raw word windows', windows);
         windows = mergeWindows(windows);
+        console.log('[ISweep Timing] merged word windows', windows);
       }
 
       if (!windows.length) {

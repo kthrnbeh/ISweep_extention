@@ -62,6 +62,16 @@
     console.log(LOG_PREFIX, ...args); // Namespaced logging for debugging
   }
 
+  function normalizeWord(word) {
+    return (word || '').toLowerCase().replace(/[^a-z0-9*]/g, '').trim();
+  }
+
+  function maskToRegex(word) {
+    const escaped = word.replace(/[-/\\^$+?.()|[\]{}]/g, '\\$&');
+    const pattern = escaped.replace(/\*/g, '.*');
+    return new RegExp(`\\b${pattern}\\b`, 'i');
+  }
+
   function findVideo() {
     if (videoEl && typeof videoEl.paused !== 'undefined') return videoEl; // Return cached video if still valid
     const candidate = document.querySelector('video'); // Grab first video element
@@ -129,16 +139,28 @@
     }, remainingMs + HARD_RESTORE_GRACE_MS);
   }
 
-  function deriveWordMatches(words) {
-    const matches = [];
-    const lowered = words.map((w) => (w || '').toLowerCase());
-    const sets = [...LANGUAGE_KEYWORDS, ...SEXUAL_KEYWORDS, ...VIOLENCE_KEYWORDS];
-    lowered.forEach((w, idx) => {
-      if (sets.some((kw) => kw === w)) {
-        matches.push(idx);
+  function deriveWordMatches(words, captionText) {
+    const matches = new Set();
+    const normalizedWords = words.map((w) => normalizeWord(w));
+    const filters = [...LANGUAGE_KEYWORDS, ...SEXUAL_KEYWORDS, ...VIOLENCE_KEYWORDS].map(normalizeWord);
+    const regexes = filters.map(maskToRegex);
+    const captionForFullTest = (captionText || words.join(' ')).toLowerCase().replace(/[^a-z0-9\s]/g, ' ');
+
+    regexes.forEach((regex, regexIdx) => {
+      const rawFilter = filters[regexIdx];
+      normalizedWords.forEach((w, idx) => {
+        if (w && regex.test(w)) {
+          matches.add(idx);
+          console.log('[ISWEEP][MATCH]', { caption: captionText || words.join(' '), matchedWord: rawFilter, via: 'word' });
+        }
+      });
+      if (regex.test(captionForFullTest)) {
+        // Keep a log even if per-word capture already happened
+        console.log('[ISWEEP][MATCH]', { caption: captionText || words.join(' '), matchedWord: rawFilter, via: 'caption' });
       }
     });
-    return matches;
+
+    return Array.from(matches.values());
   }
 
   function mergeWindows(windows) {
@@ -176,7 +198,7 @@
       const words = payload.words || [];
 
       let windows = [];
-      const matches = deriveWordMatches(words);
+      const matches = deriveWordMatches(words, payload.text);
       if (matches.length && wordTimings.length === words.length && captionStart !== null && captionStart !== undefined) {
         matches.forEach((idx) => {
           const wt = wordTimings[idx];

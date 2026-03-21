@@ -13,11 +13,42 @@
   let videoEl = null;
   let restoreMuteTimeout = null;
   let restoreRateTimeout = null;
+  const WORD_PRE_BUFFER_MS = 80; // Tight buffer before matched word
+  const WORD_POST_BUFFER_MS = 120; // Tight buffer after matched word
+  const WORD_GAP_MERGE_MS = 120; // Merge close windows to avoid choppiness
+
+  const LANGUAGE_KEYWORDS = ['hell'];
+  const SEXUAL_KEYWORDS = ['sex', 'sexual', 'naked', 'nude', 'explicit', 'rape', 'intercourse', 'seduce', 'seduction'];
+  const VIOLENCE_KEYWORDS = ['kill', 'killed', 'murder', 'shot', 'shoot', 'stab', 'blood', 'violence', 'violent', 'attack', 'fight', 'gun', 'weapon', 'death', 'die', 'dying', 'dead', 'assault', 'beat', 'beating', 'punch', 'hit'];
+
+  let lastCaptionWords = [];
+  let lastWordTimings = [];
   let previousMuteState = null;
   let previousRate = null;
   let muteUntilNextCaption = false;
   let muteLockUntilSec = 0; // Active mute window end (seconds, video time)
   let hardRestoreTimeout = null; // Final fail-safe unmute
+  function clearMuteState(reason) {
+    if (restoreMuteTimeout) clearTimeout(restoreMuteTimeout);
+    if (hardRestoreTimeout) clearTimeout(hardRestoreTimeout);
+    restoreMuteTimeout = null;
+    hardRestoreTimeout = null;
+    muteUntilNextCaption = false;
+    muteLockUntilSec = 0;
+    previousMuteState = null;
+    muteWindowStartSec = null;
+    console.log('[ISweep Timing] mute state reset', { reason });
+  }
+
+  function restoreMuteState(reason) {
+    const video = findVideo();
+    if (video && previousMuteState !== null) {
+      video.muted = previousMuteState; // Restore prior mute state
+      console.log('[ISweep Timing] mute restored', { reason });
+    }
+    clearMuteState(reason);
+  }
+
   let muteWindowStartSec = null; // Last applied mute window start
   let captionBuffer = '';
   let bufferTimer = null;
@@ -73,7 +104,9 @@
       }
     } else {
       // New window
-      previousMuteState = video.muted; // Preserve prior mute state
+      if (previousMuteState === null) {
+        previousMuteState = video.muted; // Preserve prior mute state only once
+      }
       video.muted = true; // Mute start
       muteUntilNextCaption = true;
       muteWindowStartSec = startSec;
@@ -85,29 +118,46 @@
     const remainingMs = Math.max((muteLockUntilSec - nowSec) * 1000, 0);
     if (restoreMuteTimeout) clearTimeout(restoreMuteTimeout);
     restoreMuteTimeout = setTimeout(() => {
-      const v = findVideo();
-      if (v) {
-        v.muted = previousMuteState; // Restore previous mute state
-      }
-      muteUntilNextCaption = false;
-      muteLockUntilSec = 0;
-      restoreMuteTimeout = null;
-      console.log('[ISweep Timing] mute restored (primary timer)', { endSec });
+      restoreMuteState('primary timer');
     }, remainingMs);
 
     // Hard fail-safe to guarantee unmute
     clearHardRestore();
     hardRestoreTimeout = setTimeout(() => {
-      const v = findVideo();
-      if (v) v.muted = previousMuteState;
-      muteLockUntilSec = 0;
-      muteUntilNextCaption = false;
-      restoreMuteTimeout = null;
+      restoreMuteState('hard restore');
       console.log('[ISweep Timing] hard restore fired', { endSec });
     }, remainingMs + HARD_RESTORE_GRACE_MS);
   }
 
-  function applyDecision(decision, captionStartSec, captionDurationSec) {
+  function deriveWordMatches(words) {
+    const matches = [];
+    const lowered = words.map((w) => (w || '').toLowerCase());
+    const sets = [...LANGUAGE_KEYWORDS, ...SEXUAL_KEYWORDS, ...VIOLENCE_KEYWORDS];
+    lowered.forEach((w, idx) => {
+      if (sets.some((kw) => kw === w)) {
+        matches.push(idx);
+      }
+    });
+    return matches;
+  }
+
+  function mergeWindows(windows) {
+    if (!windows.length) return [];
+    windows.sort((a, b) => a.start - b.start);
+    const merged = [windows[0]];
+    for (let i = 1; i < windows.length; i++) {
+      const curr = windows[i];
+      const last = merged[merged.length - 1];
+      if (curr.start <= last.end + WORD_GAP_MERGE_MS / 1000) {
+        last.end = Math.max(last.end, curr.end);
+      } else {
+        merged.push({ ...curr });
+      }
+    }
+    return merged;
+  }
+
+  function applyDecision(decision, payload) {
     // Apply backend decision with timing alignment using caption timing.
     const video = findVideo();
     if (!video) {
@@ -120,21 +170,45 @@
     const nowSec = video.currentTime || 0;
 
     if (action === 'mute') {
-      const durationSec = Math.max(backendDuration, captionDurationSec || backendDuration || 0); // Use caption duration if longer
-      const startSec = (captionStartSec !== null && captionStartSec !== undefined)
-        ? Math.max(captionStartSec - MUTE_PRE_BUFFER_MS / 1000, 0)
-        : nowSec;
-      const endSecRaw = startSec + durationSec;
-      const endSec = endSecRaw + MUTE_POST_BUFFER_MS / 1000;
+      const captionStart = payload.caption_start_sec;
+      const captionDuration = payload.caption_duration_seconds || backendDuration || 0;
+      const wordTimings = payload.word_timings || [];
+      const words = payload.words || [];
 
-      // Skip stale windows (caption ended long ago)
-      const staleMs = (nowSec - endSec) * 1000;
-      if (staleMs > STALE_CAPTION_THRESHOLD_MS) {
-        console.log('[ISweep Timing] stale caption skipped', { startSec, endSec, nowSec, staleMs });
-        return;
+      let windows = [];
+      const matches = deriveWordMatches(words);
+      if (matches.length && wordTimings.length === words.length && captionStart !== null && captionStart !== undefined) {
+        matches.forEach((idx) => {
+          const wt = wordTimings[idx];
+          const startSec = Math.max(captionStart + wt.start - WORD_PRE_BUFFER_MS / 1000, 0);
+          const endSec = captionStart + wt.end + WORD_POST_BUFFER_MS / 1000;
+          windows.push({ start: startSec, end: endSec });
+        });
+        windows = mergeWindows(windows);
       }
 
-      applyMuteWindow(startSec, endSec, decision.reason || 'caption');
+      if (!windows.length) {
+        // Fallback to caption-level window
+        const startSec = (captionStart !== null && captionStart !== undefined)
+          ? Math.max(captionStart - MUTE_PRE_BUFFER_MS / 1000, 0)
+          : nowSec;
+        const endSec = startSec + captionDuration + MUTE_POST_BUFFER_MS / 1000;
+        windows = [{ start: startSec, end: endSec }];
+      }
+
+      windows.forEach(({ start, end }) => {
+        const staleMs = (nowSec - end) * 1000;
+        if (staleMs > STALE_CAPTION_THRESHOLD_MS) {
+          console.log('[ISweep Timing] stale window skipped', { start, end, nowSec, staleMs });
+          return;
+        }
+        // Ignore if fully inside existing window
+        if (muteLockUntilSec > nowSec && end <= muteLockUntilSec && start >= muteWindowStartSec) {
+          console.log('[ISweep Timing] window ignored (inside active)', { start, end, muteLockUntilSec });
+          return;
+        }
+        applyMuteWindow(start, end, decision.reason || 'caption');
+      });
       return;
     }
 
@@ -176,7 +250,7 @@
         return;
       }
       console.log('[ISweep Timing] decision received', response);
-      applyDecision(response, payload.caption_start_sec, payload.caption_duration_seconds);
+      applyDecision(response, payload);
     } catch (err) {
       log('Failed to send caption', err);
     }
@@ -225,7 +299,9 @@
       words: wordTimings
     });
     const startSec = videoTime !== null ? Math.max(videoTime - durationSeconds, 0) : null;
-    sendCaption({ text, caption_duration_seconds: durationSeconds, caption_start_sec: startSec }); // Send ended caption with timing
+    lastCaptionWords = words;
+    lastWordTimings = wordTimings;
+    sendCaption({ text, caption_duration_seconds: durationSeconds, caption_start_sec: startSec, words, word_timings: wordTimings }); // Send ended caption with timing
   }
 
   function processBufferedCaption(rawText) {
@@ -313,7 +389,16 @@
   }
 
   function init() {
-    findVideo(); // Cache video element if present
+    const video = findVideo(); // Cache video element if present
+    if (video) {
+      video.addEventListener('seeking', () => {
+        restoreMuteState('seek');
+      });
+      video.addEventListener('ended', () => {
+        restoreMuteState('ended');
+      });
+    }
+    clearMuteState('init');
     startObserving(); // Begin observing captions
   }
 

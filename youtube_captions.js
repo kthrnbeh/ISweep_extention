@@ -16,9 +16,16 @@
   let previousMuteState = null;
   let previousRate = null;
   let muteUntilNextCaption = false;
+  let muteLockUntilSec = 0; // Active mute window end (seconds, video time)
+  let hardRestoreTimeout = null; // Final fail-safe unmute
+  let muteWindowStartSec = null; // Last applied mute window start
   let captionBuffer = '';
   let bufferTimer = null;
   const BUFFER_DELAY_MS = 150;
+  const MUTE_PRE_BUFFER_MS = 120; // Small lead-in before the word
+  const MUTE_POST_BUFFER_MS = 150; // Small tail after the word
+  const STALE_CAPTION_THRESHOLD_MS = 1200; // Ignore captions too far behind current playhead
+  const HARD_RESTORE_GRACE_MS = 500; // Extra margin to force unmute
 
   function log(...args) {
     console.log(LOG_PREFIX, ...args); // Namespaced logging for debugging
@@ -34,37 +41,112 @@
     return videoEl; // May return null if not found yet
   }
 
-  function applyDecision(decision) {
-    // Apply backend decision to the video element; mute uses caption-change restore plus safety cap.
-    // Playback-only guard: we only change player state (mute/seek/rate) and never alter the underlying media or captions.
+  function clearHardRestore() {
+    if (hardRestoreTimeout) {
+      clearTimeout(hardRestoreTimeout);
+      hardRestoreTimeout = null;
+    }
+  }
+
+  function applyMuteWindow(startSec, endSec, reason) {
+    const video = findVideo();
+    if (!video) return;
+
+    const nowSec = video.currentTime || 0;
+    // Skip stale windows that already ended
+    if (endSec <= nowSec) {
+      console.log('[ISweep Timing] skip stale window', { startSec, endSec, nowSec, reason });
+      return;
+    }
+
+    // If already muted into a window, extend end only when later
+    if (muteLockUntilSec > nowSec) {
+      if (endSec > muteLockUntilSec) {
+        console.log('[ISweep Timing] extend mute window', { prevEnd: muteLockUntilSec, newEnd: endSec, reason });
+        muteLockUntilSec = endSec;
+        if (restoreMuteTimeout) {
+          clearTimeout(restoreMuteTimeout);
+        }
+      } else {
+        console.log('[ISweep Timing] within existing mute window; no change', { muteLockUntilSec, reason });
+        return;
+      }
+    } else {
+      // New window
+      previousMuteState = video.muted; // Preserve prior mute state
+      video.muted = true; // Mute start
+      muteUntilNextCaption = true;
+      muteWindowStartSec = startSec;
+      console.log('[ISweep Timing] mute start', { startSec, endSec, wasMuted: previousMuteState, reason });
+      muteLockUntilSec = endSec;
+    }
+
+    // Safety restore timers
+    const remainingMs = Math.max((muteLockUntilSec - nowSec) * 1000, 0);
+    if (restoreMuteTimeout) clearTimeout(restoreMuteTimeout);
+    restoreMuteTimeout = setTimeout(() => {
+      const v = findVideo();
+      if (v) {
+        v.muted = previousMuteState; // Restore previous mute state
+      }
+      muteUntilNextCaption = false;
+      muteLockUntilSec = 0;
+      restoreMuteTimeout = null;
+      console.log('[ISweep Timing] mute restored (primary timer)', { endSec });
+    }, remainingMs);
+
+    // Hard fail-safe to guarantee unmute
+    clearHardRestore();
+    hardRestoreTimeout = setTimeout(() => {
+      const v = findVideo();
+      if (v) v.muted = previousMuteState;
+      muteLockUntilSec = 0;
+      muteUntilNextCaption = false;
+      restoreMuteTimeout = null;
+      console.log('[ISweep Timing] hard restore fired', { endSec });
+    }, remainingMs + HARD_RESTORE_GRACE_MS);
+  }
+
+  function applyDecision(decision, captionStartSec, captionDurationSec) {
+    // Apply backend decision with timing alignment using caption timing.
     const video = findVideo();
     if (!video) {
       log('No video element found for decision');
       return;
     }
 
-    const durationMs = (decision.duration_seconds || 0) * 1000; // Convert duration to ms
     const action = decision.action || 'none';
-    log('Applying action:', action, 'for', decision.duration_seconds, 'seconds');
+    const backendDuration = decision.duration_seconds || 0;
+    const nowSec = video.currentTime || 0;
 
     if (action === 'mute') {
-      if (restoreMuteTimeout) clearTimeout(restoreMuteTimeout); // Clear any pending restore
-      previousMuteState = video.muted; // Remember prior mute state
-      video.muted = true; // Mute video
-      muteUntilNextCaption = true; // Mark to restore on next caption change
-      log('Muted; will restore on next caption change (safety cap active)');
-      const safetyMs = Math.min(durationMs > 0 ? durationMs : 2000, 2500); // Prevents long mutes if caption timing fails.
-      log('Applied mute for', decision.duration_seconds, 'seconds');
-      restoreMuteTimeout = setTimeout(() => {
-        video.muted = previousMuteState; // Restore prior mute state
-        muteUntilNextCaption = false; // Clear flag
-        restoreMuteTimeout = null; // Clear timer ref
-        log('Restored mute state (safety timeout)');
-      }, safetyMs);
-    } else if (action === 'skip') {
-      video.currentTime = video.currentTime + (decision.duration_seconds || 0); // Seek forward
+      const durationSec = Math.max(backendDuration, captionDurationSec || backendDuration || 0); // Use caption duration if longer
+      const startSec = (captionStartSec !== null && captionStartSec !== undefined)
+        ? Math.max(captionStartSec - MUTE_PRE_BUFFER_MS / 1000, 0)
+        : nowSec;
+      const endSecRaw = startSec + durationSec;
+      const endSec = endSecRaw + MUTE_POST_BUFFER_MS / 1000;
+
+      // Skip stale windows (caption ended long ago)
+      const staleMs = (nowSec - endSec) * 1000;
+      if (staleMs > STALE_CAPTION_THRESHOLD_MS) {
+        console.log('[ISweep Timing] stale caption skipped', { startSec, endSec, nowSec, staleMs });
+        return;
+      }
+
+      applyMuteWindow(startSec, endSec, decision.reason || 'caption');
+      return;
+    }
+
+    if (action === 'skip') {
+      const jump = decision.duration_seconds || 0;
+      video.currentTime = nowSec + jump;
       log('Skipped ahead by', decision.duration_seconds, 'seconds');
-    } else if (action === 'fast_forward') {
+      return;
+    }
+
+    if (action === 'fast_forward') {
+      const durationMs = (decision.duration_seconds || 0) * 1000;
       if (restoreRateTimeout) clearTimeout(restoreRateTimeout); // Clear any pending rate restore
       previousRate = video.playbackRate; // Capture current rate
       video.playbackRate = 2.0; // Speed up playback
@@ -73,10 +155,11 @@
         video.playbackRate = previousRate || 1.0; // Restore rate
         log('Restored playback rate');
       }, durationMs || 8000);
-    } else {
-      muteUntilNextCaption = false; // Ensure flag cleared when no action
-      log('No action applied');
+      return;
     }
+
+    muteUntilNextCaption = false; // Ensure flag cleared when no action
+    log('No action applied');
   }
 
   async function sendCaption(payload) {
@@ -92,8 +175,8 @@
         log('No response for caption');
         return;
       }
-      log('Decision received', response);
-      applyDecision(response);
+      console.log('[ISweep Timing] decision received', response);
+      applyDecision(response, payload.caption_start_sec, payload.caption_duration_seconds);
     } catch (err) {
       log('Failed to send caption', err);
     }
@@ -107,12 +190,14 @@
       clearTimeout(restoreMuteTimeout); // Cancel safety timer
       restoreMuteTimeout = null;
     }
+    clearHardRestore();
     if (video && previousMuteState !== null) {
       video.muted = previousMuteState; // Restore prior mute state
       log('Restored mute state on caption change');
     }
     previousMuteState = null;
     muteUntilNextCaption = false;
+    muteLockUntilSec = 0;
   }
 
   function processEndedCaption(text, durationSeconds, videoTime) {
@@ -139,7 +224,8 @@
       captionDuration: durationSeconds,
       words: wordTimings
     });
-    sendCaption({ text, caption_duration_seconds: durationSeconds }); // Send ended caption with timing
+    const startSec = videoTime !== null ? Math.max(videoTime - durationSeconds, 0) : null;
+    sendCaption({ text, caption_duration_seconds: durationSeconds, caption_start_sec: startSec }); // Send ended caption with timing
   }
 
   function processBufferedCaption(rawText) {

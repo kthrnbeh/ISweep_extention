@@ -196,19 +196,19 @@ async function handleCaptionDecision(text, captionDurationSeconds) {
   const backendUrl = await getBackendUrl();
   const token = await getAuthToken();
   if (!token) {
-    console.warn(LOG_PREFIX, 'missing token; cannot analyze caption');
+    console.warn('[ISWEEP][BG][AUTH] missing token; blocking /event');
     return { action: 'none', reason: 'missing token', duration_seconds: 0, matched_category: null };
   }
 
   let res;
   let responseBody = '';
   try {
-    console.log('[ISWEEP][EVENT] sending caption to backend', {
+    console.log('[ISWEEP][BG][/event] sending caption', {
       backendUrl,
       textPreview: text ? text.slice(0, 60) : '',
       captionDurationSeconds,
     });
-    console.log(LOG_PREFIX, 'calling /event', { backendUrl });
+    console.log('[ISWEEP][BG][/event] calling /event', { backendUrl });
     res = await fetch(`${backendUrl}/event`, {
       method: 'POST',
       headers: {
@@ -219,6 +219,12 @@ async function handleCaptionDecision(text, captionDurationSeconds) {
     });
 
     responseBody = await res.text();
+    if (res.status === 401) {
+      console.warn('[ISWEEP][BG][/event] unauthorized; clearing session');
+      await chrome.storage.local.remove([STORAGE_KEYS.TOKEN, TOKEN_KEY, STORAGE_KEYS.USER_ID, STORAGE_KEYS.AUTH, STORAGE_KEYS.PREFS]);
+      return { action: 'none', reason: 'unauthorized', duration_seconds: 0, matched_category: null };
+    }
+
     if (!res.ok) {
       const meta = {
         backendUrl,
@@ -244,8 +250,7 @@ async function handleCaptionDecision(text, captionDurationSeconds) {
       }
     }
     // Expected keys: action, duration_seconds, matched_category, reason
-    console.log('[ISWEEP][EVENT] decision received', decision);
-    console.log(LOG_PREFIX, 'decision received', decision);
+    console.log('[ISWEEP][BG][/event] decision received', decision);
     return decision;
   } catch (err) {
     const meta = {
@@ -261,7 +266,7 @@ async function handleCaptionDecision(text, captionDurationSeconds) {
 
 async function handleLogin(email, password) {
   const backendUrl = await getBackendUrl();
-  console.log(LOG_PREFIX, 'login start', backendUrl);
+  console.log('[ISWEEP][BG][AUTH] login start', backendUrl);
   try {
     const res = await fetch(`${backendUrl}/auth/login`, {
       method: 'POST',
@@ -270,7 +275,7 @@ async function handleLogin(email, password) {
     });
     if (res.status !== 200 && res.status !== 201) {
       const msg = await res.text();
-      console.warn(LOG_PREFIX, 'login failed', res.status, msg || '');
+      console.warn('[ISWEEP][BG][AUTH] login failed', res.status, msg || '');
       return { ok: false, error: msg || `status ${res.status}` };
     }
     const data = await res.json();
@@ -285,12 +290,12 @@ async function handleLogin(email, password) {
     try {
       await fetchPreferences(token, backendUrl);
     } catch (prefErr) {
-      console.warn(LOG_PREFIX, 'prefs sync failed after login', prefErr?.message || prefErr);
+      console.warn('[ISWEEP][BG][AUTH] prefs sync failed after login', prefErr?.message || prefErr);
     }
-    console.log(LOG_PREFIX, 'login success', res.status);
+    console.log('[ISWEEP][BG][AUTH] login success', res.status);
     return { ok: true, status: res.status };
   } catch (err) {
-    console.error(LOG_PREFIX, 'login failed', err?.message || err);
+    console.error('[ISWEEP][BG][AUTH] login failed', err?.message || err);
     return { ok: false, error: err?.message || 'login failed' };
   }
 }

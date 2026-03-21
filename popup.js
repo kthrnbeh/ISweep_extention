@@ -306,7 +306,7 @@ async function handleQuickLogin() {
       alert('Login failed. Please check your credentials and backend URL.');
       return;
     }
-    console.log(LOG_PREFIX, 'login success', response.status || '');
+    console.log('[ISWEEP][POPUP] login success', response.status || '');
 
     const displayName = email.split('@')[0];
     const initials = getInitials(displayName);
@@ -393,9 +393,10 @@ async function handleLogout(e) {
       STORAGE_KEYS.TOKEN,
       STORAGE_KEYS.USER_ID,
       STORAGE_KEYS.PREFS,
+      TOKEN_KEY,
     ]);
     
-    console.log('[ISweep Popup] Logged out successfully');
+    console.log('[ISWEEP][POPUP] Logged out successfully');
     
     // Render logged out state
     renderLoggedOutState();

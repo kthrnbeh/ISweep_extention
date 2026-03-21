@@ -27,6 +27,8 @@
   const VIOLENCE_KEYWORDS = ['kill', 'killed', 'murder', 'shot', 'shoot', 'stab', 'blood', 'violence', 'violent', 'attack', 'fight', 'gun', 'weapon', 'death', 'die', 'dying', 'dead', 'assault', 'beat', 'beating', 'punch', 'hit'];
   const WORD_FAMILY_VARIANTS = {
     bitch: ['biiitch', 'biiiitch', 'bitchh', 'bitchhh', 'bitccch', 'biatch'],
+    fuck: ['fuk', 'fuuuk', 'fuuuuk', 'fuuuuck', 'fuckk', 'fuckkk'],
+    shit: ['shiiit', 'shiiiit', 'shittt'],
     sex: ['sexx', 'sexxx', 'sexy', 'sexual'],
   };
 
@@ -239,7 +241,7 @@
             const matchedVariant = originalWords[idx] || w;
             const prolonged = isProlongedVariant(w, normalizedFilter);
             matches.set(idx, { index: idx, baseWord: rawFilter, matchedVariant, prolonged });
-            console.log('[ISWEEP][MATCH]', { caption: captionText || words.join(' '), baseWord: rawFilter, matchedVariant });
+            console.log('[ISWEEP][MATCH]', { caption: captionText || words.join(' '), baseWord: rawFilter, matchedVariant, prolonged });
           }
         });
         if (captionForFullTest && regex.test(captionForFullTest)) {
@@ -319,6 +321,7 @@
               reason,
               baseWord: match.baseWord,
               matchedVariant: match.matchedVariant,
+              prolonged: match.prolonged,
             });
           }
           return { start: startSec, end: endSec };

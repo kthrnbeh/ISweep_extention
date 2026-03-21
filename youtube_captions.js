@@ -6,6 +6,7 @@
   'use strict';
 
   const LOG_PREFIX = '[ISWEEP][YT]';
+  const STORAGE_KEYS = { PREFS: 'isweepPreferences' };
   // Track caption text and when it started so we can measure how long words are spoken.
   // Playback-only: ISweep never edits media or captions; it only controls live playback state (mute/unmute/seek/rate).
   let lastCaptionText = '';
@@ -21,6 +22,8 @@
   const LANGUAGE_KEYWORDS = ['hell'];
   const SEXUAL_KEYWORDS = ['sex', 'sexual', 'naked', 'nude', 'explicit', 'rape', 'intercourse', 'seduce', 'seduction'];
   const VIOLENCE_KEYWORDS = ['kill', 'killed', 'murder', 'shot', 'shoot', 'stab', 'blood', 'violence', 'violent', 'attack', 'fight', 'gun', 'weapon', 'death', 'die', 'dying', 'dead', 'assault', 'beat', 'beating', 'punch', 'hit'];
+
+  let cachedPreferences = null;
 
   let lastCaptionWords = [];
   let lastWordTimings = [];
@@ -63,14 +66,52 @@
     console.log(LOG_PREFIX, ...args); // Namespaced logging for debugging
   }
 
-  function normalizeWord(word) {
-    return (word || '').toLowerCase().replace(/[^a-z0-9*]/g, '').trim();
+  function normalizeCaptionWord(word) {
+    return (word || '').toLowerCase().replace(/[^a-z0-9]/g, '').trim();
+  }
+
+  function normalizeCaptionText(text) {
+    return (text || '').toLowerCase().replace(/[^\w\s]/g, ' ').trim();
+  }
+
+  function normalizeFilterWord(word) {
+    return (word || '').toLowerCase().replace(/[^\w*\s]/g, '').trim();
   }
 
   function maskToRegex(word) {
     const escaped = word.replace(/[-/\\^$+?.()|[\]{}]/g, '\\$&');
     const pattern = escaped.replace(/\*/g, '.*');
     return new RegExp(`\\b${pattern}\\b`, 'i');
+  }
+
+  async function loadPreferencesFromStorage() {
+    try {
+      const store = await chrome.storage.local.get([STORAGE_KEYS.PREFS]);
+      cachedPreferences = store[STORAGE_KEYS.PREFS] || null;
+    } catch (err) {
+      console.warn('[ISWEEP][MATCH] failed to load prefs', err?.message || err);
+      cachedPreferences = null;
+    }
+  }
+
+  chrome.storage.onChanged.addListener((changes, areaName) => {
+    if (areaName !== 'local') return;
+    if (changes[STORAGE_KEYS.PREFS]) {
+      cachedPreferences = changes[STORAGE_KEYS.PREFS].newValue || null;
+    }
+  });
+
+  function getFilterWords() {
+    const blocklist = cachedPreferences && typeof cachedPreferences === 'object'
+      ? cachedPreferences.blocklist
+      : null;
+    const enabled = blocklist && blocklist.enabled !== false;
+    const items = enabled && Array.isArray(blocklist?.items) ? blocklist.items : [];
+    const normalized = items
+      .map((item) => normalizeFilterWord(String(item || '')))
+      .filter(Boolean);
+    if (normalized.length) return normalized;
+    return [...LANGUAGE_KEYWORDS, ...SEXUAL_KEYWORDS, ...VIOLENCE_KEYWORDS].map(normalizeFilterWord).filter(Boolean);
   }
 
   function findVideo() {
@@ -142,22 +183,24 @@
 
   function deriveWordMatches(words, captionText) {
     const matches = new Set();
-    const normalizedWords = words.map((w) => normalizeWord(w));
-    const filters = [...LANGUAGE_KEYWORDS, ...SEXUAL_KEYWORDS, ...VIOLENCE_KEYWORDS].map(normalizeWord);
-    const regexes = filters.map(maskToRegex);
-    const captionForFullTest = (captionText || words.join(' ')).toLowerCase().replace(/[^a-z0-9\s]/g, ' ');
+    const normalizedCaption = normalizeCaptionText(captionText || words.join(' '));
+    const normalizedWords = (Array.isArray(words) && words.length ? words : normalizedCaption.split(/\s+/))
+      .map((w) => normalizeCaptionWord(w));
+    const captionForFullTest = normalizedCaption.replace(/\s+/g, ' ').trim();
+    const filters = getFilterWords();
 
-    regexes.forEach((regex, regexIdx) => {
-      const rawFilter = filters[regexIdx];
+    filters.forEach((rawFilter) => {
+      const normalizedFilter = normalizeFilterWord(rawFilter);
+      if (!normalizedFilter) return;
+      const regex = maskToRegex(normalizedFilter);
       normalizedWords.forEach((w, idx) => {
         if (w && regex.test(w)) {
           matches.add(idx);
-          console.log('[ISWEEP][MATCH]', { caption: captionText || words.join(' '), matchedWord: rawFilter, via: 'word' });
+          console.log('[ISWEEP][MATCH]', { caption: captionText || words.join(' '), matchedWord: rawFilter });
         }
       });
-      if (regex.test(captionForFullTest)) {
-        // Keep a log even if per-word capture already happened
-        console.log('[ISWEEP][MATCH]', { caption: captionText || words.join(' '), matchedWord: rawFilter, via: 'caption' });
+      if (captionForFullTest && regex.test(captionForFullTest)) {
+        console.log('[ISWEEP][MATCH]', { caption: captionText || words.join(' '), matchedWord: rawFilter });
       }
     });
 
@@ -192,51 +235,68 @@
     const backendDuration = decision.duration_seconds || 0;
     const nowSec = video.currentTime || 0;
 
-    if (action === 'mute') {
-      const captionStart = payload.caption_start_sec;
-      const captionDuration = payload.caption_duration_seconds || backendDuration || 0;
-      const wordTimings = payload.word_timings || [];
-      const words = payload.words || [];
+    const words = payload.words || [];
+    const wordTimings = payload.word_timings || [];
+    const captionStart = payload.caption_start_sec;
+    const captionDuration = payload.caption_duration_seconds || backendDuration || 0;
+    const matches = deriveWordMatches(words, payload.text);
+    if (matches.length) {
+      console.log('[ISweep Timing] matched word indexes', matches);
+    }
 
-      let windows = [];
-      const matches = deriveWordMatches(words, payload.text);
-      if (matches.length) {
-        console.log('[ISweep Timing] matched word indexes', matches);
-      }
-      if (matches.length && wordTimings.length === words.length && captionStart !== null && captionStart !== undefined) {
-        matches.forEach((idx) => {
+    const buildWindowsFromMatches = () => {
+      if (!matches.length) return [];
+      if (!wordTimings.length || wordTimings.length !== words.length) return [];
+      if (captionStart === null || captionStart === undefined) return [];
+      const windows = matches
+        .map((idx) => {
           const wt = wordTimings[idx];
+          if (!wt) return null;
           const startSec = Math.max(captionStart + wt.start - (WORD_PRE_BUFFER_MS + WORD_LATENCY_COMP_MS) / 1000, 0);
           const endSec = captionStart + wt.end + WORD_POST_BUFFER_MS / 1000;
-          windows.push({ start: startSec, end: endSec });
-        });
-        console.log('[ISweep Timing] raw word windows', windows);
-        windows = mergeWindows(windows);
-        console.log('[ISweep Timing] merged word windows', windows);
-      }
+          return { start: startSec, end: endSec };
+        })
+        .filter(Boolean);
+      if (!windows.length) return [];
+      console.log('[ISweep Timing] raw word windows', windows);
+      const merged = mergeWindows(windows);
+      console.log('[ISweep Timing] merged word windows', merged);
+      return merged;
+    };
 
-      if (!windows.length) {
-        // Fallback to caption-level window
-        const startSec = (captionStart !== null && captionStart !== undefined)
+    const applyWindows = (windows, reason) => {
+      let candidateWindows = windows;
+      if (!candidateWindows.length) {
+        const startSec = captionStart !== null && captionStart !== undefined
           ? Math.max(captionStart - MUTE_PRE_BUFFER_MS / 1000, 0)
           : nowSec;
         const endSec = startSec + captionDuration + MUTE_POST_BUFFER_MS / 1000;
-        windows = [{ start: startSec, end: endSec }];
+        candidateWindows = [{ start: startSec, end: endSec }];
       }
 
-      windows.forEach(({ start, end }) => {
+      candidateWindows.forEach(({ start, end }) => {
         const staleMs = (nowSec - end) * 1000;
         if (staleMs > STALE_CAPTION_THRESHOLD_MS) {
           console.log('[ISweep Timing] stale window skipped', { start, end, nowSec, staleMs });
           return;
         }
-        // Ignore if fully inside existing window
         if (muteLockUntilSec > nowSec && end <= muteLockUntilSec && start >= muteWindowStartSec) {
           console.log('[ISweep Timing] window ignored (inside active)', { start, end, muteLockUntilSec });
           return;
         }
-        applyMuteWindow(start, end, decision.reason || 'caption');
+        applyMuteWindow(start, end, reason);
       });
+    };
+
+    if (action === 'mute') {
+      const windows = buildWindowsFromMatches();
+      applyWindows(windows, decision.reason || 'caption');
+      return;
+    }
+
+    if (action === 'none' && matches.length) {
+      const windows = buildWindowsFromMatches();
+      applyWindows(windows, 'local match');
       return;
     }
 
@@ -426,6 +486,7 @@
         restoreMuteState('ended');
       });
     }
+    loadPreferencesFromStorage();
     clearMuteState('init');
     startObserving(); // Begin observing captions
   }

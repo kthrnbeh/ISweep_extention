@@ -18,10 +18,17 @@
   const WORD_POST_BUFFER_MS = 220; // Tail after matched word
   const WORD_GAP_MERGE_MS = 160; // Merge close windows to avoid choppiness
   const WORD_LATENCY_COMP_MS = 120; // Pull window earlier to compensate caption/render delay
+  const DEFAULT_MIN_MUTE_MS = 1000; // Floor for short words
+  const PROLONGED_WORD_MIN_MUTE_MS = 1400; // Floor for stretched words
+  const MAX_MUTE_MS = 2500; // Hard cap to avoid long mutes
 
   const LANGUAGE_KEYWORDS = ['hell'];
   const SEXUAL_KEYWORDS = ['sex', 'sexual', 'naked', 'nude', 'explicit', 'rape', 'intercourse', 'seduce', 'seduction'];
   const VIOLENCE_KEYWORDS = ['kill', 'killed', 'murder', 'shot', 'shoot', 'stab', 'blood', 'violence', 'violent', 'attack', 'fight', 'gun', 'weapon', 'death', 'die', 'dying', 'dead', 'assault', 'beat', 'beating', 'punch', 'hit'];
+  const WORD_FAMILY_VARIANTS = {
+    bitch: ['biiitch', 'biiiitch', 'bitchh', 'bitchhh', 'bitccch', 'biatch'],
+    sex: ['sexx', 'sexxx', 'sexy', 'sexual'],
+  };
 
   let cachedPreferences = null;
 
@@ -76,6 +83,33 @@
 
   function normalizeFilterWord(word) {
     return (word || '').toLowerCase().replace(/[^\w*\s]/g, '').trim();
+  }
+
+  function buildStretchRegex(base) {
+    const safe = base.replace(/[-/\\^$+?.()|[\]{}]/g, '\\$&');
+    const stretched = safe.replace(/[aeiou]/gi, '$&+');
+    const last = safe.slice(-1);
+    return new RegExp(`\\b${stretched}${last ? `${last}+` : ''}\\b`, 'i');
+  }
+
+  function expandWordFamily(base) {
+    const normalized = normalizeFilterWord(base);
+    const variants = new Set();
+    if (normalized) variants.add(normalized);
+    const extras = WORD_FAMILY_VARIANTS[normalized] || [];
+    extras.forEach((v) => {
+      const nv = normalizeFilterWord(v);
+      if (nv) variants.add(nv);
+    });
+    return Array.from(variants.values());
+  }
+
+  function isProlongedVariant(wordNorm, baseNorm) {
+    if (!wordNorm || !baseNorm) return false;
+    if (wordNorm.length - baseNorm.length >= 2) return true;
+    if (/(aa+|ee+|ii+|oo+|uu+)/i.test(wordNorm)) return true;
+    if (/([a-z])\1{2,}$/i.test(wordNorm)) return true;
+    return false;
   }
 
   function maskToRegex(word) {
@@ -182,26 +216,36 @@
   }
 
   function deriveWordMatches(words, captionText) {
-    const matches = new Set();
+    const matches = new Map();
     const normalizedCaption = normalizeCaptionText(captionText || words.join(' '));
-    const normalizedWords = (Array.isArray(words) && words.length ? words : normalizedCaption.split(/\s+/))
-      .map((w) => normalizeCaptionWord(w));
+    const originalWords = Array.isArray(words) && words.length ? words : normalizedCaption.split(/\s+/);
+    const normalizedWords = originalWords.map((w) => normalizeCaptionWord(w));
     const captionForFullTest = normalizedCaption.replace(/\s+/g, ' ').trim();
     const filters = getFilterWords();
 
     filters.forEach((rawFilter) => {
       const normalizedFilter = normalizeFilterWord(rawFilter);
       if (!normalizedFilter) return;
-      const regex = maskToRegex(normalizedFilter);
-      normalizedWords.forEach((w, idx) => {
-        if (w && regex.test(w)) {
-          matches.add(idx);
-          console.log('[ISWEEP][MATCH]', { caption: captionText || words.join(' '), matchedWord: rawFilter });
+      const variants = expandWordFamily(normalizedFilter);
+      const regexes = [maskToRegex(normalizedFilter), buildStretchRegex(normalizedFilter)];
+      variants.forEach((variant) => {
+        if (variant !== normalizedFilter) regexes.push(maskToRegex(variant));
+      });
+
+      regexes.forEach((regex) => {
+        normalizedWords.forEach((w, idx) => {
+          if (!w || matches.has(idx)) return;
+          if (regex.test(w)) {
+            const matchedVariant = originalWords[idx] || w;
+            const prolonged = isProlongedVariant(w, normalizedFilter);
+            matches.set(idx, { index: idx, baseWord: rawFilter, matchedVariant, prolonged });
+            console.log('[ISWEEP][MATCH]', { caption: captionText || words.join(' '), baseWord: rawFilter, matchedVariant });
+          }
+        });
+        if (captionForFullTest && regex.test(captionForFullTest)) {
+          console.log('[ISWEEP][MATCH]', { caption: captionText || words.join(' '), baseWord: rawFilter, matchedVariant: normalizedFilter });
         }
       });
-      if (captionForFullTest && regex.test(captionForFullTest)) {
-        console.log('[ISWEEP][MATCH]', { caption: captionText || words.join(' '), matchedWord: rawFilter });
-      }
     });
 
     return Array.from(matches.values());
@@ -241,7 +285,7 @@
     const captionDuration = payload.caption_duration_seconds || backendDuration || 0;
     const matches = deriveWordMatches(words, payload.text);
     if (matches.length) {
-      console.log('[ISweep Timing] matched word indexes', matches);
+      console.log('[ISweep Timing] matched word indexes', matches.map((m) => m.index));
     }
 
     const buildWindowsFromMatches = () => {
@@ -249,11 +293,34 @@
       if (!wordTimings.length || wordTimings.length !== words.length) return [];
       if (captionStart === null || captionStart === undefined) return [];
       const windows = matches
-        .map((idx) => {
-          const wt = wordTimings[idx];
+        .map((match) => {
+          const wt = wordTimings[match.index];
           if (!wt) return null;
           const startSec = Math.max(captionStart + wt.start - (WORD_PRE_BUFFER_MS + WORD_LATENCY_COMP_MS) / 1000, 0);
-          const endSec = captionStart + wt.end + WORD_POST_BUFFER_MS / 1000;
+          let endSec = captionStart + wt.end + WORD_POST_BUFFER_MS / 1000;
+          const originalMs = Math.max((endSec - startSec) * 1000, 0);
+          const floorMs = match.prolonged ? PROLONGED_WORD_MIN_MUTE_MS : DEFAULT_MIN_MUTE_MS;
+          let finalMs = originalMs;
+          let reason = '';
+          if (finalMs < floorMs) {
+            finalMs = floorMs;
+            endSec = startSec + finalMs / 1000;
+            reason = match.prolonged ? 'prolonged variant floor' : 'floor';
+          }
+          if (finalMs > MAX_MUTE_MS) {
+            finalMs = MAX_MUTE_MS;
+            endSec = startSec + finalMs / 1000;
+            reason = reason ? `${reason}; max cap` : 'max cap';
+          }
+          if (reason) {
+            console.log('[ISweep Timing] adjusted mute window', {
+              originalMs: Math.round(originalMs),
+              finalMs: Math.round(finalMs),
+              reason,
+              baseWord: match.baseWord,
+              matchedVariant: match.matchedVariant,
+            });
+          }
           return { start: startSec, end: endSec };
         })
         .filter(Boolean);

@@ -14,15 +14,15 @@
   let videoEl = null;
   let restoreMuteTimeout = null;
   let restoreRateTimeout = null;
-  const WORD_PRE_BUFFER_MS = 160; // Lead-in before matched word
-  const WORD_POST_BUFFER_MS = 220; // Tail after matched word
+  const WORD_PRE_BUFFER_MS = 200; // Lead-in before matched word
+  const WORD_POST_BUFFER_MS = 320; // Tail after matched word
   const WORD_GAP_MERGE_MS = 160; // Merge close windows to avoid choppiness
   const WORD_LATENCY_COMPENSATION_MS = 120; // Pull window earlier to compensate caption/render delay
   const DEFAULT_MIN_MUTE_MS = 2000; // Floor for short words (2s target)
   const PROLONGED_WORD_MIN_MUTE_MS = 2400; // Floor for stretched words (~2.4s)
   const MAX_MUTE_MS = 3200; // Hard cap to avoid long mutes (~3.2s)
 
-  const LANGUAGE_KEYWORDS = ['hell', 'bitch'];
+  const LANGUAGE_KEYWORDS = ['hell', 'bitch', 'b*tch'];
   const SEXUAL_KEYWORDS = ['sex', 'sexual', 'naked', 'nude', 'explicit', 'rape', 'intercourse', 'seduce', 'seduction'];
   const VIOLENCE_KEYWORDS = ['kill', 'killed', 'murder', 'shot', 'shoot', 'stab', 'blood', 'violence', 'violent', 'attack', 'fight', 'gun', 'weapon', 'death', 'die', 'dying', 'dead', 'assault', 'beat', 'beating', 'punch', 'hit'];
   const WORD_FAMILY_VARIANTS = {
@@ -102,8 +102,8 @@
   let captionBuffer = '';
   let bufferTimer = null;
   const BUFFER_DELAY_MS = 150;
-  const MUTE_PRE_BUFFER_MS = 120; // Small lead-in before the word
-  const MUTE_POST_BUFFER_MS = 150; // Small tail after the word
+  const MUTE_PRE_BUFFER_MS = 180; // Small lead-in before the word
+  const MUTE_POST_BUFFER_MS = 280; // Small tail after the word
   const STALE_CAPTION_THRESHOLD_MS = 1200; // Ignore captions too far behind current playhead
   const HARD_RESTORE_GRACE_MS = 500; // Extra margin to force unmute
 
@@ -189,6 +189,8 @@
     const prefs = normalizePreferences(cachedPreferences);
     const blocklistItems = Array.isArray(prefs?.blocklist?.items) ? prefs.blocklist.items : [];
     const languageItems = Array.isArray(prefs?.categories?.language?.items) ? prefs.categories.language.items : [];
+    const customCount = blocklistItems.length;
+    const categoryCount = languageItems.length;
 
     const combined = Array.from(
       new Set(
@@ -199,15 +201,26 @@
     );
 
     if (combined.length) {
-      console.log('[ISWEEP][FILTERS]', { source: 'prefs', count: combined.length, words: combined });
-      return combined;
+      console.log('[ISWEEP][FILTERS]', {
+        source: 'prefs',
+        count: combined.length,
+        customCount,
+        categoryCount,
+      });
+      return { words: combined, source: 'prefs', customCount, categoryCount };
     }
 
     const fallback = [...LANGUAGE_KEYWORDS, ...SEXUAL_KEYWORDS, ...VIOLENCE_KEYWORDS]
       .map(normalizeFilterWord)
       .filter(Boolean);
-    console.log('[ISWEEP][FILTERS]', { source: 'fallback', count: fallback.length, words: fallback, note: 'no saved words loaded' });
-    return fallback;
+    console.log('[ISWEEP][FILTERS]', {
+      source: 'fallback',
+      count: fallback.length,
+      customCount,
+      categoryCount,
+      note: 'no saved words loaded',
+    });
+    return { words: fallback, source: 'fallback', customCount, categoryCount };
   }
 
   function findVideo() {
@@ -239,6 +252,8 @@
     }
 
     // If already muted into a window, ignore fully contained windows; extend only when later
+    const durationMs = Math.max((endSec - startSec) * 1000, 0);
+
     if (muteLockUntilSec > nowSec) {
       const activeStart = muteWindowStartSec ?? -Infinity;
       const insideActive = startSec >= activeStart && endSec <= muteLockUntilSec;
@@ -247,7 +262,12 @@
         return;
       }
       if (endSec > muteLockUntilSec) {
-        console.log('[ISweep Timing] extend mute window', { prevEnd: muteLockUntilSec, newEnd: endSec, reason });
+        console.log('[ISweep Timing] extend mute window', {
+          prevEnd: muteLockUntilSec,
+          newEnd: endSec,
+          reason,
+          durationMs,
+        });
         muteLockUntilSec = endSec;
         if (restoreMuteTimeout) {
           clearTimeout(restoreMuteTimeout);
@@ -264,7 +284,13 @@
       video.muted = true; // Mute start
       muteUntilNextCaption = true;
       muteWindowStartSec = startSec;
-      console.log('[ISweep Timing] mute start', { startSec, endSec, wasMuted: previousMuteState, reason });
+      console.log('[ISweep Timing] mute start', {
+        startSec,
+        endSec,
+        durationMs,
+        wasMuted: previousMuteState,
+        reason,
+      });
       muteLockUntilSec = endSec;
     }
 
@@ -292,7 +318,8 @@
     const normalizedWords = sourceWords.map((w) => normalizeCaptionWord(w));
     const originalWords = sourceWords;
     const captionForFullTest = normalizedCaption.replace(/\s+/g, ' ').trim();
-    const filters = getFilterWords();
+    const filterMeta = getFilterWords();
+    const filters = filterMeta.words || [];
 
     filters.forEach((rawFilter) => {
       const normalizedFilter = normalizeFilterWord(rawFilter);
@@ -311,23 +338,25 @@
           if (regex.test(w)) {
             const matchedVariant = originalWords[idx] || w;
             const prolonged = isProlongedVariant(w, normalizedFilter);
-            matches.set(idx, { index: idx, baseWord: rawFilter, matchedVariant, prolonged });
+            matches.set(idx, { index: idx, baseWord: rawFilter, matchedVariant, prolonged, source: filterMeta.source });
             matchedIndexes.add(idx);
             console.log('[ISWEEP][MATCH]', {
-              caption: captionText || words.join(' '),
-              baseWord: rawFilter,
+              matchedWord: rawFilter,
               matchedVariant,
-              matchedIndexes: Array.from(matchedIndexes.values()),
+              wordIndex: idx,
+              source: filterMeta.source,
+              caption: captionText || words.join(' '),
               prolonged,
             });
           }
         });
         if (captionForFullTest && regex.test(captionForFullTest)) {
           console.log('[ISWEEP][MATCH]', {
-            caption: captionText || words.join(' '),
-            baseWord: rawFilter,
+            matchedWord: rawFilter,
             matchedVariant: normalizedFilter,
-            matchedIndexes: Array.from(matchedIndexes.values()),
+            wordIndex: -1,
+            source: filterMeta.source,
+            caption: captionText || words.join(' '),
             prolonged: false,
           });
         }
@@ -415,20 +444,17 @@
         })
         .filter(Boolean);
       if (!windows.length) return [];
-      console.log('[ISweep Timing] raw word windows', windows);
+      console.log('[ISweep Timing] raw word windows', windows.map((w) => ({ ...w, durationMs: Math.round((w.end - w.start) * 1000) })));
       const merged = mergeWindows(windows);
-      console.log('[ISweep Timing] merged word windows', merged);
+      console.log('[ISweep Timing] merged word windows', merged.map((w) => ({ ...w, durationMs: Math.round((w.end - w.start) * 1000) })));
       return merged;
     };
 
     const applyWindows = (windows, reason) => {
       let candidateWindows = windows;
       if (!candidateWindows.length) {
-        const startSec = captionStart !== null && captionStart !== undefined
-          ? Math.max(captionStart - MUTE_PRE_BUFFER_MS / 1000, 0)
-          : nowSec;
-        const endSec = startSec + captionDuration + MUTE_POST_BUFFER_MS / 1000;
-        candidateWindows = [{ start: startSec, end: endSec }];
+        console.log('[ISweep Timing] no word windows; skip mute fallback', { reason, captionDuration });
+        return;
       }
 
       candidateWindows.forEach(({ start, end }) => {

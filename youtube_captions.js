@@ -150,21 +150,22 @@
   }
 
   function getFilterWords() {
-    const blocklist = cachedPreferences && typeof cachedPreferences === 'object'
-      ? cachedPreferences.blocklist
-      : null;
-    const enabled = blocklist && blocklist.enabled !== false;
-    const items = enabled && Array.isArray(blocklist?.items) ? blocklist.items : [];
-    const normalized = items
+    const prefs = cachedPreferences && typeof cachedPreferences === 'object' ? cachedPreferences : null;
+    const blocklist = prefs && typeof prefs === 'object' ? prefs.blocklist : null;
+    const languageItems = Array.isArray(prefs?.categories?.language?.items) ? prefs.categories.language.items : [];
+
+    const blocklistEnabled = blocklist && blocklist.enabled !== false;
+    const blocklistItems = blocklistEnabled && Array.isArray(blocklist?.items) ? blocklist.items : [];
+    const combined = (blocklistItems.length ? blocklistItems : languageItems)
       .map((item) => normalizeFilterWord(String(item || '')))
       .filter(Boolean);
-    const hasBMask = normalized.some((w) => w.includes('b*'));
-    if (normalized.length) {
-      console.log('[ISWEEP][FILTERS]', { source: 'prefs.blocklist', count: normalized.length, hasBMask: hasBMask || normalized.includes('bitch') });
-      return normalized;
+    const hasBMask = combined.some((w) => w.includes('b*'));
+    if (combined.length) {
+      console.log('[ISWEEP][FILTERS]', { source: blocklistItems.length ? 'prefs.blocklist' : 'prefs.categories.language.items', count: combined.length, hasBMask: hasBMask || combined.includes('bitch'), items: combined });
+      return combined;
     }
     const fallback = [...LANGUAGE_KEYWORDS, ...SEXUAL_KEYWORDS, ...VIOLENCE_KEYWORDS].map(normalizeFilterWord).filter(Boolean);
-    console.log('[ISWEEP][FILTERS]', { source: 'fallback', count: fallback.length, hasBMask: false });
+    console.log('[ISWEEP][FILTERS]', { source: 'fallback', count: fallback.length, hasBMask: false, items: fallback });
     return fallback;
   }
 

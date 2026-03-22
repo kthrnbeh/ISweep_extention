@@ -75,8 +75,9 @@ async function fetchPreferences(token, backendUrl) {
     throw new Error(`status ${res.status} ${body}`);
   }
   const prefs = await res.json();
-  await chrome.storage.local.set({ [STORAGE_KEYS.PREFS]: prefs });
-  return { prefs, status: res.status };
+  const normalized = normalizePreferences(prefs); // Ensure blocklist/items always present
+  await chrome.storage.local.set({ [STORAGE_KEYS.PREFS]: normalized });
+  return { prefs: normalized, status: res.status };
 }
 
 // Icon paths (will use emoji/text as fallback if actual icons don't exist)

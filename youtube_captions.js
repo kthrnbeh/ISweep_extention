@@ -158,8 +158,14 @@
     const normalized = items
       .map((item) => normalizeFilterWord(String(item || '')))
       .filter(Boolean);
-    if (normalized.length) return normalized;
-    return [...LANGUAGE_KEYWORDS, ...SEXUAL_KEYWORDS, ...VIOLENCE_KEYWORDS].map(normalizeFilterWord).filter(Boolean);
+    const hasBMask = normalized.some((w) => w.includes('b*'));
+    if (normalized.length) {
+      console.log('[ISWEEP][FILTERS]', { source: 'prefs.blocklist', count: normalized.length, hasBMask: hasBMask || normalized.includes('bitch') });
+      return normalized;
+    }
+    const fallback = [...LANGUAGE_KEYWORDS, ...SEXUAL_KEYWORDS, ...VIOLENCE_KEYWORDS].map(normalizeFilterWord).filter(Boolean);
+    console.log('[ISWEEP][FILTERS]', { source: 'fallback', count: fallback.length, hasBMask: false });
+    return fallback;
   }
 
   function findVideo() {
@@ -236,6 +242,7 @@
       ? words
       : (normalizedCaption ? normalizedCaption.split(/\s+/) : []);
     const normalizedWords = sourceWords.map((w) => normalizeCaptionWord(w));
+    const originalWords = sourceWords;
     const captionForFullTest = normalizedCaption.replace(/\s+/g, ' ').trim();
     const filters = getFilterWords();
 
@@ -248,6 +255,8 @@
         if (variant !== normalizedFilter) regexes.push(maskToRegex(variant));
       });
 
+      const matchedIndexes = new Set();
+
       regexes.forEach((regex) => {
         normalizedWords.forEach((w, idx) => {
           if (!w || matches.has(idx)) return;
@@ -255,11 +264,12 @@
             const matchedVariant = originalWords[idx] || w;
             const prolonged = isProlongedVariant(w, normalizedFilter);
             matches.set(idx, { index: idx, baseWord: rawFilter, matchedVariant, prolonged });
-            console.log('[ISWEEP][MATCH]', { caption: captionText || words.join(' '), baseWord: rawFilter, matchedVariant, prolonged });
+            matchedIndexes.add(idx);
+            console.log('[ISWEEP][MATCH]', { caption: captionText || words.join(' '), matchedWord: rawFilter, matchedIndexes: Array.from(matchedIndexes.values()) });
           }
         });
         if (captionForFullTest && regex.test(captionForFullTest)) {
-          console.log('[ISWEEP][MATCH]', { caption: captionText || words.join(' '), baseWord: rawFilter, matchedVariant: normalizedFilter });
+          console.log('[ISWEEP][MATCH]', { caption: captionText || words.join(' '), matchedWord: rawFilter, matchedIndexes: Array.from(matchedIndexes.values()) });
         }
       });
     });
@@ -383,6 +393,7 @@
 
     if (action === 'none' && matches.length) {
       const windows = buildWindowsFromMatches();
+      console.log('[ISWEEP][MATCH]', { caption: payload.text, matchedIndexes: matches.map((m) => m.index), reason: 'local fallback' });
       applyWindows(windows, 'local match');
       return;
     }

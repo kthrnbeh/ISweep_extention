@@ -17,7 +17,7 @@
   const WORD_PRE_BUFFER_MS = 160; // Lead-in before matched word
   const WORD_POST_BUFFER_MS = 220; // Tail after matched word
   const WORD_GAP_MERGE_MS = 160; // Merge close windows to avoid choppiness
-  const WORD_LATENCY_COMP_MS = 120; // Pull window earlier to compensate caption/render delay
+  const WORD_LATENCY_COMPENSATION_MS = 120; // Pull window earlier to compensate caption/render delay
   const DEFAULT_MIN_MUTE_MS = 1000; // Floor for short words
   const PROLONGED_WORD_MIN_MUTE_MS = 1400; // Floor for stretched words
   const MAX_MUTE_MS = 2500; // Hard cap to avoid long mutes
@@ -238,8 +238,14 @@
       return;
     }
 
-    // If already muted into a window, extend end only when later
+    // If already muted into a window, ignore fully contained windows; extend only when later
     if (muteLockUntilSec > nowSec) {
+      const activeStart = muteWindowStartSec ?? -Infinity;
+      const insideActive = startSec >= activeStart && endSec <= muteLockUntilSec;
+      if (insideActive) {
+        console.log('[ISweep Timing] window ignored (inside active)', { startSec, endSec, muteWindowStartSec, muteLockUntilSec, reason });
+        return;
+      }
       if (endSec > muteLockUntilSec) {
         console.log('[ISweep Timing] extend mute window', { prevEnd: muteLockUntilSec, newEnd: endSec, reason });
         muteLockUntilSec = endSec;
@@ -376,7 +382,7 @@
         .map((match) => {
           const wt = wordTimings[match.index];
           if (!wt) return null;
-          let startSec = Math.max(captionStart + wt.start - (WORD_PRE_BUFFER_MS + WORD_LATENCY_COMP_MS) / 1000, 0);
+          let startSec = Math.max(captionStart + wt.start - (WORD_PRE_BUFFER_MS + WORD_LATENCY_COMPENSATION_MS) / 1000, 0);
           let endSec = captionStart + wt.end + WORD_POST_BUFFER_MS / 1000;
           if (startSec < nowSec && nowSec < endSec) {
             startSec = Math.max(nowSec - WORD_PRE_BUFFER_MS / 1000, 0); // If word already started, anchor mute to now
@@ -564,7 +570,7 @@
     // Start timing the new caption from this moment; its duration will be computed on the next stabilized change.
     lastCaptionText = text;
     captionStartTime = now;
-    log('Caption started:', text);
+    console.log('[ISweep Timing] caption observed', { text, startSec: now });
   }
 
   function extractCaptionText() {

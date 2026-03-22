@@ -14,10 +14,10 @@
   let videoEl = null;
   let restoreMuteTimeout = null;
   let restoreRateTimeout = null;
-  const WORD_PRE_BUFFER_MS = 140; // Lead-in before matched word
-  const WORD_POST_BUFFER_MS = 180; // Tail after matched word
-  const WORD_GAP_MERGE_MS = 140; // Merge close windows to avoid choppiness
-  const WORD_LATENCY_COMP_MS = 140; // Pull window earlier to compensate caption/render delay
+  const WORD_PRE_BUFFER_MS = 160; // Lead-in before matched word
+  const WORD_POST_BUFFER_MS = 220; // Tail after matched word
+  const WORD_GAP_MERGE_MS = 160; // Merge close windows to avoid choppiness
+  const WORD_LATENCY_COMP_MS = 120; // Pull window earlier to compensate caption/render delay
   const DEFAULT_MIN_MUTE_MS = 1000; // Floor for short words
   const PROLONGED_WORD_MIN_MUTE_MS = 1400; // Floor for stretched words
   const MAX_MUTE_MS = 2500; // Hard cap to avoid long mutes

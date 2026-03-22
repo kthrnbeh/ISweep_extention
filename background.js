@@ -104,11 +104,10 @@ async function getBackendUrl() {
 }
 
 async function getAuthToken() {
-  const store = await chrome.storage.local.get([STORAGE_KEYS.TOKEN, TOKEN_KEY]);
-  const token = store[TOKEN_KEY] || store[STORAGE_KEYS.TOKEN] || null;
-  const source = store[TOKEN_KEY] ? TOKEN_KEY : (store[STORAGE_KEYS.TOKEN] ? STORAGE_KEYS.TOKEN : null);
+  const store = await chrome.storage.local.get([TOKEN_KEY]);
+  const token = store[TOKEN_KEY] || null;
   console.log('[ISWEEP][BG][AUTH] token lookup', {
-    source,
+    source: token ? TOKEN_KEY : null,
     hasToken: Boolean(token),
     length: token ? String(token).length : 0,
   });
@@ -272,7 +271,7 @@ async function handleCaptionDecision(text, captionDurationSeconds) {
     responseBody = await res.text();
     if (res.status === 401) {
       console.warn('[ISWEEP][BG][/event] unauthorized; clearing session');
-      await chrome.storage.local.remove([STORAGE_KEYS.TOKEN, TOKEN_KEY, STORAGE_KEYS.USER_ID, STORAGE_KEYS.AUTH, STORAGE_KEYS.PREFS]);
+      await chrome.storage.local.remove([TOKEN_KEY, STORAGE_KEYS.USER_ID, STORAGE_KEYS.AUTH, STORAGE_KEYS.PREFS]);
       return { action: 'none', reason: 'unauthorized', duration_seconds: 0, matched_category: null };
     }
 
@@ -333,7 +332,6 @@ async function handleLogin(email, password) {
     const token = data.token;
     const userId = data.user_id;
     await chrome.storage.local.set({
-      [STORAGE_KEYS.TOKEN]: token,
       [TOKEN_KEY]: token,
       [STORAGE_KEYS.USER_ID]: userId,
       [STORAGE_KEYS.AUTH]: { email, loggedInAt: new Date().toISOString() },

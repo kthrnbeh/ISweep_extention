@@ -80,13 +80,13 @@ document.addEventListener('DOMContentLoaded', async () => {
     const result = await chrome.storage.local.get([
       STORAGE_KEYS.AUTH,
       STORAGE_KEYS.ENABLED,
-      STORAGE_KEYS.TOKEN,
+      TOKEN_KEY,
       STORAGE_KEYS.USER_ID,
       STORAGE_KEYS.PREFS,
     ]);
     
     let authData = result[STORAGE_KEYS.AUTH]; // Pull cached auth data
-    const hasToken = Boolean(result[STORAGE_KEYS.TOKEN]); // Legacy token presence
+    const hasToken = Boolean(result[TOKEN_KEY]); // Token presence
     const isEnabled = result[STORAGE_KEYS.ENABLED] !== false; // Default to true if not set
     
     console.log(LOG_PREFIX, 'Auth data:', authData ? 'Present' : 'None', 'token:', hasToken);
@@ -220,9 +220,9 @@ async function handleSyncPrefs(e) {
       }
     }
 
-    // Pull token from storage using unified key, fallback to legacy key.
-    const store = await chrome.storage.local.get([TOKEN_KEY, STORAGE_KEYS.TOKEN]);
-    const token = store[TOKEN_KEY] || store[STORAGE_KEYS.TOKEN];
+    // Pull token from storage using the canonical key.
+    const store = await chrome.storage.local.get([TOKEN_KEY]);
+    const token = store[TOKEN_KEY];
 
     if (!token) {
       console.warn(LOG_PREFIX, 'prefs sync failed', 'missing token');
@@ -230,8 +230,8 @@ async function handleSyncPrefs(e) {
       return;
     }
 
-    // Keep legacy key populated for background fetch logic.
-    await chrome.storage.local.set({ [STORAGE_KEYS.TOKEN]: token });
+    // Refresh canonical token key in storage for background fetch logic.
+    await chrome.storage.local.set({ [TOKEN_KEY]: token });
 
     const res = await chrome.runtime
       .sendMessage({ type: 'isweep_sync_prefs' })
@@ -390,7 +390,6 @@ async function handleLogout(e) {
     // Remove auth data from storage
     await chrome.storage.local.remove([
       STORAGE_KEYS.AUTH,
-      STORAGE_KEYS.TOKEN,
       STORAGE_KEYS.USER_ID,
       STORAGE_KEYS.PREFS,
       TOKEN_KEY,

@@ -26,6 +26,56 @@ const LOG_PREFIX = '[ISWEEP][BG]';
 
 const DEFAULT_BACKEND = 'http://127.0.0.1:5000';
 
+// Normalize preferences into a stable shape with blocklist.items always present.
+function normalizePreferences(raw) {
+  const prefs = raw && typeof raw === 'object' ? raw : {};
+  const categories = prefs.categories && typeof prefs.categories === 'object' ? prefs.categories : {};
+  const lang = categories.language && typeof categories.language === 'object' ? categories.language : {};
+
+  const candidates = [];
+  // Collect words from multiple possible fields
+  if (Array.isArray(prefs?.blocklist?.items)) candidates.push(...prefs.blocklist.items);
+  if (Array.isArray(prefs?.customWords)) candidates.push(...prefs.customWords);
+  if (Array.isArray(lang.items)) candidates.push(...lang.items);
+  if (Array.isArray(lang.words)) candidates.push(...lang.words);
+  if (Array.isArray(lang.customWords)) candidates.push(...lang.customWords);
+
+  const cleaned = candidates
+    .map((w) => (typeof w === 'string' ? w.trim() : ''))
+    .filter(Boolean);
+
+  const blocklist = {
+    enabled: prefs?.blocklist?.enabled !== false,
+    mode: prefs?.blocklist?.mode || 'whole_word',
+    action: prefs?.blocklist?.action || 'mute',
+    duration: prefs?.blocklist?.duration || (lang.duration || 4),
+    items: cleaned,
+  };
+
+  return {
+    enabled: prefs.enabled !== false,
+    sensitivity: typeof prefs.sensitivity === 'number' ? prefs.sensitivity : 0.7,
+    categories: {
+      language: {
+        enabled: lang.enabled !== false,
+        action: lang.action || 'mute',
+        duration: lang.duration || 4,
+      },
+      sexual: {
+        enabled: categories.sexual?.enabled !== false,
+        action: categories.sexual?.action || 'skip',
+        duration: categories.sexual?.duration || 12,
+      },
+      violence: {
+        enabled: categories.violence?.enabled !== false,
+        action: categories.violence?.action || 'fast_forward',
+        duration: categories.violence?.duration || 8,
+      },
+    },
+    blocklist,
+  };
+}
+
 // Auth/debug helpers (never log full token)
 let didLogBackendHealth = false;
 

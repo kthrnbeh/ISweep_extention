@@ -34,6 +34,20 @@
 
   let cachedPreferences = null;
 
+  function normalizePreferences(prefs) {
+    const raw = prefs && typeof prefs === 'object' ? prefs : {};
+    const categories = raw.categories && typeof raw.categories === 'object' ? raw.categories : {};
+    const lang = categories.language && typeof categories.language === 'object' ? categories.language : {};
+    const words = [];
+    if (Array.isArray(raw?.blocklist?.items)) words.push(...raw.blocklist.items);
+    if (Array.isArray(raw?.customWords)) words.push(...raw.customWords);
+    if (Array.isArray(lang.items)) words.push(...lang.items);
+    if (Array.isArray(lang.words)) words.push(...lang.words);
+    if (Array.isArray(lang.customWords)) words.push(...lang.customWords);
+    const cleaned = words.map((w) => (typeof w === 'string' ? w.trim() : '')).filter(Boolean);
+    return { ...raw, blocklist: { ...(raw.blocklist || {}), items: cleaned } };
+  }
+
   let lastCaptionWords = [];
   let lastWordTimings = [];
   let previousMuteState = null;
@@ -150,7 +164,7 @@
   }
 
   function getFilterWords() {
-    const prefs = cachedPreferences && typeof cachedPreferences === 'object' ? cachedPreferences : null;
+    const prefs = normalizePreferences(cachedPreferences);
     const blocklist = prefs && typeof prefs === 'object' ? prefs.blocklist : null;
     const languageItems = Array.isArray(prefs?.categories?.language?.items) ? prefs.categories.language.items : [];
 

@@ -41,7 +41,9 @@
     {
       "matches": [
         "http://127.0.0.1:5500/ISweep_frontend/docs/*",
-        "http://localhost:5500/ISweep_frontend/docs/*"
+        "http://localhost:5500/ISweep_frontend/docs/*",
+        "http://127.0.0.1:5500/docs/*",
+        "http://localhost:5500/docs/*"
       ],
       "js": ["site_token_bridge.js"],
       "run_at": "document_idle"

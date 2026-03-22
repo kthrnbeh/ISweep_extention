@@ -14,10 +14,10 @@
   let videoEl = null;
   let restoreMuteTimeout = null;
   let restoreRateTimeout = null;
-  const WORD_PRE_BUFFER_MS = 160; // Lead-in before matched word
-  const WORD_POST_BUFFER_MS = 220; // Tail after matched word
-  const WORD_GAP_MERGE_MS = 160; // Merge close windows to avoid choppiness
-  const WORD_LATENCY_COMP_MS = 120; // Pull window earlier to compensate caption/render delay
+  const WORD_PRE_BUFFER_MS = 140; // Lead-in before matched word
+  const WORD_POST_BUFFER_MS = 180; // Tail after matched word
+  const WORD_GAP_MERGE_MS = 140; // Merge close windows to avoid choppiness
+  const WORD_LATENCY_COMP_MS = 140; // Pull window earlier to compensate caption/render delay
   const DEFAULT_MIN_MUTE_MS = 1000; // Floor for short words
   const PROLONGED_WORD_MIN_MUTE_MS = 1400; // Floor for stretched words
   const MAX_MUTE_MS = 2500; // Hard cap to avoid long mutes
@@ -76,11 +76,15 @@
   }
 
   function normalizeCaptionWord(word) {
-    return (word || '').toLowerCase().replace(/[^a-z0-9]/g, '').trim();
+    return (word || '').toLowerCase().replace(/[^a-z0-9']/g, '').trim();
   }
 
   function normalizeCaptionText(text) {
-    return (text || '').toLowerCase().replace(/[^\w\s]/g, ' ').trim();
+    return (text || '')
+      .toLowerCase()
+      .replace(/[^\w\s']/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
   }
 
   function normalizeFilterWord(word) {
@@ -136,6 +140,14 @@
       cachedPreferences = changes[STORAGE_KEYS.PREFS].newValue || null;
     }
   });
+
+  async function requestPrefSync() {
+    try {
+      await chrome.runtime.sendMessage({ type: 'isweep_sync_prefs' }); // Pull latest prefs into storage
+    } catch (err) {
+      console.warn('[ISWEEP][MATCH] pref sync request failed', err?.message || err);
+    }
+  }
 
   function getFilterWords() {
     const blocklist = cachedPreferences && typeof cachedPreferences === 'object'
@@ -220,8 +232,10 @@
   function deriveWordMatches(words, captionText) {
     const matches = new Map();
     const normalizedCaption = normalizeCaptionText(captionText || words.join(' '));
-    const originalWords = Array.isArray(words) && words.length ? words : normalizedCaption.split(/\s+/);
-    const normalizedWords = originalWords.map((w) => normalizeCaptionWord(w));
+    const sourceWords = Array.isArray(words) && words.length
+      ? words
+      : (normalizedCaption ? normalizedCaption.split(/\s+/) : []);
+    const normalizedWords = sourceWords.map((w) => normalizeCaptionWord(w));
     const captionForFullTest = normalizedCaption.replace(/\s+/g, ' ').trim();
     const filters = getFilterWords();
 
@@ -298,8 +312,11 @@
         .map((match) => {
           const wt = wordTimings[match.index];
           if (!wt) return null;
-          const startSec = Math.max(captionStart + wt.start - (WORD_PRE_BUFFER_MS + WORD_LATENCY_COMP_MS) / 1000, 0);
+          let startSec = Math.max(captionStart + wt.start - (WORD_PRE_BUFFER_MS + WORD_LATENCY_COMP_MS) / 1000, 0);
           let endSec = captionStart + wt.end + WORD_POST_BUFFER_MS / 1000;
+          if (startSec < nowSec && nowSec < endSec) {
+            startSec = Math.max(nowSec - WORD_PRE_BUFFER_MS / 1000, 0); // If word already started, anchor mute to now
+          }
           const originalMs = Math.max((endSec - startSec) * 1000, 0);
           const floorMs = match.prolonged ? PROLONGED_WORD_MIN_MUTE_MS : DEFAULT_MIN_MUTE_MS;
           let finalMs = originalMs;
@@ -557,6 +574,7 @@
       });
     }
     loadPreferencesFromStorage();
+    requestPrefSync(); // Refresh prefs on load so blocklist/custom words propagate
     clearMuteState('init');
     startObserving(); // Begin observing captions
   }

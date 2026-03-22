@@ -6,6 +6,11 @@ function pushTokenToExtension() {
     const token = window.localStorage.getItem(TOKEN_KEY); // Read token from site localStorage
     if (token) {
       chrome.storage.local.set({ [TOKEN_KEY]: token }); // Copy token into extension storage
+      try {
+        chrome.runtime.sendMessage({ type: 'isweep_sync_prefs' }); // Ask background to pull fresh prefs when token present
+      } catch (err) {
+        // Background may be unavailable; ignore
+      }
       return { ok: true, hasToken: true }; // Indicate success with token
     }
     return { ok: true, hasToken: false }; // No token found but operation fine

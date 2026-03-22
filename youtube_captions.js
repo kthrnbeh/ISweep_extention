@@ -18,11 +18,11 @@
   const WORD_POST_BUFFER_MS = 220; // Tail after matched word
   const WORD_GAP_MERGE_MS = 160; // Merge close windows to avoid choppiness
   const WORD_LATENCY_COMPENSATION_MS = 120; // Pull window earlier to compensate caption/render delay
-  const DEFAULT_MIN_MUTE_MS = 1000; // Floor for short words
-  const PROLONGED_WORD_MIN_MUTE_MS = 1400; // Floor for stretched words
-  const MAX_MUTE_MS = 2500; // Hard cap to avoid long mutes
+  const DEFAULT_MIN_MUTE_MS = 2000; // Floor for short words (2s target)
+  const PROLONGED_WORD_MIN_MUTE_MS = 2400; // Floor for stretched words (~2.4s)
+  const MAX_MUTE_MS = 3200; // Hard cap to avoid long mutes (~3.2s)
 
-  const LANGUAGE_KEYWORDS = ['hell'];
+  const LANGUAGE_KEYWORDS = ['hell', 'bitch'];
   const SEXUAL_KEYWORDS = ['sex', 'sexual', 'naked', 'nude', 'explicit', 'rape', 'intercourse', 'seduce', 'seduction'];
   const VIOLENCE_KEYWORDS = ['kill', 'killed', 'murder', 'shot', 'shoot', 'stab', 'blood', 'violence', 'violent', 'attack', 'fight', 'gun', 'weapon', 'death', 'die', 'dying', 'dead', 'assault', 'beat', 'beating', 'punch', 'hit'];
   const WORD_FAMILY_VARIANTS = {

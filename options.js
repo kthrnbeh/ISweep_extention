@@ -1,13 +1,13 @@
-const STORAGE_KEYS = {
-  BACKEND_URL: 'isweepBackendUrl' // Storage key for backend URL
-};
-
-const backendForm = document.getElementById('backendForm');
-const backendUrlInput = document.getElementById('backendUrl');
-const backendStatus = document.getElementById('backendStatus');
-const testButton = document.getElementById('testBackend');
-
 document.addEventListener('DOMContentLoaded', () => {
+  const STORAGE_KEYS = {
+    BACKEND_URL: 'isweepBackendUrl' // Storage key for backend URL
+  };
+
+  const backendForm = document.getElementById('backendForm');
+  const backendUrlInput = document.getElementById('backendUrl');
+  const backendStatus = document.getElementById('backendStatus');
+  const testButton = document.getElementById('testBackend');
+
   function logStatus(message, color = '#6b7280') {
     if (!backendStatus) return;
     backendStatus.textContent = message;
@@ -21,7 +21,7 @@ document.addEventListener('DOMContentLoaded', () => {
     backendUrlInput.value = url;
     console.log('[ISWEEP][EXT] loaded backend url', url);
     logStatus(`Loaded backend URL: ${url}`);
-}
+  }
 
   if (backendForm) {
     backendForm.addEventListener('submit', async (e) => {
@@ -31,7 +31,7 @@ document.addEventListener('DOMContentLoaded', () => {
       console.log('[ISWEEP][EXT] backend url saved', url);
       logStatus(`Saved backend URL: ${url}`, '#10b981');
     });
-}
+  }
 
   if (testButton) {
     testButton.addEventListener('click', async () => {
@@ -48,7 +48,7 @@ document.addEventListener('DOMContentLoaded', () => {
         logStatus(`Failed to connect: ${err.message}`, '#ef4444');
       }
     });
-}
+  }
 
   loadBackendUrl();
 });

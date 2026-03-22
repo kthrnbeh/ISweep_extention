@@ -44,8 +44,30 @@
     if (Array.isArray(lang.items)) words.push(...lang.items);
     if (Array.isArray(lang.words)) words.push(...lang.words);
     if (Array.isArray(lang.customWords)) words.push(...lang.customWords);
-    const cleaned = words.map((w) => (typeof w === 'string' ? w.trim() : '')).filter(Boolean);
-    return { ...raw, blocklist: { ...(raw.blocklist || {}), items: cleaned } };
+    const cleaned = Array.from(
+      new Set(
+        words
+          .map((w) => (typeof w === 'string' ? w.trim().toLowerCase() : ''))
+          .filter(Boolean)
+      )
+    );
+    const normalizedLang = {
+      enabled: lang.enabled !== false,
+      action: lang.action || 'mute',
+      duration: lang.duration || 4,
+      items: cleaned,
+    };
+    const normalized = {
+      enabled: raw.enabled !== false,
+      sensitivity: typeof raw.sensitivity === 'number' ? raw.sensitivity : 0.9,
+      categories: {
+        language: normalizedLang,
+        sexual: categories.sexual || {},
+        violence: categories.violence || {},
+      },
+      blocklist: { ...(raw.blocklist || {}), items: cleaned },
+    };
+    return normalized;
   }
 
   let lastCaptionWords = [];
@@ -165,21 +187,26 @@
 
   function getFilterWords() {
     const prefs = normalizePreferences(cachedPreferences);
-    const blocklist = prefs && typeof prefs === 'object' ? prefs.blocklist : null;
+    const blocklistItems = Array.isArray(prefs?.blocklist?.items) ? prefs.blocklist.items : [];
     const languageItems = Array.isArray(prefs?.categories?.language?.items) ? prefs.categories.language.items : [];
 
-    const blocklistEnabled = blocklist && blocklist.enabled !== false;
-    const blocklistItems = blocklistEnabled && Array.isArray(blocklist?.items) ? blocklist.items : [];
-    const combined = (blocklistItems.length ? blocklistItems : languageItems)
-      .map((item) => normalizeFilterWord(String(item || '')))
-      .filter(Boolean);
-    const hasBMask = combined.some((w) => w.includes('b*'));
+    const combined = Array.from(
+      new Set(
+        [...blocklistItems, ...languageItems]
+          .map((item) => normalizeFilterWord(String(item || '')))
+          .filter(Boolean)
+      )
+    );
+
     if (combined.length) {
-      console.log('[ISWEEP][FILTERS]', { source: blocklistItems.length ? 'prefs.blocklist' : 'prefs.categories.language.items', count: combined.length, hasBMask: hasBMask || combined.includes('bitch'), items: combined });
+      console.log('[ISWEEP][FILTERS]', { source: 'prefs', count: combined.length, words: combined });
       return combined;
     }
-    const fallback = [...LANGUAGE_KEYWORDS, ...SEXUAL_KEYWORDS, ...VIOLENCE_KEYWORDS].map(normalizeFilterWord).filter(Boolean);
-    console.log('[ISWEEP][FILTERS]', { source: 'fallback', count: fallback.length, hasBMask: false, items: fallback });
+
+    const fallback = [...LANGUAGE_KEYWORDS, ...SEXUAL_KEYWORDS, ...VIOLENCE_KEYWORDS]
+      .map(normalizeFilterWord)
+      .filter(Boolean);
+    console.log('[ISWEEP][FILTERS]', { source: 'fallback', count: fallback.length, words: fallback, note: 'no saved words loaded' });
     return fallback;
   }
 
@@ -280,11 +307,23 @@
             const prolonged = isProlongedVariant(w, normalizedFilter);
             matches.set(idx, { index: idx, baseWord: rawFilter, matchedVariant, prolonged });
             matchedIndexes.add(idx);
-            console.log('[ISWEEP][MATCH]', { caption: captionText || words.join(' '), matchedWord: rawFilter, matchedIndexes: Array.from(matchedIndexes.values()) });
+            console.log('[ISWEEP][MATCH]', {
+              caption: captionText || words.join(' '),
+              baseWord: rawFilter,
+              matchedVariant,
+              matchedIndexes: Array.from(matchedIndexes.values()),
+              prolonged,
+            });
           }
         });
         if (captionForFullTest && regex.test(captionForFullTest)) {
-          console.log('[ISWEEP][MATCH]', { caption: captionText || words.join(' '), matchedWord: rawFilter, matchedIndexes: Array.from(matchedIndexes.values()) });
+          console.log('[ISWEEP][MATCH]', {
+            caption: captionText || words.join(' '),
+            baseWord: rawFilter,
+            matchedVariant: normalizedFilter,
+            matchedIndexes: Array.from(matchedIndexes.values()),
+            prolonged: false,
+          });
         }
       });
     });

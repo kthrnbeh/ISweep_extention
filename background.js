@@ -33,33 +33,38 @@ function normalizePreferences(raw) {
   const lang = categories.language && typeof categories.language === 'object' ? categories.language : {};
 
   const candidates = [];
-  // Collect words from multiple possible fields
   if (Array.isArray(prefs?.blocklist?.items)) candidates.push(...prefs.blocklist.items);
   if (Array.isArray(prefs?.customWords)) candidates.push(...prefs.customWords);
   if (Array.isArray(lang.items)) candidates.push(...lang.items);
   if (Array.isArray(lang.words)) candidates.push(...lang.words);
   if (Array.isArray(lang.customWords)) candidates.push(...lang.customWords);
 
-  const cleaned = candidates
-    .map((w) => (typeof w === 'string' ? w.trim() : ''))
-    .filter(Boolean);
+  const cleaned = Array.from(
+    new Set(
+      candidates
+        .map((w) => (typeof w === 'string' ? w.trim().toLowerCase() : ''))
+        .filter(Boolean)
+    )
+  );
 
+  const languageDuration = lang.duration || 4;
   const blocklist = {
     enabled: prefs?.blocklist?.enabled !== false,
     mode: prefs?.blocklist?.mode || 'whole_word',
     action: prefs?.blocklist?.action || 'mute',
-    duration: prefs?.blocklist?.duration || (lang.duration || 4),
+    duration: prefs?.blocklist?.duration || languageDuration,
     items: cleaned,
   };
 
   return {
     enabled: prefs.enabled !== false,
-    sensitivity: typeof prefs.sensitivity === 'number' ? prefs.sensitivity : 0.7,
+    sensitivity: typeof prefs.sensitivity === 'number' ? prefs.sensitivity : 0.9,
     categories: {
       language: {
         enabled: lang.enabled !== false,
         action: lang.action || 'mute',
-        duration: lang.duration || 4,
+        duration: languageDuration,
+        items: cleaned,
       },
       sexual: {
         enabled: categories.sexual?.enabled !== false,

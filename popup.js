@@ -12,7 +12,7 @@ const DEFAULT_FRONTEND_BASE = 'https://kthrnbeh.github.io/ISweep';
 const STORAGE_KEYS = {
   AUTH: 'isweepAuth',              // Cached auth info
   ENABLED: 'isweepEnabled',        // Toggle for filtering
-  TOKEN: 'isweepToken',            // Legacy token key
+  TOKEN: 'isweep_auth_token',      // Unified token key
   USER_ID: 'isweepUserId',         // Legacy user id key
   PREFS: 'isweepPreferences',      // Cached preferences
   BACKEND_URL: 'isweepBackendUrl', // Backend base URL

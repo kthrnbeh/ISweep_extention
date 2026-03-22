@@ -14,7 +14,7 @@ System flow:
 const STORAGE_KEYS = {
   AUTH: 'isweepAuth',
   ENABLED: 'isweepEnabled',
-  TOKEN: 'isweepToken',
+  TOKEN: 'isweep_auth_token',
   USER_ID: 'isweepUserId',
   PREFS: 'isweepPreferences',
   BACKEND_URL: 'isweepBackendUrl'

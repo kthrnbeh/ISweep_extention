@@ -98,6 +98,57 @@
     return document.querySelector('.ytp-mute-button');
   }
 
+  function getYouTubePlayer() {
+    const player = document.getElementById('movie_player');
+    if (!player) return null;
+    return player;
+  }
+
+  function setMutedViaPlayerApi(targetMuted) {
+    const player = getYouTubePlayer();
+    if (!player || typeof player.isMuted !== 'function') return null;
+    try {
+      const before = Boolean(player.isMuted());
+      if (targetMuted && !before && typeof player.mute === 'function') player.mute();
+      if (!targetMuted && before && typeof player.unMute === 'function') player.unMute();
+      const after = Boolean(player.isMuted());
+      return { before, after, method: 'player_api' };
+    } catch (err) {
+      console.warn('[ISweep Timing] player api mute failed', err?.message || err);
+      return null;
+    }
+  }
+
+  function setMutedState(targetMuted, reason) {
+    const video = findVideo();
+    if (!video) return false;
+
+    const apiResult = setMutedViaPlayerApi(targetMuted);
+    if (apiResult && Boolean(video.muted) === Boolean(targetMuted)) {
+      console.log('[ISweep Timing] mute control', { reason, method: apiResult.method, before: apiResult.before, after: apiResult.after, targetMuted });
+      return true;
+    }
+
+    const button = findMuteButton();
+    if (button && Boolean(video.muted) !== Boolean(targetMuted)) {
+      button.click();
+    }
+    if (Boolean(video.muted) === Boolean(targetMuted)) {
+      console.log('[ISweep Timing] mute control', { reason, method: 'button_click', targetMuted });
+      return true;
+    }
+
+    // Final fallback if YouTube UI API paths fail in this page state.
+    video.muted = Boolean(targetMuted);
+    if (Boolean(video.muted) === Boolean(targetMuted)) {
+      console.log('[ISweep Timing] mute control', { reason, method: 'video_property_fallback', targetMuted });
+      return true;
+    }
+
+    console.warn('[ISweep Timing] mute control failed', { reason, targetMuted });
+    return false;
+  }
+
   function clickMuteButtonTo(targetMuted) {
     const video = findVideo();
     const button = findMuteButton();
@@ -110,7 +161,7 @@
   function restoreMuteState(reason) {
     const video = findVideo();
     if (video && previousMuteState !== null) {
-      clickMuteButtonTo(previousMuteState); // Restore with same control path as user click
+      setMutedState(previousMuteState, `restore:${reason}`);
       console.log('[ISweep Timing] mute restored', { reason });
     }
     clearMuteState(reason);
@@ -124,7 +175,7 @@
       const nowSec = video.currentTime || 0;
       if (muteLockUntilSec <= nowSec) return;
       // Re-apply mute via player control if site logic flips it back.
-      if (!video.muted) clickMuteButtonTo(true);
+      if (!video.muted) setMutedState(true, 'enforcement');
     }, 120);
   }
 
@@ -315,7 +366,7 @@
       if (previousMuteState === null) {
         previousMuteState = video.muted; // Preserve prior mute state only once
       }
-      clickMuteButtonTo(true); // Mute by clicking the same UI control the user would click
+      setMutedState(true, `start:${reason}`);
       muteUntilNextCaption = true;
       muteWindowStartSec = startSec;
       console.log('[ISweep Timing] mute start', {
@@ -587,7 +638,7 @@
     }
     clearHardRestore();
     if (video && previousMuteState !== null) {
-      clickMuteButtonTo(previousMuteState); // Restore through the mute button path
+      setMutedState(previousMuteState, 'caption_change_restore');
       log('Restored mute state on caption change');
     }
     previousMuteState = null;
@@ -637,6 +688,14 @@
     const video = findVideo();
     const now = video && typeof video.currentTime === 'number' ? video.currentTime : null; // Current playback time
     const prevDuration = captionStartTime !== null && now !== null ? Math.max(0, now - captionStartTime) : null; // Duration of previous caption
+
+    // Immediate local fallback: when [ __ ] appears, mute right away instead of waiting for backend round-trip.
+    if (hasRedactedPlaceholder(text) && now !== null) {
+      const startSec = Math.max(now - 0.05, 0);
+      const endSec = startSec + REDACTED_PLACEHOLDER_MUTE_SECONDS;
+      console.log('[ISweep Timing] immediate redacted mute', { text, startSec, endSec });
+      applyMuteWindow(startSec, endSec, 'redacted placeholder immediate');
+    }
 
     // Restore audio immediately when the caption changes; safety timeout is only a fallback.
     restoreMuteAfterCaptionChange();

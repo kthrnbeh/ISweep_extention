@@ -24,7 +24,12 @@
   const REDACTED_PLACEHOLDER_MUTE_SECONDS = 3; // Fallback mute when captions redact profanity as [ __ ]
   const REDACTED_PLACEHOLDER_PATTERN = /\[\s*[\u00A0_\s]{2,}\s*\]/; // Matches bracketed underscore placeholders from auto-captions
 
-  const LANGUAGE_KEYWORDS = ['hell', 'bitch', 'b*tch'];
+  const LANGUAGE_KEYWORDS = [
+    'fuck', 'fucking', 'fucked',
+    'bitch', 'b*tch',
+    'shit', 'asshole', 'bastard',
+    'damn', 'crap', 'hell'
+  ];
   const SEXUAL_KEYWORDS = ['sex', 'sexual', 'naked', 'nude', 'explicit', 'rape', 'intercourse', 'seduce', 'seduction'];
   const VIOLENCE_KEYWORDS = ['kill', 'killed', 'murder', 'shot', 'shoot', 'stab', 'blood', 'violence', 'violent', 'attack', 'fight', 'gun', 'weapon', 'death', 'die', 'dying', 'dead', 'assault', 'beat', 'beating', 'punch', 'hit'];
   const WORD_FAMILY_VARIANTS = {
@@ -328,6 +333,10 @@
   function applyMuteWindow(startSec, endSec, reason) {
     const video = findVideo();
     if (!video) return;
+
+    // Clamp mute windows to avoid over- or under-muting.
+    const clampedDurationSec = Math.min(Math.max(endSec - startSec, 0.3), 2.5);
+    endSec = startSec + clampedDurationSec;
 
     const nowSec = video.currentTime || 0;
     // Skip stale windows that already ended
@@ -688,6 +697,7 @@
     const video = findVideo();
     const now = video && typeof video.currentTime === 'number' ? video.currentTime : null; // Current playback time
     const prevDuration = captionStartTime !== null && now !== null ? Math.max(0, now - captionStartTime) : null; // Duration of previous caption
+    let appliedMuteThisCycle = false;
 
     // Immediate local fallback: when [ __ ] appears, mute right away instead of waiting for backend round-trip.
     if (hasRedactedPlaceholder(text) && now !== null) {
@@ -695,10 +705,13 @@
       const endSec = startSec + REDACTED_PLACEHOLDER_MUTE_SECONDS;
       console.log('[ISweep Timing] immediate redacted mute', { text, startSec, endSec });
       applyMuteWindow(startSec, endSec, 'redacted placeholder immediate');
+      appliedMuteThisCycle = true;
     }
 
-    // Restore audio immediately when the caption changes; safety timeout is only a fallback.
-    restoreMuteAfterCaptionChange();
+    // Restore audio on caption change only when this cycle didn't apply a new mute.
+    if (!appliedMuteThisCycle) {
+      restoreMuteAfterCaptionChange();
+    }
 
     // Send the caption that just ended with its measured duration so backend can align mute timing to words.
     if (lastCaptionText && prevDuration !== null) {

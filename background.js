@@ -25,34 +25,6 @@ const TOKEN_KEY = 'isweep_auth_token'; // Shared with site_token_bridge and fron
 const LOG_PREFIX = '[ISWEEP][BG]';
 
 const DEFAULT_BACKEND = 'http://127.0.0.1:5000';
-const tabMuteState = new Map(); // tabId -> { timer, previousMuted }
-
-async function muteTabForDuration(tabId, durationMs) {
-  if (!tabId || durationMs <= 0) return;
-
-  const tab = await chrome.tabs.get(tabId);
-  const current = tabMuteState.get(tabId);
-  const previousMuted = current ? current.previousMuted : Boolean(tab.mutedInfo && tab.mutedInfo.muted);
-
-  if (current && current.timer) {
-    clearTimeout(current.timer);
-  }
-
-  await chrome.tabs.update(tabId, { muted: true });
-  const timer = setTimeout(async () => {
-    try {
-      await chrome.tabs.update(tabId, { muted: previousMuted });
-      console.log(LOG_PREFIX, 'tab mute restored', { tabId, previousMuted });
-    } catch (err) {
-      console.warn(LOG_PREFIX, 'failed to restore tab mute state', { tabId, error: err?.message || err });
-    } finally {
-      tabMuteState.delete(tabId);
-    }
-  }, durationMs);
-
-  tabMuteState.set(tabId, { timer, previousMuted });
-  console.log(LOG_PREFIX, 'tab muted', { tabId, durationMs, previousMuted });
-}
 
 // Normalize preferences into a stable shape with blocklist.items always present.
 function normalizePreferences(raw) {
@@ -258,13 +230,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true; // async
   } else if (message.type === 'isweep_sync_prefs') {
     handleSyncPrefs().then(sendResponse);
-    return true; // async
-  } else if (message.type === 'isweep_tab_mute') {
-    const tabId = sender?.tab?.id;
-    const durationMs = Math.max(Number(message.duration_ms) || 0, 0);
-    muteTabForDuration(tabId, durationMs)
-      .then(() => sendResponse({ ok: true }))
-      .catch((err) => sendResponse({ ok: false, error: err?.message || String(err) }));
     return true; // async
   }
 

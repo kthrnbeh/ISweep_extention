@@ -75,7 +75,6 @@
   let lastCaptionWords = [];
   let lastWordTimings = [];
   let previousMuteState = null;
-  let previousVolumeState = null;
   let muteEnforceInterval = null;
   let previousRate = null;
   let muteUntilNextCaption = false;
@@ -91,18 +90,27 @@
     muteUntilNextCaption = false;
     muteLockUntilSec = 0;
     previousMuteState = null;
-    previousVolumeState = null;
     muteWindowStartSec = null;
     console.log('[ISweep Timing] mute state reset', { reason });
+  }
+
+  function findMuteButton() {
+    return document.querySelector('.ytp-mute-button');
+  }
+
+  function clickMuteButtonTo(targetMuted) {
+    const video = findVideo();
+    const button = findMuteButton();
+    if (!video || !button) return false;
+    if (Boolean(video.muted) === Boolean(targetMuted)) return true;
+    button.click();
+    return Boolean(video.muted) === Boolean(targetMuted);
   }
 
   function restoreMuteState(reason) {
     const video = findVideo();
     if (video && previousMuteState !== null) {
-      video.muted = previousMuteState; // Restore prior mute state
-      if (previousVolumeState !== null) {
-        video.volume = previousVolumeState;
-      }
+      clickMuteButtonTo(previousMuteState); // Restore with same control path as user click
       console.log('[ISweep Timing] mute restored', { reason });
     }
     clearMuteState(reason);
@@ -115,9 +123,8 @@
       if (!video) return;
       const nowSec = video.currentTime || 0;
       if (muteLockUntilSec <= nowSec) return;
-      // Some players/scripts can flip mute quickly; enforce silence through the active window.
-      if (!video.muted) video.muted = true;
-      if (video.volume !== 0) video.volume = 0;
+      // Re-apply mute via player control if site logic flips it back.
+      if (!video.muted) clickMuteButtonTo(true);
     }, 120);
   }
 
@@ -307,10 +314,8 @@
       // New window
       if (previousMuteState === null) {
         previousMuteState = video.muted; // Preserve prior mute state only once
-        previousVolumeState = video.volume; // Preserve prior volume so we can restore exactly
       }
-      video.muted = true; // Mute start
-      video.volume = 0; // Force silence in case player ignores mute flips
+      clickMuteButtonTo(true); // Mute by clicking the same UI control the user would click
       muteUntilNextCaption = true;
       muteWindowStartSec = startSec;
       console.log('[ISweep Timing] mute start', {
@@ -326,11 +331,6 @@
 
     // Safety restore timers
     const remainingMs = Math.max((muteLockUntilSec - nowSec) * 1000, 0);
-
-    // Background tab-level mute is a hard fallback when site scripts override video mute.
-    chrome.runtime.sendMessage({ type: 'isweep_tab_mute', duration_ms: Math.ceil(remainingMs) }).catch((err) => {
-      console.warn('[ISweep Timing] tab mute fallback failed', err?.message || err);
-    });
 
     if (restoreMuteTimeout) clearTimeout(restoreMuteTimeout);
     restoreMuteTimeout = setTimeout(() => {
@@ -587,14 +587,10 @@
     }
     clearHardRestore();
     if (video && previousMuteState !== null) {
-      video.muted = previousMuteState; // Restore prior mute state
-      if (previousVolumeState !== null) {
-        video.volume = previousVolumeState;
-      }
+      clickMuteButtonTo(previousMuteState); // Restore through the mute button path
       log('Restored mute state on caption change');
     }
     previousMuteState = null;
-    previousVolumeState = null;
     muteUntilNextCaption = false;
     muteLockUntilSec = 0;
     if (muteEnforceInterval) {

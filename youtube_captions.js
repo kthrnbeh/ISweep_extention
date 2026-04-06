@@ -75,6 +75,8 @@
   let lastCaptionWords = [];
   let lastWordTimings = [];
   let previousMuteState = null;
+  let previousVolumeState = null;
+  let muteEnforceInterval = null;
   let previousRate = null;
   let muteUntilNextCaption = false;
   let muteLockUntilSec = 0; // Active mute window end (seconds, video time)
@@ -82,11 +84,14 @@
   function clearMuteState(reason) {
     if (restoreMuteTimeout) clearTimeout(restoreMuteTimeout);
     if (hardRestoreTimeout) clearTimeout(hardRestoreTimeout);
+    if (muteEnforceInterval) clearInterval(muteEnforceInterval);
     restoreMuteTimeout = null;
     hardRestoreTimeout = null;
+    muteEnforceInterval = null;
     muteUntilNextCaption = false;
     muteLockUntilSec = 0;
     previousMuteState = null;
+    previousVolumeState = null;
     muteWindowStartSec = null;
     console.log('[ISweep Timing] mute state reset', { reason });
   }
@@ -95,9 +100,25 @@
     const video = findVideo();
     if (video && previousMuteState !== null) {
       video.muted = previousMuteState; // Restore prior mute state
+      if (previousVolumeState !== null) {
+        video.volume = previousVolumeState;
+      }
       console.log('[ISweep Timing] mute restored', { reason });
     }
     clearMuteState(reason);
+  }
+
+  function startMuteEnforcement() {
+    if (muteEnforceInterval) return;
+    muteEnforceInterval = setInterval(() => {
+      const video = findVideo();
+      if (!video) return;
+      const nowSec = video.currentTime || 0;
+      if (muteLockUntilSec <= nowSec) return;
+      // Some players/scripts can flip mute quickly; enforce silence through the active window.
+      if (!video.muted) video.muted = true;
+      if (video.volume !== 0) video.volume = 0;
+    }, 120);
   }
 
   let muteWindowStartSec = null; // Last applied mute window start
@@ -286,8 +307,10 @@
       // New window
       if (previousMuteState === null) {
         previousMuteState = video.muted; // Preserve prior mute state only once
+        previousVolumeState = video.volume; // Preserve prior volume so we can restore exactly
       }
       video.muted = true; // Mute start
+      video.volume = 0; // Force silence in case player ignores mute flips
       muteUntilNextCaption = true;
       muteWindowStartSec = startSec;
       console.log('[ISweep Timing] mute start', {
@@ -298,6 +321,7 @@
         reason,
       });
       muteLockUntilSec = endSec;
+      startMuteEnforcement();
     }
 
     // Safety restore timers
@@ -558,11 +582,19 @@
     clearHardRestore();
     if (video && previousMuteState !== null) {
       video.muted = previousMuteState; // Restore prior mute state
+      if (previousVolumeState !== null) {
+        video.volume = previousVolumeState;
+      }
       log('Restored mute state on caption change');
     }
     previousMuteState = null;
+    previousVolumeState = null;
     muteUntilNextCaption = false;
     muteLockUntilSec = 0;
+    if (muteEnforceInterval) {
+      clearInterval(muteEnforceInterval);
+      muteEnforceInterval = null;
+    }
   }
 
   function processEndedCaption(text, durationSeconds, videoTime) {

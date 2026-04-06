@@ -21,6 +21,8 @@
   const DEFAULT_MIN_MUTE_MS = 2000; // Floor for short words (2s target)
   const PROLONGED_WORD_MIN_MUTE_MS = 2400; // Floor for stretched words (~2.4s)
   const MAX_MUTE_MS = 3200; // Hard cap to avoid long mutes (~3.2s)
+  const REDACTED_PLACEHOLDER_MUTE_SECONDS = 3; // Fallback mute when captions redact profanity as [ __ ]
+  const REDACTED_PLACEHOLDER_PATTERN = /\[\s*[\u00A0_\s]{2,}\s*\]/; // Matches bracketed underscore placeholders from auto-captions
 
   const LANGUAGE_KEYWORDS = ['hell', 'bitch', 'b*tch'];
   const SEXUAL_KEYWORDS = ['sex', 'sexual', 'naked', 'nude', 'explicit', 'rape', 'intercourse', 'seduce', 'seduction'];
@@ -125,6 +127,10 @@
 
   function normalizeFilterWord(word) {
     return (word || '').toLowerCase().replace(/[^\w*\s]/g, '').trim();
+  }
+
+  function hasRedactedPlaceholder(text) {
+    return REDACTED_PLACEHOLDER_PATTERN.test(text || '');
   }
 
   function buildStretchRegex(base) {
@@ -481,6 +487,19 @@
       const windows = buildWindowsFromMatches();
       console.log('[ISWEEP][MATCH]', { caption: payload.text, matchedIndexes: matches.map((m) => m.index), reason: 'local fallback' });
       applyWindows(windows, 'local match');
+      return;
+    }
+
+    if (action === 'none' && hasRedactedPlaceholder(payload.text)) {
+      const startSec = Math.max(nowSec - 0.05, 0);
+      const endSec = startSec + REDACTED_PLACEHOLDER_MUTE_SECONDS;
+      console.log('[ISweep Timing] redacted placeholder fallback', {
+        text: payload.text,
+        startSec,
+        endSec,
+        durationSeconds: REDACTED_PLACEHOLDER_MUTE_SECONDS,
+      });
+      applyMuteWindow(startSec, endSec, 'redacted placeholder');
       return;
     }
 

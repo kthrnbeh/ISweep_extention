@@ -326,6 +326,12 @@
 
     // Safety restore timers
     const remainingMs = Math.max((muteLockUntilSec - nowSec) * 1000, 0);
+
+    // Background tab-level mute is a hard fallback when site scripts override video mute.
+    chrome.runtime.sendMessage({ type: 'isweep_tab_mute', duration_ms: Math.ceil(remainingMs) }).catch((err) => {
+      console.warn('[ISweep Timing] tab mute fallback failed', err?.message || err);
+    });
+
     if (restoreMuteTimeout) clearTimeout(restoreMuteTimeout);
     restoreMuteTimeout = setTimeout(() => {
       restoreMuteState('primary timer');

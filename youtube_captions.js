@@ -201,7 +201,7 @@
   let markerSchedulerInterval = null;
   let markerVideoWatchInterval = null;
   let markerModeActive = false;
-  let markerFallbackReason = 'not_initialized';
+  let markerFallbackReason = 'scheduler_not_started';
   let markerFallbackLogVideoId = null;
   let markerPastEndLogged = false;
 
@@ -270,8 +270,9 @@
 
     if (marker.action === 'mute') {
       applyMuteWindow(marker.start_seconds, marker.end_seconds, `marker:${marker.id}`);
-      console.log(MARKER_LOG_PREFIX, 'fired mute', {
+      console.log(MARKER_LOG_PREFIX, 'marker fired', {
         id: marker.id,
+        action: 'mute',
         start: marker.start_seconds,
         end: marker.end_seconds,
       });
@@ -346,7 +347,7 @@
   async function analyzeCurrentVideoMarkers(forceRefresh = false) {
     const videoId = getCurrentVideoId();
     if (!videoId) {
-      resetMarkerEngine('no video id');
+      resetMarkerEngine('missing_video_id');
       return;
     }
 
@@ -361,6 +362,7 @@
       // Ignore stale results that arrive after YouTube SPA navigation changed videos.
       if (activeVideoId !== videoId || getCurrentVideoId() !== videoId) {
         console.log(MARKER_LOG_PREFIX, 'stale analyze result ignored', {
+          failure_reason: 'stale_analyze_response_ignored',
           requestVideoId: videoId,
           activeVideoId,
           currentVideoId: getCurrentVideoId(),
@@ -389,8 +391,12 @@
 
       setMarkerEvents(response.events, response.source || 'transcript');
     } catch (err) {
-      resetMarkerEngine('analyze error');
-      console.warn(MARKER_LOG_PREFIX, 'analyze request failed', { videoId, error: err?.message || err });
+      resetMarkerEngine('analyze_exception');
+      console.warn(MARKER_LOG_PREFIX, 'analyze request failed', {
+        videoId,
+        failure_reason: 'analyze_exception',
+        error: err?.message || err,
+      });
     }
   }
 
@@ -400,7 +406,7 @@
         console.log(MARKER_LOG_PREFIX, 'video id change', { from: activeVideoId, to: null });
       }
       activeVideoId = null;
-      resetMarkerEngine('no active youtube video id');
+      resetMarkerEngine('missing_video_id');
       return;
     }
     if (newVideoId === activeVideoId) return;
@@ -845,6 +851,14 @@
 
   async function sendCaption(payload) {
     // Send latest caption text (plus duration hint) to background for /event analysis.
+    if (!markerSchedulerInterval) {
+      markerFallbackReason = 'scheduler_not_started';
+      console.warn(MARKER_LOG_PREFIX, 'fallback to live captions', {
+        videoId: activeVideoId,
+        reason: markerFallbackReason,
+      });
+    }
+
     if (markerModeActive && markerEvents.length > 0) {
       if (markerFallbackLogVideoId !== activeVideoId) {
         markerFallbackLogVideoId = activeVideoId;

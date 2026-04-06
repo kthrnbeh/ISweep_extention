@@ -23,8 +23,11 @@ const STORAGE_KEYS = {
 const TOKEN_KEY = 'isweep_auth_token'; // Shared with site_token_bridge and frontend localStorage
 
 const LOG_PREFIX = '[ISWEEP][BG]';
+const MARKER_LOG_PREFIX = '[ISWEEP][MARKERS]';
 
 const DEFAULT_BACKEND = 'http://127.0.0.1:5000';
+
+const markerCacheByVideoId = new Map();
 
 // Normalize preferences into a stable shape with blocklist.items always present.
 function normalizePreferences(raw) {
@@ -231,6 +234,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   } else if (message.type === 'isweep_sync_prefs') {
     handleSyncPrefs().then(sendResponse);
     return true; // async
+  } else if (message.type === 'isweep_markers_analyze') {
+    handleMarkerAnalyze(message.video_id, message.force_refresh === true).then(sendResponse);
+    return true; // async
   }
 
   sendResponse({ ok: false, error: 'unknown message' });
@@ -316,6 +322,80 @@ async function handleCaptionDecision(text, captionDurationSeconds) {
     };
     console.error(`${LOG_PREFIX} /event failed ${JSON.stringify(meta)}`, meta);
     return { action: 'none', reason: 'Backend unavailable', duration_seconds: 0, matched_category: null };
+  }
+}
+
+async function handleMarkerAnalyze(videoId, forceRefresh = false) {
+  const cleanVideoId = (videoId || '').trim();
+  if (!cleanVideoId) {
+    return { status: 'error', source: null, events: [], error: 'missing video_id' };
+  }
+
+  if (!forceRefresh && markerCacheByVideoId.has(cleanVideoId)) {
+    const cached = markerCacheByVideoId.get(cleanVideoId);
+    console.log(MARKER_LOG_PREFIX, 'cache hit', { videoId: cleanVideoId, status: cached.status, events: cached.events?.length || 0 });
+    return { ...cached, cached: true };
+  }
+
+  const backendUrl = await getBackendUrl();
+  const token = await getAuthToken();
+  if (!token) {
+    console.warn(MARKER_LOG_PREFIX, 'missing token; markers unavailable', { videoId: cleanVideoId });
+    return { status: 'unavailable', source: null, events: [] };
+  }
+
+  let res;
+  let responseBody = '';
+  try {
+    console.log(MARKER_LOG_PREFIX, 'analyze start', { videoId: cleanVideoId });
+    res = await fetch(`${backendUrl}/videos/analyze`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ video_id: cleanVideoId }),
+    });
+
+    responseBody = await res.text();
+    if (res.status === 401) {
+      console.warn(MARKER_LOG_PREFIX, 'unauthorized; clearing session');
+      await chrome.storage.local.remove([TOKEN_KEY, STORAGE_KEYS.USER_ID, STORAGE_KEYS.AUTH, STORAGE_KEYS.PREFS]);
+      return { status: 'error', source: null, events: [] };
+    }
+
+    if (!res.ok) {
+      console.warn(MARKER_LOG_PREFIX, 'analyze failed', {
+        videoId: cleanVideoId,
+        status: res.status,
+        body: (responseBody || '').slice(0, 200),
+      });
+      return { status: 'error', source: null, events: [] };
+    }
+
+    const payload = responseBody ? JSON.parse(responseBody) : {};
+    const normalized = {
+      status: payload.status || 'error',
+      source: payload.source || null,
+      events: Array.isArray(payload.events) ? payload.events : [],
+    };
+
+    markerCacheByVideoId.set(cleanVideoId, normalized);
+    console.log(MARKER_LOG_PREFIX, 'analyze complete', {
+      videoId: cleanVideoId,
+      status: normalized.status,
+      source: normalized.source,
+      events: normalized.events.length,
+    });
+    return normalized;
+  } catch (err) {
+    console.error(MARKER_LOG_PREFIX, 'analyze exception', {
+      videoId: cleanVideoId,
+      status: res?.status,
+      body: (responseBody || '').slice(0, 200),
+      error: err?.message || String(err),
+    });
+    return { status: 'error', source: null, events: [] };
   }
 }
 

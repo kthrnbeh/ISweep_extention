@@ -328,7 +328,7 @@ async function handleCaptionDecision(text, captionDurationSeconds) {
 async function handleMarkerAnalyze(videoId, forceRefresh = false) {
   const cleanVideoId = (videoId || '').trim();
   if (!cleanVideoId) {
-    return { status: 'error', source: null, events: [], error: 'missing video_id' };
+    return { status: 'error', source: null, events: [], failure_reason: 'missing_video_id' };
   }
 
   if (!forceRefresh && markerCacheByVideoId.has(cleanVideoId)) {
@@ -341,7 +341,7 @@ async function handleMarkerAnalyze(videoId, forceRefresh = false) {
   const token = await getAuthToken();
   if (!token) {
     console.warn(MARKER_LOG_PREFIX, 'missing token; markers unavailable', { videoId: cleanVideoId });
-    return { status: 'unavailable', source: null, events: [] };
+    return { status: 'unavailable', source: null, events: [], failure_reason: 'missing_token' };
   }
 
   let res;
@@ -361,16 +361,18 @@ async function handleMarkerAnalyze(videoId, forceRefresh = false) {
     if (res.status === 401) {
       console.warn(MARKER_LOG_PREFIX, 'unauthorized; clearing session');
       await chrome.storage.local.remove([TOKEN_KEY, STORAGE_KEYS.USER_ID, STORAGE_KEYS.AUTH, STORAGE_KEYS.PREFS]);
-      return { status: 'error', source: null, events: [] };
+      return { status: 'error', source: null, events: [], failure_reason: 'unauthorized' };
     }
 
     if (!res.ok) {
+      const failureReason = res.status === 404 ? 'videos_analyze_missing' : 'backend_http_error';
       console.warn(MARKER_LOG_PREFIX, 'analyze failed', {
         videoId: cleanVideoId,
         status: res.status,
+        failureReason,
         body: (responseBody || '').slice(0, 200),
       });
-      return { status: 'error', source: null, events: [] };
+      return { status: 'error', source: null, events: [], failure_reason: failureReason };
     }
 
     const payload = responseBody ? JSON.parse(responseBody) : {};
@@ -378,24 +380,38 @@ async function handleMarkerAnalyze(videoId, forceRefresh = false) {
       status: payload.status || 'error',
       source: payload.source || null,
       events: Array.isArray(payload.events) ? payload.events : [],
+      failure_reason: payload.failure_reason || null,
     };
 
+    if (normalized.status === 'unavailable' && !normalized.failure_reason) {
+      normalized.failure_reason = 'transcript_unavailable';
+    }
+    if (normalized.status === 'ready' && normalized.events.length === 0 && !normalized.failure_reason) {
+      normalized.failure_reason = 'marker_list_empty';
+    }
+
     markerCacheByVideoId.set(cleanVideoId, normalized);
-    console.log(MARKER_LOG_PREFIX, 'analyze complete', {
+    console.log(MARKER_LOG_PREFIX, 'analyze result', {
       videoId: cleanVideoId,
       status: normalized.status,
       source: normalized.source,
       events: normalized.events.length,
+      failure_reason: normalized.failure_reason,
     });
     return normalized;
   } catch (err) {
+    const errorText = err?.message || String(err);
+    const failureReason = /Failed to fetch|NetworkError|fetch/i.test(errorText)
+      ? 'backend_not_running'
+      : 'analyze_exception';
     console.error(MARKER_LOG_PREFIX, 'analyze exception', {
       videoId: cleanVideoId,
       status: res?.status,
       body: (responseBody || '').slice(0, 200),
-      error: err?.message || String(err),
+      failureReason,
+      error: errorText,
     });
-    return { status: 'error', source: null, events: [] };
+    return { status: 'error', source: null, events: [], failure_reason: failureReason };
   }
 }
 

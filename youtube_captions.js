@@ -200,6 +200,10 @@
   let firedMarkerIds = new Set();
   let markerSchedulerInterval = null;
   let markerVideoWatchInterval = null;
+  let markerModeActive = false;
+  let markerFallbackReason = 'not_initialized';
+  let markerFallbackLogVideoId = null;
+  let markerPastEndLogged = false;
 
   function getCurrentVideoId() {
     try {
@@ -237,6 +241,9 @@
   function resetMarkerEngine(reason) {
     markerEvents = [];
     firedMarkerIds = new Set();
+    markerModeActive = false;
+    markerFallbackReason = reason || 'reset';
+    markerPastEndLogged = false;
     console.log(MARKER_LOG_PREFIX, 'engine reset', { reason });
   }
 
@@ -247,7 +254,14 @@
       .sort((a, b) => a.start_seconds - b.start_seconds);
     markerEvents = normalized;
     firedMarkerIds = new Set();
+    markerModeActive = markerEvents.length > 0;
+    markerFallbackReason = markerModeActive ? 'markers_loaded' : 'marker_list_empty';
+    markerFallbackLogVideoId = null;
+    markerPastEndLogged = false;
     console.log(MARKER_LOG_PREFIX, 'events loaded', { source, count: markerEvents.length });
+    if (!markerModeActive) {
+      console.log(MARKER_LOG_PREFIX, 'marker list empty; live caption fallback active', { videoId: activeVideoId });
+    }
   }
 
   function applyMarkerEvent(marker, nowSec) {
@@ -265,23 +279,33 @@
     }
 
     if (marker.action === 'skip') {
-      const jump = Math.max(marker.duration_seconds || 0, 0);
+      const jump = Math.max(Number(marker.duration_seconds) || 0, 0);
       if (jump > 0) {
-        video.currentTime = nowSec + jump;
+        let targetTime = nowSec + jump;
+        if (Number.isFinite(video.duration) && video.duration > 0) {
+          targetTime = Math.min(targetTime, Math.max(video.duration - 0.05, 0));
+        }
+        if (Number.isFinite(targetTime) && targetTime > nowSec) {
+          video.currentTime = targetTime;
+        }
       }
-      console.log(MARKER_LOG_PREFIX, 'fired skip', { id: marker.id, jump });
+      console.log(MARKER_LOG_PREFIX, 'marker fired', { id: marker.id, action: 'skip', jump });
       return;
     }
 
     if (marker.action === 'fast_forward') {
       const durationMs = Math.max((marker.duration_seconds || 0) * 1000, 0);
       if (restoreRateTimeout) clearTimeout(restoreRateTimeout);
-      previousRate = video.playbackRate;
+      const restoreRate = Number.isFinite(video.playbackRate) && video.playbackRate > 0 ? video.playbackRate : 1.0;
+      previousRate = restoreRate;
       video.playbackRate = 2.0;
+      const rateVideo = video;
       restoreRateTimeout = setTimeout(() => {
-        video.playbackRate = previousRate || 1.0;
+        if (rateVideo && typeof rateVideo.playbackRate === 'number') {
+          rateVideo.playbackRate = restoreRate;
+        }
       }, durationMs || 8000);
-      console.log(MARKER_LOG_PREFIX, 'fired fast_forward', { id: marker.id, durationMs });
+      console.log(MARKER_LOG_PREFIX, 'marker fired', { id: marker.id, action: 'fast_forward', durationMs, restoreRate });
     }
   }
 
@@ -296,10 +320,24 @@
       firedMarkerIds.add(marker.id); // De-dupe: each marker fires at most once.
       applyMarkerEvent(marker, nowSec);
     });
+
+    if (!markerPastEndLogged && markerEvents.length > 0) {
+      const last = markerEvents[markerEvents.length - 1];
+      if (nowSec > last.end_seconds + 0.25 && firedMarkerIds.size === 0) {
+        markerPastEndLogged = true;
+        console.warn(MARKER_LOG_PREFIX, 'markers loaded but none fired by end window', {
+          videoId: activeVideoId,
+          markerCount: markerEvents.length,
+          nowSec,
+          lastEnd: last.end_seconds,
+        });
+      }
+    }
   }
 
   function ensureMarkerSchedulerRunning() {
     if (markerSchedulerInterval) return;
+    console.log(MARKER_LOG_PREFIX, 'scheduler started', { intervalMs: 250 });
     markerSchedulerInterval = setInterval(() => {
       tickMarkerScheduler();
     }, 250);
@@ -313,16 +351,38 @@
     }
 
     try {
+      console.log(MARKER_LOG_PREFIX, 'analyze request start', { videoId, forceRefresh });
       const response = await chrome.runtime.sendMessage({
         type: 'isweep_markers_analyze',
         video_id: videoId,
         force_refresh: forceRefresh,
       });
+
+      // Ignore stale results that arrive after YouTube SPA navigation changed videos.
+      if (activeVideoId !== videoId || getCurrentVideoId() !== videoId) {
+        console.log(MARKER_LOG_PREFIX, 'stale analyze result ignored', {
+          requestVideoId: videoId,
+          activeVideoId,
+          currentVideoId: getCurrentVideoId(),
+        });
+        return;
+      }
+
+      console.log(MARKER_LOG_PREFIX, 'analyze result', {
+        videoId,
+        status: response?.status || 'unknown',
+        source: response?.source || null,
+        events: Array.isArray(response?.events) ? response.events.length : 0,
+        failure_reason: response?.failure_reason || null,
+      });
+
       if (!response || response.status !== 'ready') {
-        resetMarkerEngine(`status:${response?.status || 'unknown'}`);
+        const fallbackReason = response?.failure_reason || `status:${response?.status || 'unknown'}`;
+        resetMarkerEngine(fallbackReason);
         console.log(MARKER_LOG_PREFIX, 'watch-ahead unavailable; live caption fallback active', {
           videoId,
           status: response?.status || 'unknown',
+          failure_reason: response?.failure_reason || null,
         });
         return;
       }
@@ -335,8 +395,16 @@
   }
 
   function handleVideoIdChange(newVideoId) {
-    if (!newVideoId) return;
+    if (!newVideoId) {
+      if (activeVideoId) {
+        console.log(MARKER_LOG_PREFIX, 'video id change', { from: activeVideoId, to: null });
+      }
+      activeVideoId = null;
+      resetMarkerEngine('no active youtube video id');
+      return;
+    }
     if (newVideoId === activeVideoId) return;
+    console.log(MARKER_LOG_PREFIX, 'video id change', { from: activeVideoId, to: newVideoId });
     activeVideoId = newVideoId;
     resetMarkerEngine('video changed');
     analyzeCurrentVideoMarkers(false);
@@ -345,6 +413,7 @@
   function startVideoWatchLoop() {
     handleVideoIdChange(getCurrentVideoId());
     if (markerVideoWatchInterval) return;
+    console.log(MARKER_LOG_PREFIX, 'video watch loop started', { intervalMs: 1000 });
     markerVideoWatchInterval = setInterval(() => {
       handleVideoIdChange(getCurrentVideoId());
     }, 1000);
@@ -776,6 +845,25 @@
 
   async function sendCaption(payload) {
     // Send latest caption text (plus duration hint) to background for /event analysis.
+    if (markerModeActive && markerEvents.length > 0) {
+      if (markerFallbackLogVideoId !== activeVideoId) {
+        markerFallbackLogVideoId = activeVideoId;
+        console.log(MARKER_LOG_PREFIX, 'marker mode active; live caption fallback idle', {
+          videoId: activeVideoId,
+          markerCount: markerEvents.length,
+        });
+      }
+      return;
+    }
+
+    if (markerFallbackLogVideoId !== activeVideoId) {
+      markerFallbackLogVideoId = activeVideoId;
+      console.log(MARKER_LOG_PREFIX, 'fallback to live captions', {
+        videoId: activeVideoId,
+        reason: markerFallbackReason,
+      });
+    }
+
     try {
       const response = await chrome.runtime
         .sendMessage({ type: 'caption', text: payload.text, caption_duration_seconds: payload.caption_duration_seconds })

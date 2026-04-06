@@ -6,6 +6,7 @@
   'use strict';
 
   const LOG_PREFIX = '[ISWEEP][YT]';
+  const MARKER_LOG_PREFIX = '[ISWEEP][MARKERS]';
   const STORAGE_KEYS = { PREFS: 'isweepPreferences' };
   // Track caption text and when it started so we can measure how long words are spoken.
   // Playback-only: ISweep never edits media or captions; it only controls live playback state (mute/unmute/seek/rate).
@@ -192,6 +193,162 @@
   const MUTE_POST_BUFFER_MS = 280; // Small tail after the word
   const STALE_CAPTION_THRESHOLD_MS = 1200; // Ignore captions too far behind current playhead
   const HARD_RESTORE_GRACE_MS = 500; // Extra margin to force unmute
+
+  // Marker engine state. Future audio watch-ahead analyzers can emit the same marker shape.
+  let activeVideoId = null;
+  let markerEvents = [];
+  let firedMarkerIds = new Set();
+  let markerSchedulerInterval = null;
+  let markerVideoWatchInterval = null;
+
+  function getCurrentVideoId() {
+    try {
+      const url = new URL(window.location.href);
+      return (url.searchParams.get('v') || '').trim();
+    } catch (err) {
+      return '';
+    }
+  }
+
+  function normalizeMarkerEvent(raw) {
+    if (!raw || typeof raw !== 'object') return null;
+    const start = Number(raw.start_seconds);
+    const end = Number(raw.end_seconds);
+    const duration = Number(raw.duration_seconds);
+    if (!Number.isFinite(start) || start < 0) return null;
+    const action = String(raw.action || 'none');
+    if (!['mute', 'skip', 'fast_forward'].includes(action)) return null;
+    const computedEnd = Number.isFinite(end) && end > start
+      ? end
+      : start + (Number.isFinite(duration) && duration > 0 ? duration : 0);
+    if (!Number.isFinite(computedEnd) || computedEnd <= start) return null;
+
+    return {
+      id: String(raw.id || `${action}-${start}-${computedEnd}`),
+      start_seconds: start,
+      end_seconds: computedEnd,
+      action,
+      duration_seconds: computedEnd - start,
+      matched_category: raw.matched_category || null,
+      reason: raw.reason || '',
+    };
+  }
+
+  function resetMarkerEngine(reason) {
+    markerEvents = [];
+    firedMarkerIds = new Set();
+    console.log(MARKER_LOG_PREFIX, 'engine reset', { reason });
+  }
+
+  function setMarkerEvents(events, source) {
+    const normalized = (Array.isArray(events) ? events : [])
+      .map(normalizeMarkerEvent)
+      .filter(Boolean)
+      .sort((a, b) => a.start_seconds - b.start_seconds);
+    markerEvents = normalized;
+    firedMarkerIds = new Set();
+    console.log(MARKER_LOG_PREFIX, 'events loaded', { source, count: markerEvents.length });
+  }
+
+  function applyMarkerEvent(marker, nowSec) {
+    const video = findVideo();
+    if (!video) return;
+
+    if (marker.action === 'mute') {
+      applyMuteWindow(marker.start_seconds, marker.end_seconds, `marker:${marker.id}`);
+      console.log(MARKER_LOG_PREFIX, 'fired mute', {
+        id: marker.id,
+        start: marker.start_seconds,
+        end: marker.end_seconds,
+      });
+      return;
+    }
+
+    if (marker.action === 'skip') {
+      const jump = Math.max(marker.duration_seconds || 0, 0);
+      if (jump > 0) {
+        video.currentTime = nowSec + jump;
+      }
+      console.log(MARKER_LOG_PREFIX, 'fired skip', { id: marker.id, jump });
+      return;
+    }
+
+    if (marker.action === 'fast_forward') {
+      const durationMs = Math.max((marker.duration_seconds || 0) * 1000, 0);
+      if (restoreRateTimeout) clearTimeout(restoreRateTimeout);
+      previousRate = video.playbackRate;
+      video.playbackRate = 2.0;
+      restoreRateTimeout = setTimeout(() => {
+        video.playbackRate = previousRate || 1.0;
+      }, durationMs || 8000);
+      console.log(MARKER_LOG_PREFIX, 'fired fast_forward', { id: marker.id, durationMs });
+    }
+  }
+
+  function tickMarkerScheduler() {
+    const video = findVideo();
+    if (!video || !markerEvents.length) return;
+    const nowSec = video.currentTime || 0;
+
+    markerEvents.forEach((marker) => {
+      if (firedMarkerIds.has(marker.id)) return;
+      if (nowSec < marker.start_seconds) return;
+      firedMarkerIds.add(marker.id); // De-dupe: each marker fires at most once.
+      applyMarkerEvent(marker, nowSec);
+    });
+  }
+
+  function ensureMarkerSchedulerRunning() {
+    if (markerSchedulerInterval) return;
+    markerSchedulerInterval = setInterval(() => {
+      tickMarkerScheduler();
+    }, 250);
+  }
+
+  async function analyzeCurrentVideoMarkers(forceRefresh = false) {
+    const videoId = getCurrentVideoId();
+    if (!videoId) {
+      resetMarkerEngine('no video id');
+      return;
+    }
+
+    try {
+      const response = await chrome.runtime.sendMessage({
+        type: 'isweep_markers_analyze',
+        video_id: videoId,
+        force_refresh: forceRefresh,
+      });
+      if (!response || response.status !== 'ready') {
+        resetMarkerEngine(`status:${response?.status || 'unknown'}`);
+        console.log(MARKER_LOG_PREFIX, 'watch-ahead unavailable; live caption fallback active', {
+          videoId,
+          status: response?.status || 'unknown',
+        });
+        return;
+      }
+
+      setMarkerEvents(response.events, response.source || 'transcript');
+    } catch (err) {
+      resetMarkerEngine('analyze error');
+      console.warn(MARKER_LOG_PREFIX, 'analyze request failed', { videoId, error: err?.message || err });
+    }
+  }
+
+  function handleVideoIdChange(newVideoId) {
+    if (!newVideoId) return;
+    if (newVideoId === activeVideoId) return;
+    activeVideoId = newVideoId;
+    resetMarkerEngine('video changed');
+    analyzeCurrentVideoMarkers(false);
+  }
+
+  function startVideoWatchLoop() {
+    handleVideoIdChange(getCurrentVideoId());
+    if (markerVideoWatchInterval) return;
+    markerVideoWatchInterval = setInterval(() => {
+      handleVideoIdChange(getCurrentVideoId());
+    }, 1000);
+  }
 
   function log(...args) {
     console.log(LOG_PREFIX, ...args); // Namespaced logging for debugging
@@ -798,6 +955,8 @@
     loadPreferencesFromStorage();
     requestPrefSync(); // Refresh prefs on load so blocklist/custom words propagate
     clearMuteState('init');
+    ensureMarkerSchedulerRunning();
+    startVideoWatchLoop();
     startObserving(); // Begin observing captions
   }
 

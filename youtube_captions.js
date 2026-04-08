@@ -196,7 +196,7 @@
 
   // Audio watch-ahead constants.
   const AUDIO_AHEAD_LOG_PREFIX = '[ISWEEP][AUDIO_AHEAD]';
-  const AUDIO_CHUNK_SEC = 10;         // seconds of audio per recording chunk
+  const AUDIO_CHUNK_SEC = 3;          // short rolling chunk to reduce watch-ahead latency
   const AUDIO_SAMPLE_RATE = 16000;    // 16 kHz mono — standard for speech recognition
 
   // Marker engine state. Future audio watch-ahead analyzers can emit the same marker shape.
@@ -476,34 +476,36 @@
     if (!audioSampleBufs.length) return;
     const bufs = audioSampleBufs.slice();
     audioSampleBufs = [];
-    const chunkSec = audioChunkStartSec;
+    const chunkStartSec = audioChunkStartSec;
     const video = findVideo();
     audioChunkStartSec = video ? (video.currentTime || 0) : 0;
+    const chunkEndSec = audioChunkStartSec;
     const videoId = audioAheadVideoId;
     if (!videoId) return;
     const sampleRate = audioCtx ? audioCtx.sampleRate : AUDIO_SAMPLE_RATE;
     const wavBuf = encodeWAV(bufs, sampleRate);
     const audioB64 = arrayBufferToBase64(wavBuf);
     console.log(AUDIO_AHEAD_LOG_PREFIX, 'chunk ready', {
-      videoId, chunkOffsetSec: chunkSec,
+      videoId, start_seconds: chunkStartSec, end_seconds: chunkEndSec,
       samplesCollected: bufs.reduce((n, b) => n + b.length, 0),
       wavBytes: wavBuf.byteLength,
     });
     chrome.runtime.sendMessage({
-      type: 'isweep_audio_ahead',
+      type: 'isweep_audio_chunk',
       video_id: videoId,
       audio_b64: audioB64,
       mime_type: 'audio/wav',
-      chunk_offset_seconds: chunkSec,
+      start_seconds: chunkStartSec,
+      end_seconds: chunkEndSec,
     }).then((response) => {
       if (!response) {
         console.warn(AUDIO_AHEAD_LOG_PREFIX, 'failure_reason: audio_chunk_upload_failed', {
-          videoId, chunkOffsetSec: chunkSec,
+          videoId, start_seconds: chunkStartSec, end_seconds: chunkEndSec,
         });
         return;
       }
       console.log(AUDIO_AHEAD_LOG_PREFIX, 'chunk analyze result', {
-        videoId, chunkOffsetSec: chunkSec,
+        videoId, start_seconds: chunkStartSec, end_seconds: chunkEndSec,
         status: response.status,
         events: Array.isArray(response.events) ? response.events.length : 0,
         failure_reason: response.failure_reason || null,
@@ -513,7 +515,7 @@
       }
     }).catch((err) => {
       console.warn(AUDIO_AHEAD_LOG_PREFIX, 'failure_reason: audio_chunk_upload_failed', {
-        videoId, chunkOffsetSec: chunkSec,
+        videoId, start_seconds: chunkStartSec, end_seconds: chunkEndSec,
         error: err?.message || String(err),
       });
     });
@@ -531,13 +533,14 @@
       .filter(Boolean)
       .filter((e) => !firedMarkerIds.has(e.id));
     if (!normalized.length) return;
+    const firedBefore = new Set(firedMarkerIds);
     const merged = [...markerEvents];
     normalized.forEach((e) => {
       if (!merged.some((m) => m.id === e.id)) merged.push(e);
     });
     merged.sort((a, b) => a.start_seconds - b.start_seconds);
-    markerEvents = merged;
-    if (markerEvents.length > 0) markerModeActive = true;
+    setMarkerEvents(merged, 'audio_chunk');
+    firedMarkerIds = firedBefore;
     console.log(AUDIO_AHEAD_LOG_PREFIX, 'audio markers merged', {
       videoId: activeVideoId,
       addedCount: normalized.length,
@@ -559,7 +562,10 @@
     try {
       stream = video.captureStream();
     } catch (err) {
-      console.warn(AUDIO_AHEAD_LOG_PREFIX, 'failure_reason: audio_capture_unavailable', {
+      const reason = err?.name === 'NotAllowedError'
+        ? 'audio_capture_permission_denied'
+        : 'audio_capture_unavailable';
+      console.warn(AUDIO_AHEAD_LOG_PREFIX, `failure_reason: ${reason}`, {
         reason: 'captureStream threw',
         error: err?.message || String(err),
       });
@@ -575,7 +581,17 @@
     try {
       const audioStream = new MediaStream(audioTracks);
       audioCtx = new AudioContext({ sampleRate: AUDIO_SAMPLE_RATE });
-      if (audioCtx.state === 'suspended') audioCtx.resume();
+      if (audioCtx.state === 'suspended') {
+        audioCtx.resume().catch((err) => {
+          const reason = err?.name === 'NotAllowedError'
+            ? 'audio_capture_permission_denied'
+            : 'audio_capture_unavailable';
+          console.warn(AUDIO_AHEAD_LOG_PREFIX, 'audio context resume failed', {
+            failure_reason: reason,
+            error: err?.message || String(err),
+          });
+        });
+      }
       const source = audioCtx.createMediaStreamSource(audioStream);
       const processor = audioCtx.createScriptProcessor(4096, 1, 1);
       // Route through a gain-0 node so the graph is active but produces no audible output.
@@ -604,7 +620,10 @@
         chunkSec: AUDIO_CHUNK_SEC,
       });
     } catch (err) {
-      console.warn(AUDIO_AHEAD_LOG_PREFIX, 'failure_reason: audio_capture_unavailable', {
+      const reason = err?.name === 'NotAllowedError'
+        ? 'audio_capture_permission_denied'
+        : 'audio_capture_unavailable';
+      console.warn(AUDIO_AHEAD_LOG_PREFIX, `failure_reason: ${reason}`, {
         error: err?.message || String(err),
       });
       stopAudioCapture('init_failed');

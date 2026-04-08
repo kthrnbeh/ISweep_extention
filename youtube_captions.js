@@ -194,6 +194,11 @@
   const STALE_CAPTION_THRESHOLD_MS = 1200; // Ignore captions too far behind current playhead
   const HARD_RESTORE_GRACE_MS = 500; // Extra margin to force unmute
 
+  // Audio watch-ahead constants.
+  const AUDIO_AHEAD_LOG_PREFIX = '[ISWEEP][AUDIO_AHEAD]';
+  const AUDIO_CHUNK_SEC = 10;         // seconds of audio per recording chunk
+  const AUDIO_SAMPLE_RATE = 16000;    // 16 kHz mono — standard for speech recognition
+
   // Marker engine state. Future audio watch-ahead analyzers can emit the same marker shape.
   let activeVideoId = null;
   let markerEvents = [];
@@ -204,6 +209,15 @@
   let markerFallbackReason = 'scheduler_not_started';
   let markerFallbackLogVideoId = null;
   let markerPastEndLogged = false;
+
+  // Audio watch-ahead state.
+  let audioCtx = null;
+  let audioProcessor = null;
+  let audioSampleBufs = [];    // Float32Arrays accumulated for the current chunk
+  let audioChunkStartSec = 0; // video.currentTime when the current chunk began
+  let audioAheadActive = false;
+  let audioAheadVideoId = null;
+  let audioAheadFailed = false; // true after a terminal (non-retryable) capture failure
 
   function getCurrentVideoId() {
     try {
@@ -400,20 +414,223 @@
     }
   }
 
+  // ── Audio watch-ahead helpers ────────────────────────────────────────────
+
+  // Converts a list of Float32Array PCM buffers + sample rate into a raw WAV ArrayBuffer.
+  function encodeWAV(sampleBufs, sampleRate) {
+    const totalSamples = sampleBufs.reduce((n, b) => n + b.length, 0);
+    const dataBytes = totalSamples * 2; // 16-bit
+    const out = new ArrayBuffer(44 + dataBytes);
+    const view = new DataView(out);
+    const w = (off, str) => {
+      for (let i = 0; i < str.length; i++) view.setUint8(off + i, str.charCodeAt(i));
+    };
+    w(0, 'RIFF'); view.setUint32(4, 36 + dataBytes, true);
+    w(8, 'WAVE'); w(12, 'fmt ');
+    view.setUint32(16, 16, true);             // PCM chunk size
+    view.setUint16(20, 1, true);              // PCM format
+    view.setUint16(22, 1, true);              // mono
+    view.setUint32(24, sampleRate, true);     // sample rate
+    view.setUint32(28, sampleRate * 2, true); // byte rate
+    view.setUint16(32, 2, true);              // block align
+    view.setUint16(34, 16, true);             // bits per sample
+    w(36, 'data'); view.setUint32(40, dataBytes, true);
+    let offset = 44;
+    sampleBufs.forEach((buf) => {
+      for (let i = 0; i < buf.length; i++) {
+        const s = Math.max(-1, Math.min(1, buf[i]));
+        view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+        offset += 2;
+      }
+    });
+    return out;
+  }
+
+  // Safely base64-encodes an ArrayBuffer in 8 KB chunks (avoids call-stack overflow).
+  function arrayBufferToBase64(buffer) {
+    const bytes = new Uint8Array(buffer);
+    const parts = [];
+    for (let i = 0; i < bytes.length; i += 8192) {
+      parts.push(String.fromCharCode(...bytes.subarray(i, Math.min(i + 8192, bytes.length))));
+    }
+    return btoa(parts.join(''));
+  }
+
+  function stopAudioCapture(reason) {
+    if (!audioAheadActive && !audioCtx) return;
+    audioAheadActive = false;
+    if (audioProcessor) {
+      try { audioProcessor.disconnect(); } catch (_) {}
+      audioProcessor = null;
+    }
+    if (audioCtx) {
+      try { audioCtx.close(); } catch (_) {}
+      audioCtx = null;
+    }
+    audioSampleBufs = [];
+    audioAheadVideoId = null;
+    console.log(AUDIO_AHEAD_LOG_PREFIX, 'audio capture stopped', { reason });
+  }
+
+  function flushAudioChunk() {
+    if (!audioSampleBufs.length) return;
+    const bufs = audioSampleBufs.slice();
+    audioSampleBufs = [];
+    const chunkSec = audioChunkStartSec;
+    const video = findVideo();
+    audioChunkStartSec = video ? (video.currentTime || 0) : 0;
+    const videoId = audioAheadVideoId;
+    if (!videoId) return;
+    const sampleRate = audioCtx ? audioCtx.sampleRate : AUDIO_SAMPLE_RATE;
+    const wavBuf = encodeWAV(bufs, sampleRate);
+    const audioB64 = arrayBufferToBase64(wavBuf);
+    console.log(AUDIO_AHEAD_LOG_PREFIX, 'chunk ready', {
+      videoId, chunkOffsetSec: chunkSec,
+      samplesCollected: bufs.reduce((n, b) => n + b.length, 0),
+      wavBytes: wavBuf.byteLength,
+    });
+    chrome.runtime.sendMessage({
+      type: 'isweep_audio_ahead',
+      video_id: videoId,
+      audio_b64: audioB64,
+      mime_type: 'audio/wav',
+      chunk_offset_seconds: chunkSec,
+    }).then((response) => {
+      if (!response) {
+        console.warn(AUDIO_AHEAD_LOG_PREFIX, 'failure_reason: audio_chunk_upload_failed', {
+          videoId, chunkOffsetSec: chunkSec,
+        });
+        return;
+      }
+      console.log(AUDIO_AHEAD_LOG_PREFIX, 'chunk analyze result', {
+        videoId, chunkOffsetSec: chunkSec,
+        status: response.status,
+        events: Array.isArray(response.events) ? response.events.length : 0,
+        failure_reason: response.failure_reason || null,
+      });
+      if (response.status === 'ready' && Array.isArray(response.events) && response.events.length > 0) {
+        mergeAudioMarkers(response.events, videoId);
+      }
+    }).catch((err) => {
+      console.warn(AUDIO_AHEAD_LOG_PREFIX, 'failure_reason: audio_chunk_upload_failed', {
+        videoId, chunkOffsetSec: chunkSec,
+        error: err?.message || String(err),
+      });
+    });
+  }
+
+  function mergeAudioMarkers(newEvents, videoId) {
+    if (videoId !== activeVideoId) {
+      console.log(AUDIO_AHEAD_LOG_PREFIX, 'failure_reason: stale_audio_response_ignored', {
+        responseVideoId: videoId, activeVideoId,
+      });
+      return;
+    }
+    const normalized = (Array.isArray(newEvents) ? newEvents : [])
+      .map(normalizeMarkerEvent)
+      .filter(Boolean)
+      .filter((e) => !firedMarkerIds.has(e.id));
+    if (!normalized.length) return;
+    const merged = [...markerEvents];
+    normalized.forEach((e) => {
+      if (!merged.some((m) => m.id === e.id)) merged.push(e);
+    });
+    merged.sort((a, b) => a.start_seconds - b.start_seconds);
+    markerEvents = merged;
+    if (markerEvents.length > 0) markerModeActive = true;
+    console.log(AUDIO_AHEAD_LOG_PREFIX, 'audio markers merged', {
+      videoId: activeVideoId,
+      addedCount: normalized.length,
+      totalCount: markerEvents.length,
+    });
+  }
+
+  function startAudioCapture() {
+    const video = findVideo();
+    if (!video || audioAheadActive || audioAheadFailed) return;
+    if (typeof video.captureStream !== 'function') {
+      console.warn(AUDIO_AHEAD_LOG_PREFIX, 'failure_reason: audio_capture_unavailable', {
+        reason: 'captureStream not supported',
+      });
+      audioAheadFailed = true;
+      return;
+    }
+    let stream;
+    try {
+      stream = video.captureStream();
+    } catch (err) {
+      console.warn(AUDIO_AHEAD_LOG_PREFIX, 'failure_reason: audio_capture_unavailable', {
+        reason: 'captureStream threw',
+        error: err?.message || String(err),
+      });
+      audioAheadFailed = true;
+      return;
+    }
+    const audioTracks = stream.getAudioTracks();
+    if (!audioTracks.length) {
+      // Retryable: tracks may appear once the video starts playing.
+      console.log(AUDIO_AHEAD_LOG_PREFIX, 'no audio tracks yet; will retry', { videoId: activeVideoId });
+      return;
+    }
+    try {
+      const audioStream = new MediaStream(audioTracks);
+      audioCtx = new AudioContext({ sampleRate: AUDIO_SAMPLE_RATE });
+      if (audioCtx.state === 'suspended') audioCtx.resume();
+      const source = audioCtx.createMediaStreamSource(audioStream);
+      const processor = audioCtx.createScriptProcessor(4096, 1, 1);
+      // Route through a gain-0 node so the graph is active but produces no audible output.
+      const silentGain = audioCtx.createGain();
+      silentGain.gain.value = 0;
+      const sampleTarget = AUDIO_CHUNK_SEC * audioCtx.sampleRate;
+      processor.onaudioprocess = (e) => {
+        if (!audioAheadActive) return;
+        const vid = findVideo();
+        if (!vid || vid.paused) return; // Skip silent/paused frames
+        audioSampleBufs.push(new Float32Array(e.inputBuffer.getChannelData(0)));
+        const total = audioSampleBufs.reduce((n, b) => n + b.length, 0);
+        if (total >= sampleTarget) flushAudioChunk();
+      };
+      source.connect(processor);
+      processor.connect(silentGain);
+      silentGain.connect(audioCtx.destination);
+      audioProcessor = processor;
+      audioAheadActive = true;
+      audioAheadVideoId = activeVideoId;
+      audioChunkStartSec = video.currentTime || 0;
+      audioSampleBufs = [];
+      console.log(AUDIO_AHEAD_LOG_PREFIX, 'audio capture started', {
+        videoId: activeVideoId,
+        sampleRate: audioCtx.sampleRate,
+        chunkSec: AUDIO_CHUNK_SEC,
+      });
+    } catch (err) {
+      console.warn(AUDIO_AHEAD_LOG_PREFIX, 'failure_reason: audio_capture_unavailable', {
+        error: err?.message || String(err),
+      });
+      stopAudioCapture('init_failed');
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+
   function handleVideoIdChange(newVideoId) {
     if (!newVideoId) {
       if (activeVideoId) {
         console.log(MARKER_LOG_PREFIX, 'video id change', { from: activeVideoId, to: null });
       }
       activeVideoId = null;
+      stopAudioCapture('video_id_lost');
       resetMarkerEngine('missing_video_id');
       return;
     }
     if (newVideoId === activeVideoId) return;
     console.log(MARKER_LOG_PREFIX, 'video id change', { from: activeVideoId, to: newVideoId });
     activeVideoId = newVideoId;
+    audioAheadFailed = false;           // Allow a fresh capture attempt for the new video
+    stopAudioCapture('video_changed');
     resetMarkerEngine('video changed');
     analyzeCurrentVideoMarkers(false);
+    setTimeout(startAudioCapture, 1500); // Give the player 1.5 s to start before capturing
   }
 
   function startVideoWatchLoop() {
@@ -422,6 +639,8 @@
     console.log(MARKER_LOG_PREFIX, 'video watch loop started', { intervalMs: 1000 });
     markerVideoWatchInterval = setInterval(() => {
       handleVideoIdChange(getCurrentVideoId());
+      // Retry audio capture each tick if tracks weren't available on the first attempt.
+      if (activeVideoId && !audioAheadActive && !audioAheadFailed) startAudioCapture();
     }, 1000);
   }
 

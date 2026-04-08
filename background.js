@@ -237,6 +237,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   } else if (message.type === 'isweep_markers_analyze') {
     handleMarkerAnalyze(message.video_id, message.force_refresh === true).then(sendResponse);
     return true; // async
+  } else if (message.type === 'isweep_audio_ahead') {
+    handleAudioAhead(
+      message.video_id,
+      message.audio_b64,
+      message.mime_type,
+      message.chunk_offset_seconds
+    ).then(sendResponse);
+    return true; // async
   }
 
   sendResponse({ ok: false, error: 'unknown message' });
@@ -412,6 +420,95 @@ async function handleMarkerAnalyze(videoId, forceRefresh = false) {
       error: errorText,
     });
     return { status: 'error', source: null, events: [], failure_reason: failureReason };
+  }
+}
+
+// Receives a real-time audio chunk from youtube_captions.js, forwards to /audio/analyze,
+// and returns { status, source, events, failure_reason, chunk_offset_seconds }.
+async function handleAudioAhead(videoId, audioB64, mimeType, chunkOffsetSeconds) {
+  const AUDIO_LOG = '[ISWEEP][AUDIO_AHEAD]';
+  const cleanVideoId = (videoId || '').trim();
+
+  if (!cleanVideoId) {
+    return { status: 'error', events: [], failure_reason: 'missing_video_id' };
+  }
+  if (!audioB64) {
+    return { status: 'error', events: [], failure_reason: 'missing_audio' };
+  }
+
+  const backendUrl = await getBackendUrl();
+  const token = await getAuthToken();
+  if (!token) {
+    console.warn(AUDIO_LOG, 'missing_token', { videoId: cleanVideoId });
+    return { status: 'unavailable', events: [], failure_reason: 'missing_token' };
+  }
+
+  let res;
+  let responseBody = '';
+  try {
+    console.log(AUDIO_LOG, 'sending chunk', {
+      videoId: cleanVideoId,
+      chunkOffsetSeconds,
+      mimeType,
+      b64Bytes: audioB64.length,
+    });
+    res = await fetch(`${backendUrl}/audio/analyze`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        video_id: cleanVideoId,
+        audio_b64: audioB64,
+        mime_type: mimeType || 'audio/wav',
+        chunk_offset_seconds: chunkOffsetSeconds || 0,
+      }),
+    });
+
+    responseBody = await res.text();
+    if (res.status === 401) {
+      await chrome.storage.local.remove([TOKEN_KEY, STORAGE_KEYS.USER_ID, STORAGE_KEYS.AUTH, STORAGE_KEYS.PREFS]);
+      return { status: 'error', events: [], failure_reason: 'unauthorized' };
+    }
+    if (!res.ok) {
+      const failureReason = res.status === 404 ? 'audio_analyze_missing' : 'backend_http_error';
+      console.warn(AUDIO_LOG, 'chunk failed', {
+        videoId: cleanVideoId,
+        status: res.status,
+        failureReason,
+        body: (responseBody || '').slice(0, 200),
+      });
+      return { status: 'error', events: [], failure_reason: failureReason };
+    }
+
+    const payload = responseBody ? JSON.parse(responseBody) : {};
+    const result = {
+      status: payload.status || 'error',
+      source: payload.source || 'audio_chunk',
+      chunk_offset_seconds: chunkOffsetSeconds,
+      events: Array.isArray(payload.events) ? payload.events : [],
+      failure_reason: payload.failure_reason || null,
+    };
+    console.log(AUDIO_LOG, 'chunk result', {
+      videoId: cleanVideoId,
+      chunkOffsetSeconds,
+      status: result.status,
+      events: result.events.length,
+      failure_reason: result.failure_reason,
+    });
+    return result;
+  } catch (err) {
+    const errorText = err?.message || String(err);
+    const failureReason = /Failed to fetch|NetworkError|fetch/i.test(errorText)
+      ? 'backend_not_running'
+      : 'analyze_exception';
+    console.error(AUDIO_LOG, 'chunk exception', {
+      videoId: cleanVideoId,
+      failureReason,
+      error: errorText,
+    });
+    return { status: 'error', events: [], failure_reason: failureReason };
   }
 }
 

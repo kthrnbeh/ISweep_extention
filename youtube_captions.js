@@ -477,29 +477,42 @@
     const bufs = audioSampleBufs.slice();
     audioSampleBufs = [];
     const chunkStartSec = audioChunkStartSec;
-    const video = findVideo();
-    audioChunkStartSec = video ? (video.currentTime || 0) : 0;
-    const chunkEndSec = audioChunkStartSec;
     const videoId = audioAheadVideoId;
     if (!videoId) return;
+
     const sampleRate = audioCtx ? audioCtx.sampleRate : AUDIO_SAMPLE_RATE;
+    const sampleCount = bufs.reduce((n, b) => n + b.length, 0);
+    const measuredDurationSec = sampleRate > 0 ? (sampleCount / sampleRate) : 0;
+    let chunkEndSec = chunkStartSec + measuredDurationSec;
+
+    const video = findVideo();
+    const nowSec = video ? (video.currentTime || 0) : chunkEndSec;
+    if (Number.isFinite(nowSec) && nowSec > chunkStartSec) {
+      // Prefer real playback clock when available; fall back to measured sample duration.
+      chunkEndSec = nowSec;
+    }
+    if (!(chunkEndSec > chunkStartSec)) {
+      chunkEndSec = chunkStartSec + Math.max(measuredDurationSec, 0.05);
+    }
+    audioChunkStartSec = chunkEndSec;
+
     const wavBuf = encodeWAV(bufs, sampleRate);
-    const audioB64 = arrayBufferToBase64(wavBuf);
+    const audioChunk = arrayBufferToBase64(wavBuf);
     console.log(AUDIO_AHEAD_LOG_PREFIX, 'chunk ready', {
       videoId, start_seconds: chunkStartSec, end_seconds: chunkEndSec,
-      samplesCollected: bufs.reduce((n, b) => n + b.length, 0),
+      samplesCollected: sampleCount,
       wavBytes: wavBuf.byteLength,
     });
     chrome.runtime.sendMessage({
       type: 'isweep_audio_chunk',
       video_id: videoId,
-      audio_b64: audioB64,
+      audio_chunk: audioChunk,
       mime_type: 'audio/wav',
       start_seconds: chunkStartSec,
       end_seconds: chunkEndSec,
     }).then((response) => {
       if (!response) {
-        console.warn(AUDIO_AHEAD_LOG_PREFIX, 'failure_reason: audio_chunk_upload_failed', {
+        console.warn(AUDIO_AHEAD_LOG_PREFIX, 'failure_reason: analyze_exception', {
           videoId, start_seconds: chunkStartSec, end_seconds: chunkEndSec,
         });
         return;
@@ -514,7 +527,7 @@
         mergeAudioMarkers(response.events, videoId);
       }
     }).catch((err) => {
-      console.warn(AUDIO_AHEAD_LOG_PREFIX, 'failure_reason: audio_chunk_upload_failed', {
+      console.warn(AUDIO_AHEAD_LOG_PREFIX, 'failure_reason: analyze_exception', {
         videoId, start_seconds: chunkStartSec, end_seconds: chunkEndSec,
         error: err?.message || String(err),
       });
@@ -539,8 +552,15 @@
       if (!merged.some((m) => m.id === e.id)) merged.push(e);
     });
     merged.sort((a, b) => a.start_seconds - b.start_seconds);
-    setMarkerEvents(merged, 'audio_chunk');
-    firedMarkerIds = firedBefore;
+    markerEvents = merged;
+    markerModeActive = markerEvents.length > 0;
+    markerFallbackReason = markerModeActive ? 'markers_loaded' : 'marker_list_empty';
+    markerFallbackLogVideoId = null;
+    firedMarkerIds = firedBefore; // Preserve one-time semantics for already-fired markers.
+    console.log(MARKER_LOG_PREFIX, 'events merged', {
+      source: 'audio_chunk',
+      total: markerEvents.length,
+    });
     console.log(AUDIO_AHEAD_LOG_PREFIX, 'audio markers merged', {
       videoId: activeVideoId,
       addedCount: normalized.length,

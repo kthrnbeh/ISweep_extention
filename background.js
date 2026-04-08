@@ -237,10 +237,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   } else if (message.type === 'isweep_markers_analyze') {
     handleMarkerAnalyze(message.video_id, message.force_refresh === true).then(sendResponse);
     return true; // async
-  } else if (message.type === 'isweep_audio_chunk' || message.type === 'isweep_audio_ahead') {
+  } else if (message.type === 'isweep_audio_chunk') {
     handleAudioAhead(
       message.video_id,
-      message.audio_b64,
+      message.audio_chunk,
       message.mime_type,
       message.start_seconds,
       message.end_seconds
@@ -426,15 +426,15 @@ async function handleMarkerAnalyze(videoId, forceRefresh = false) {
 
 // Receives a real-time audio chunk from youtube_captions.js, forwards to /audio/analyze,
 // and returns { status, source, events, failure_reason, chunk_offset_seconds }.
-async function handleAudioAhead(videoId, audioB64, mimeType, startSeconds, endSeconds) {
+async function handleAudioAhead(videoId, audioChunk, mimeType, startSeconds, endSeconds) {
   const AUDIO_LOG = '[ISWEEP][AUDIO_AHEAD]';
   const cleanVideoId = (videoId || '').trim();
 
   if (!cleanVideoId) {
     return { status: 'error', events: [], failure_reason: 'missing_video_id' };
   }
-  if (!audioB64) {
-    return { status: 'error', events: [], failure_reason: 'audio_chunk_upload_failed' };
+  if (!audioChunk) {
+    return { status: 'error', events: [], failure_reason: 'analyze_exception' };
   }
 
   const normalizedStart = Number.isFinite(Number(startSeconds)) ? Number(startSeconds) : 0;
@@ -457,7 +457,7 @@ async function handleAudioAhead(videoId, audioB64, mimeType, startSeconds, endSe
       startSeconds: normalizedStart,
       endSeconds: normalizedEnd,
       mimeType,
-      b64Bytes: audioB64.length,
+      chunkBytes: audioChunk.length,
     });
     res = await fetch(`${backendUrl}/audio/analyze`, {
       method: 'POST',
@@ -467,7 +467,7 @@ async function handleAudioAhead(videoId, audioB64, mimeType, startSeconds, endSe
       },
       body: JSON.stringify({
         video_id: cleanVideoId,
-        audio_b64: audioB64,
+        audio_chunk: audioChunk,
         mime_type: mimeType || 'audio/wav',
         start_seconds: normalizedStart,
         end_seconds: normalizedEnd,
@@ -480,7 +480,7 @@ async function handleAudioAhead(videoId, audioB64, mimeType, startSeconds, endSe
       return { status: 'error', events: [], failure_reason: 'unauthorized' };
     }
     if (!res.ok) {
-      const failureReason = 'audio_chunk_upload_failed';
+      const failureReason = 'analyze_exception';
       console.warn(AUDIO_LOG, 'chunk failed', {
         videoId: cleanVideoId,
         status: res.status,
@@ -512,7 +512,7 @@ async function handleAudioAhead(videoId, audioB64, mimeType, startSeconds, endSe
     const errorText = err?.message || String(err);
     const failureReason = /Failed to fetch|NetworkError|fetch/i.test(errorText)
       ? 'backend_not_running'
-      : 'audio_chunk_upload_failed';
+      : 'analyze_exception';
     console.error(AUDIO_LOG, 'chunk exception', {
       videoId: cleanVideoId,
       failureReason,

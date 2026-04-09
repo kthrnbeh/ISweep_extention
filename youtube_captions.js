@@ -196,8 +196,15 @@
 
   // Audio watch-ahead constants.
   const AUDIO_AHEAD_LOG_PREFIX = '[ISWEEP][AUDIO_AHEAD]';
-  const AUDIO_CHUNK_SEC = 3;          // short rolling chunk to reduce watch-ahead latency
+  // 1 s chunks: tighter window improves profanity pre-roll timing.
+  // At 16 kHz this is 16 000 samples per flush. Do not go below 0.5 s or
+  // the WAV overhead and backend round-trip latency dominate.
+  const AUDIO_CHUNK_SEC = 1;
   const AUDIO_SAMPLE_RATE = 16000;    // 16 kHz mono — standard for speech recognition
+  // Fire mute markers this many seconds BEFORE their nominal start so the
+  // audio is already silent when the speaker reaches the flagged word.
+  // 200 ms provides roughly 3 animation frames of safety margin.
+  const MARKER_FIRE_EARLY_SEC = 0.20;
 
   // Marker engine state. Future audio watch-ahead analyzers can emit the same marker shape.
   let activeVideoId = null;
@@ -331,8 +338,20 @@
 
     markerEvents.forEach((marker) => {
       if (firedMarkerIds.has(marker.id)) return;
-      if (nowSec < marker.start_seconds) return;
+      // Mute markers fire MARKER_FIRE_EARLY_SEC before their start so the
+      // audio is silent before the viewer hears the word. Skip/fast_forward
+      // fire exactly on-time (earlyWindowSec = 0).
+      const earlyWindowSec = marker.action === 'mute' ? MARKER_FIRE_EARLY_SEC : 0;
+      if (nowSec < marker.start_seconds - earlyWindowSec) return;
       firedMarkerIds.add(marker.id); // De-dupe: each marker fires at most once.
+      console.log(MARKER_LOG_PREFIX, 'marker fired', {
+        id: marker.id,
+        action: marker.action,
+        markerStart: marker.start_seconds,
+        nowSec: +nowSec.toFixed(3),
+        leadSec: +(marker.start_seconds - nowSec).toFixed(3),
+        earlyWindowSec,
+      });
       applyMarkerEvent(marker, nowSec);
     });
 
@@ -503,6 +522,9 @@
       samplesCollected: sampleCount,
       wavBytes: wavBuf.byteLength,
     });
+    console.log(AUDIO_AHEAD_LOG_PREFIX, 'sending chunk', {
+      videoId, start_seconds: chunkStartSec, end_seconds: chunkEndSec,
+    });
     chrome.runtime.sendMessage({
       type: 'isweep_audio_chunk',
       video_id: videoId,
@@ -568,7 +590,7 @@
     });
   }
 
-  function startAudioCapture() {
+  async function startAudioCapture() {
     const video = findVideo();
     if (!video || audioAheadActive || audioAheadFailed) return;
     if (typeof video.captureStream !== 'function') {
@@ -612,24 +634,45 @@
           });
         });
       }
+
+      // Load the AudioWorklet processor from the extension bundle.
+      // web_accessible_resources in manifest.json exposes this file to the page context.
+      const workletUrl = chrome.runtime.getURL('audio_chunk_processor.js');
+      try {
+        await audioCtx.audioWorklet.addModule(workletUrl);
+        console.log(AUDIO_AHEAD_LOG_PREFIX, 'audio worklet loaded successfully', { workletUrl });
+      } catch (loadErr) {
+        console.warn(AUDIO_AHEAD_LOG_PREFIX, 'audio worklet load failed', {
+          failure_reason: 'audio_capture_unavailable',
+          error: loadErr?.message || String(loadErr),
+        });
+        stopAudioCapture('worklet_load_failed');
+        audioAheadFailed = true;
+        return;
+      }
+
       const source = audioCtx.createMediaStreamSource(audioStream);
-      const processor = audioCtx.createScriptProcessor(4096, 1, 1);
-      // Route through a gain-0 node so the graph is active but produces no audible output.
+      const workletNode = new AudioWorkletNode(audioCtx, 'audio-chunk-processor');
+      // Route through a gain-0 destination so the Web Audio graph stays active
+      // without leaking captured audio to the speaker output.
       const silentGain = audioCtx.createGain();
       silentGain.gain.value = 0;
+
       const sampleTarget = AUDIO_CHUNK_SEC * audioCtx.sampleRate;
-      processor.onaudioprocess = (e) => {
+      workletNode.port.onmessage = (e) => {
         if (!audioAheadActive) return;
         const vid = findVideo();
-        if (!vid || vid.paused) return; // Skip silent/paused frames
-        audioSampleBufs.push(new Float32Array(e.inputBuffer.getChannelData(0)));
+        if (!vid || vid.paused) return; // Skip silent/paused frames.
+        audioSampleBufs.push(new Float32Array(e.data));
         const total = audioSampleBufs.reduce((n, b) => n + b.length, 0);
         if (total >= sampleTarget) flushAudioChunk();
       };
-      source.connect(processor);
-      processor.connect(silentGain);
+
+      source.connect(workletNode);
+      workletNode.connect(silentGain);
       silentGain.connect(audioCtx.destination);
-      audioProcessor = processor;
+
+      audioProcessor = workletNode; // stopAudioCapture() calls .disconnect() on this.
       audioAheadActive = true;
       audioAheadVideoId = activeVideoId;
       audioChunkStartSec = video.currentTime || 0;
@@ -638,6 +681,7 @@
         videoId: activeVideoId,
         sampleRate: audioCtx.sampleRate,
         chunkSec: AUDIO_CHUNK_SEC,
+        processor: 'AudioWorkletNode',
       });
     } catch (err) {
       const reason = err?.name === 'NotAllowedError'

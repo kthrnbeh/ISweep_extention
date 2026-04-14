@@ -24,6 +24,7 @@
   const MAX_MUTE_MS = 3200; // Hard cap to avoid long mutes (~3.2s)
   const REDACTED_PLACEHOLDER_MUTE_SECONDS = 3; // Fallback mute when captions redact profanity as [ __ ]
   const FALLBACK_PREROLL_SEC = 0.20; // Pull placeholder fallback slightly earlier so mute lands before the spoken word
+  const FALLBACK_PLACEHOLDER_MAX_DELAY_SEC = 0.45; // Ignore delayed backend placeholder fallbacks once the word onset has already passed
   const REDACTED_PLACEHOLDER_PATTERN = /\[\s*[\u00A0_\s]{2,}\s*\]/; // Matches bracketed underscore placeholders from auto-captions
 
   const LANGUAGE_KEYWORDS = [
@@ -1014,6 +1015,7 @@
     const currentVideoTime = video ? (video.currentTime || 0) : 0;
     const adjustedStart = Math.max(originalStartSec - FALLBACK_PREROLL_SEC, 0);
     const safeEndSec = Math.max(endSec, adjustedStart + 0.3);
+    const onsetDelaySec = Math.max(currentVideoTime - originalStartSec, 0);
     console.log(FALLBACK_LOG_PREFIX, 'placeholder detected', {
       text,
       originalStartSec,
@@ -1021,14 +1023,29 @@
       endSec: safeEndSec,
       prerollUsed: FALLBACK_PREROLL_SEC,
       currentVideoTime,
+      onsetDelaySec,
       reason,
     });
+    if (onsetDelaySec > FALLBACK_PLACEHOLDER_MAX_DELAY_SEC) {
+      console.log(FALLBACK_LOG_PREFIX, 'mute skipped', {
+        originalStartSec,
+        adjustedStart,
+        endSec: safeEndSec,
+        prerollUsed: FALLBACK_PREROLL_SEC,
+        currentVideoTime,
+        onsetDelaySec,
+        maxDelaySec: FALLBACK_PLACEHOLDER_MAX_DELAY_SEC,
+        reason,
+      });
+      return;
+    }
     console.log(FALLBACK_LOG_PREFIX, 'mute requested', {
       originalStartSec,
       adjustedStart,
       endSec: safeEndSec,
       prerollUsed: FALLBACK_PREROLL_SEC,
       currentVideoTime,
+      onsetDelaySec,
       reason,
     });
     applyMuteWindow(adjustedStart, safeEndSec, reason);

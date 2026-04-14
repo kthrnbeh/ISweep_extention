@@ -199,15 +199,15 @@
   // Audio watch-ahead constants.
   const AUDIO_AHEAD_LOG_PREFIX = '[ISWEEP][AUDIO_AHEAD]';
   const FALLBACK_LOG_PREFIX = '[ISWEEP][FALLBACK]';
-  // 1 s chunks: tighter window improves profanity pre-roll timing.
-  // At 16 kHz this is 16 000 samples per flush. Do not go below 0.5 s or
-  // the WAV overhead and backend round-trip latency dominate.
-  const AUDIO_CHUNK_SEC = 1;
+  // 300 ms chunks give the scheduler a much tighter profanity timing window
+  // than 1 s chunks without flooding the backend with near-frame-sized requests.
+  const AUDIO_CHUNK_SEC = 0.30;
   const AUDIO_SAMPLE_RATE = 16000;    // 16 kHz mono — standard for speech recognition
-  // Fire mute markers this many seconds BEFORE their nominal start so the
-  // audio is already silent when the speaker reaches the flagged word.
-  // 200 ms provides roughly 3 animation frames of safety margin.
-  const MARKER_FIRE_EARLY_SEC = 0.20;
+  const MARKER_SCHEDULER_INTERVAL_MS = 100;
+  // Audio-derived mute markers already include backend pre-roll, so keep the
+  // scheduler lead short and specific to profanity muting.
+  const PROFANITY_MARKER_FIRE_EARLY_SEC = 0.12;
+  const AUDIO_MARKER_FALLBACK_SKIP_WINDOW_SEC = 0.75;
 
   // Marker engine state. Future audio watch-ahead analyzers can emit the same marker shape.
   let activeVideoId = null;
@@ -259,6 +259,7 @@
       duration_seconds: computedEnd - start,
       matched_category: raw.matched_category || null,
       reason: raw.reason || '',
+      source: raw.source || null,
     };
   }
 
@@ -274,6 +275,7 @@
   function setMarkerEvents(events, source) {
     const normalized = (Array.isArray(events) ? events : [])
       .map(normalizeMarkerEvent)
+      .map((event) => (event ? { ...event, source: event.source || source || null } : null))
       .filter(Boolean)
       .sort((a, b) => a.start_seconds - b.start_seconds);
     markerEvents = normalized;
@@ -299,6 +301,7 @@
         action: 'mute',
         start: marker.start_seconds,
         end: marker.end_seconds,
+        source: marker.source || 'unknown',
       });
       return;
     }
@@ -341,10 +344,10 @@
 
     markerEvents.forEach((marker) => {
       if (firedMarkerIds.has(marker.id)) return;
-      // Mute markers fire MARKER_FIRE_EARLY_SEC before their start so the
+      // Mute markers fire slightly before their start so the
       // audio is silent before the viewer hears the word. Skip/fast_forward
       // fire exactly on-time (earlyWindowSec = 0).
-      const earlyWindowSec = marker.action === 'mute' ? MARKER_FIRE_EARLY_SEC : 0;
+      const earlyWindowSec = marker.action === 'mute' ? PROFANITY_MARKER_FIRE_EARLY_SEC : 0;
       if (nowSec < marker.start_seconds - earlyWindowSec) return;
       firedMarkerIds.add(marker.id); // De-dupe: each marker fires at most once.
       console.log(MARKER_LOG_PREFIX, 'marker fired', {
@@ -355,6 +358,7 @@
         scheduler_nowSec: +nowSec.toFixed(3),
         lead_time_used: earlyWindowSec,
         leadSec: +(marker.start_seconds - nowSec).toFixed(3),
+        source: marker.source || 'unknown',
       });
       applyMarkerEvent(marker, nowSec);
     });
@@ -375,10 +379,10 @@
 
   function ensureMarkerSchedulerRunning() {
     if (markerSchedulerInterval) return;
-    console.log(MARKER_LOG_PREFIX, 'scheduler started', { intervalMs: 250 });
+    console.log(MARKER_LOG_PREFIX, 'scheduler started', { intervalMs: MARKER_SCHEDULER_INTERVAL_MS });
     markerSchedulerInterval = setInterval(() => {
       tickMarkerScheduler();
-    }, 250);
+    }, MARKER_SCHEDULER_INTERVAL_MS);
   }
 
   async function analyzeCurrentVideoMarkers(forceRefresh = false) {
@@ -569,6 +573,7 @@
     }
     const normalized = (Array.isArray(newEvents) ? newEvents : [])
       .map(normalizeMarkerEvent)
+      .map((event) => (event ? { ...event, source: event.source || 'audio_chunk' } : null))
       .filter(Boolean)
       .filter((e) => !firedMarkerIds.has(e.id));
     if (!normalized.length) return;
@@ -586,6 +591,12 @@
     console.log(MARKER_LOG_PREFIX, 'events merged', {
       source: 'audio_chunk',
       total: markerEvents.length,
+      added: normalized.map((event) => ({
+        id: event.id,
+        start_seconds: event.start_seconds,
+        end_seconds: event.end_seconds,
+        source: event.source || 'audio_chunk',
+      })),
     });
     console.log(AUDIO_AHEAD_LOG_PREFIX, 'audio markers merged', {
       videoId: activeVideoId,
@@ -1036,6 +1047,24 @@
         onsetDelaySec,
         maxDelaySec: FALLBACK_PLACEHOLDER_MAX_DELAY_SEC,
         reason,
+      });
+      return;
+    }
+    const audioMarkerNearby = markerEvents.some((marker) => {
+      if (marker.action !== 'mute' || marker.source !== 'audio_chunk') return false;
+      const overlapsWindow = marker.start_seconds <= safeEndSec && marker.end_seconds >= adjustedStart;
+      const nearStart = Math.abs(marker.start_seconds - originalStartSec) <= AUDIO_MARKER_FALLBACK_SKIP_WINDOW_SEC;
+      return overlapsWindow || nearStart;
+    });
+    if (audioMarkerNearby) {
+      console.log(FALLBACK_LOG_PREFIX, 'mute skipped', {
+        originalStartSec,
+        adjustedStart,
+        endSec: safeEndSec,
+        prerollUsed: FALLBACK_PREROLL_SEC,
+        currentVideoTime,
+        reason,
+        skippedBecause: 'audio_marker_exists_nearby',
       });
       return;
     }

@@ -266,7 +266,7 @@ async function handleCaptionDecision(text, captionDurationSeconds) {
   const backendUrl = await getBackendUrl();
   const token = await getAuthToken();
   if (!token) {
-    console.warn('[ISWEEP][BG][AUTH] missing token; blocking /event');
+    console.warn('[ISWEEP][BG][AUTH] missing token affected /event', { backendUrl });
     return { action: 'none', reason: 'missing token', duration_seconds: 0, matched_category: null };
   }
 
@@ -349,7 +349,10 @@ async function handleMarkerAnalyze(videoId, forceRefresh = false) {
   const backendUrl = await getBackendUrl();
   const token = await getAuthToken();
   if (!token) {
-    console.warn(MARKER_LOG_PREFIX, 'missing token; markers unavailable', { videoId: cleanVideoId });
+    console.warn('[ISWEEP][BG][AUTH] missing token affected /videos/analyze', {
+      backendUrl,
+      videoId: cleanVideoId,
+    });
     return { status: 'unavailable', source: null, events: [], failure_reason: 'missing_token' };
   }
 
@@ -445,7 +448,10 @@ async function handleAudioAhead(videoId, audioChunk, mimeType, startSeconds, end
   const backendUrl = await getBackendUrl();
   const token = await getAuthToken();
   if (!token) {
-    console.warn(AUDIO_LOG, 'missing_token', { videoId: cleanVideoId });
+    console.warn('[ISWEEP][BG][AUTH] missing token affected /audio/analyze', {
+      backendUrl,
+      videoId: cleanVideoId,
+    });
     return { status: 'unavailable', events: [], failure_reason: 'missing_token' };
   }
 
@@ -507,6 +513,15 @@ async function handleAudioAhead(videoId, audioChunk, mimeType, startSeconds, end
       events: result.events.length,
       failure_reason: result.failure_reason,
     });
+    if (result.status !== 'ready') {
+      console.warn(AUDIO_LOG, 'chunk unavailable', {
+        videoId: cleanVideoId,
+        startSeconds: normalizedStart,
+        endSeconds: normalizedEnd,
+        status: result.status,
+        failure_reason: result.failure_reason,
+      });
+    }
     return result;
   } catch (err) {
     const errorText = err?.message || String(err);

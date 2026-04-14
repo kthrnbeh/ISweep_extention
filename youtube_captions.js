@@ -23,6 +23,7 @@
   const PROLONGED_WORD_MIN_MUTE_MS = 2400; // Floor for stretched words (~2.4s)
   const MAX_MUTE_MS = 3200; // Hard cap to avoid long mutes (~3.2s)
   const REDACTED_PLACEHOLDER_MUTE_SECONDS = 3; // Fallback mute when captions redact profanity as [ __ ]
+  const FALLBACK_PREROLL_SEC = 0.20; // Pull placeholder fallback slightly earlier so mute lands before the spoken word
   const REDACTED_PLACEHOLDER_PATTERN = /\[\s*[\u00A0_\s]{2,}\s*\]/; // Matches bracketed underscore placeholders from auto-captions
 
   const LANGUAGE_KEYWORDS = [
@@ -196,6 +197,7 @@
 
   // Audio watch-ahead constants.
   const AUDIO_AHEAD_LOG_PREFIX = '[ISWEEP][AUDIO_AHEAD]';
+  const FALLBACK_LOG_PREFIX = '[ISWEEP][FALLBACK]';
   // 1 s chunks: tighter window improves profanity pre-roll timing.
   // At 16 kHz this is 16 000 samples per flush. Do not go below 0.5 s or
   // the WAV overhead and backend round-trip latency dominate.
@@ -291,7 +293,7 @@
 
     if (marker.action === 'mute') {
       applyMuteWindow(marker.start_seconds, marker.end_seconds, `marker:${marker.id}`);
-      console.log(MARKER_LOG_PREFIX, 'marker fired', {
+      console.log(MARKER_LOG_PREFIX, 'marker applied', {
         id: marker.id,
         action: 'mute',
         start: marker.start_seconds,
@@ -347,10 +349,11 @@
       console.log(MARKER_LOG_PREFIX, 'marker fired', {
         id: marker.id,
         action: marker.action,
-        markerStart: marker.start_seconds,
-        nowSec: +nowSec.toFixed(3),
+        start_seconds: marker.start_seconds,
+        original_start_seconds: marker.start_seconds,
+        scheduler_nowSec: +nowSec.toFixed(3),
+        lead_time_used: earlyWindowSec,
         leadSec: +(marker.start_seconds - nowSec).toFixed(3),
-        earlyWindowSec,
       });
       applyMarkerEvent(marker, nowSec);
     });
@@ -539,7 +542,7 @@
         });
         return;
       }
-      console.log(AUDIO_AHEAD_LOG_PREFIX, 'chunk analyze result', {
+      console.log(AUDIO_AHEAD_LOG_PREFIX, 'chunk result', {
         videoId, start_seconds: chunkStartSec, end_seconds: chunkEndSec,
         status: response.status,
         events: Array.isArray(response.events) ? response.events.length : 0,
@@ -592,58 +595,121 @@
 
   async function startAudioCapture() {
     const video = findVideo();
+    console.log(AUDIO_AHEAD_LOG_PREFIX, 'start requested', {
+      videoId: activeVideoId,
+      hasVideo: Boolean(video),
+      audioAheadActive,
+      audioAheadFailed,
+      readyState: video?.readyState ?? null,
+      paused: video?.paused ?? null,
+      currentTime: video?.currentTime ?? null,
+    });
     if (!video || audioAheadActive || audioAheadFailed) return;
-    if (typeof video.captureStream !== 'function') {
-      console.warn(AUDIO_AHEAD_LOG_PREFIX, 'failure_reason: audio_capture_unavailable', {
-        reason: 'captureStream not supported',
+
+    const minReadyState = typeof HTMLMediaElement !== 'undefined'
+      ? HTMLMediaElement.HAVE_CURRENT_DATA
+      : 2;
+    if (!video.currentSrc || (video.readyState || 0) < minReadyState) {
+      console.log(AUDIO_AHEAD_LOG_PREFIX, 'waiting for video/audio tracks', {
+        videoId: activeVideoId,
+        readyState: video.readyState || 0,
+        currentSrc: video.currentSrc || null,
+      });
+      return;
+    }
+
+    const captureMethod = typeof video.captureStream === 'function'
+      ? 'captureStream'
+      : (typeof video.mozCaptureStream === 'function' ? 'mozCaptureStream' : null);
+    if (!captureMethod) {
+      console.warn(AUDIO_AHEAD_LOG_PREFIX, 'captureStream unavailable', {
+        failure_reason: 'audio_capture_unavailable',
+        reason: 'captureStream API missing',
       });
       audioAheadFailed = true;
       return;
     }
+
     let stream;
     try {
-      stream = video.captureStream();
+      stream = video[captureMethod]();
     } catch (err) {
       const reason = err?.name === 'NotAllowedError'
         ? 'audio_capture_permission_denied'
         : 'audio_capture_unavailable';
-      console.warn(AUDIO_AHEAD_LOG_PREFIX, `failure_reason: ${reason}`, {
+      const retryable = reason !== 'audio_capture_permission_denied';
+      console.warn(AUDIO_AHEAD_LOG_PREFIX, retryable ? 'waiting for video/audio tracks' : 'captureStream unavailable', {
+        failure_reason: reason,
+        method: captureMethod,
+        retrying: retryable,
+        readyState: video.readyState || 0,
+        paused: video.paused,
         reason: 'captureStream threw',
         error: err?.message || String(err),
       });
-      audioAheadFailed = true;
+      if (!retryable) audioAheadFailed = true;
       return;
     }
-    const audioTracks = stream.getAudioTracks();
+
+    const audioTracks = typeof stream?.getAudioTracks === 'function' ? stream.getAudioTracks() : [];
     if (!audioTracks.length) {
-      // Retryable: tracks may appear once the video starts playing.
-      console.log(AUDIO_AHEAD_LOG_PREFIX, 'no audio tracks yet; will retry', { videoId: activeVideoId });
+      console.log(AUDIO_AHEAD_LOG_PREFIX, 'audio tracks missing; retrying', {
+        videoId: activeVideoId,
+        readyState: video.readyState || 0,
+        paused: video.paused,
+      });
       return;
     }
+
     try {
       const audioStream = new MediaStream(audioTracks);
       audioCtx = new AudioContext({ sampleRate: AUDIO_SAMPLE_RATE });
+      console.log(AUDIO_AHEAD_LOG_PREFIX, 'audio context state before resume', {
+        state: audioCtx.state,
+      });
       if (audioCtx.state === 'suspended') {
-        audioCtx.resume().catch((err) => {
+        try {
+          await audioCtx.resume();
+          console.log(AUDIO_AHEAD_LOG_PREFIX, 'audio context resumed', {
+            state: audioCtx.state,
+          });
+        } catch (err) {
           const reason = err?.name === 'NotAllowedError'
             ? 'audio_capture_permission_denied'
             : 'audio_capture_unavailable';
-          console.warn(AUDIO_AHEAD_LOG_PREFIX, 'audio context resume failed', {
+          console.warn(AUDIO_AHEAD_LOG_PREFIX, reason === 'audio_capture_permission_denied'
+            ? 'captureStream unavailable'
+            : 'waiting for video/audio tracks', {
             failure_reason: reason,
+            retrying: reason !== 'audio_capture_permission_denied',
             error: err?.message || String(err),
           });
+          stopAudioCapture('resume_failed');
+          if (reason === 'audio_capture_permission_denied') audioAheadFailed = true;
+          return;
+        }
+      }
+      if (audioCtx.state === 'suspended') {
+        console.log(AUDIO_AHEAD_LOG_PREFIX, 'waiting for video/audio tracks', {
+          videoId: activeVideoId,
+          reason: 'audio_context_still_suspended',
+          state: audioCtx.state,
         });
+        stopAudioCapture('context_still_suspended');
+        return;
       }
 
       // Load the AudioWorklet processor from the extension bundle.
       // web_accessible_resources in manifest.json exposes this file to the page context.
       const workletUrl = chrome.runtime.getURL('audio_chunk_processor.js');
+      console.log(AUDIO_AHEAD_LOG_PREFIX, 'audio worklet load start', { workletUrl });
       try {
         await audioCtx.audioWorklet.addModule(workletUrl);
         console.log(AUDIO_AHEAD_LOG_PREFIX, 'audio worklet loaded successfully', { workletUrl });
       } catch (loadErr) {
         console.warn(AUDIO_AHEAD_LOG_PREFIX, 'audio worklet load failed', {
           failure_reason: 'audio_capture_unavailable',
+          workletUrl,
           error: loadErr?.message || String(loadErr),
         });
         stopAudioCapture('worklet_load_failed');
@@ -679,6 +745,9 @@
       audioSampleBufs = [];
       console.log(AUDIO_AHEAD_LOG_PREFIX, 'audio capture started', {
         videoId: activeVideoId,
+        method: captureMethod,
+        audioTracks: audioTracks.length,
+        readyState: video.readyState || 0,
         sampleRate: audioCtx.sampleRate,
         chunkSec: AUDIO_CHUNK_SEC,
         processor: 'AudioWorkletNode',
@@ -691,6 +760,7 @@
         error: err?.message || String(err),
       });
       stopAudioCapture('init_failed');
+      if (reason === 'audio_capture_permission_denied') audioAheadFailed = true;
     }
   }
 
@@ -939,6 +1009,31 @@
     }, remainingMs + HARD_RESTORE_GRACE_MS);
   }
 
+  function requestPlaceholderFallbackMute(originalStartSec, endSec, reason, text) {
+    const video = findVideo();
+    const currentVideoTime = video ? (video.currentTime || 0) : 0;
+    const adjustedStart = Math.max(originalStartSec - FALLBACK_PREROLL_SEC, 0);
+    const safeEndSec = Math.max(endSec, adjustedStart + 0.3);
+    console.log(FALLBACK_LOG_PREFIX, 'placeholder detected', {
+      text,
+      originalStartSec,
+      adjustedStart,
+      endSec: safeEndSec,
+      prerollUsed: FALLBACK_PREROLL_SEC,
+      currentVideoTime,
+      reason,
+    });
+    console.log(FALLBACK_LOG_PREFIX, 'mute requested', {
+      originalStartSec,
+      adjustedStart,
+      endSec: safeEndSec,
+      prerollUsed: FALLBACK_PREROLL_SEC,
+      currentVideoTime,
+      reason,
+    });
+    applyMuteWindow(adjustedStart, safeEndSec, reason);
+  }
+
   function deriveWordMatches(words, captionText) {
     const matches = new Map();
     const normalizedCaption = normalizeCaptionText(captionText || words.join(' '));
@@ -1115,15 +1210,11 @@
     }
 
     if (action === 'none' && hasRedactedPlaceholder(payload.text)) {
-      const startSec = Math.max(nowSec - 0.05, 0);
-      const endSec = startSec + REDACTED_PLACEHOLDER_MUTE_SECONDS;
-      console.log('[ISweep Timing] redacted placeholder fallback', {
-        text: payload.text,
-        startSec,
-        endSec,
-        durationSeconds: REDACTED_PLACEHOLDER_MUTE_SECONDS,
-      });
-      applyMuteWindow(startSec, endSec, 'redacted placeholder');
+      const originalStartSec = Number.isFinite(Number(payload.caption_start_sec))
+        ? Math.max(Number(payload.caption_start_sec), 0)
+        : Math.max(nowSec, 0);
+      const endSec = originalStartSec + REDACTED_PLACEHOLDER_MUTE_SECONDS;
+      requestPlaceholderFallbackMute(originalStartSec, endSec, 'redacted placeholder', payload.text);
       return;
     }
 
@@ -1262,10 +1353,9 @@
 
     // Immediate local fallback: when [ __ ] appears, mute right away instead of waiting for backend round-trip.
     if (hasRedactedPlaceholder(text) && now !== null) {
-      const startSec = Math.max(now - 0.05, 0);
-      const endSec = startSec + REDACTED_PLACEHOLDER_MUTE_SECONDS;
-      console.log('[ISweep Timing] immediate redacted mute', { text, startSec, endSec });
-      applyMuteWindow(startSec, endSec, 'redacted placeholder immediate');
+      const originalStartSec = Math.max(now, 0);
+      const endSec = originalStartSec + REDACTED_PLACEHOLDER_MUTE_SECONDS;
+      requestPlaceholderFallbackMute(originalStartSec, endSec, 'redacted placeholder immediate', text);
       appliedMuteThisCycle = true;
     }
 

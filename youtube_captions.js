@@ -350,8 +350,8 @@
       // Mute markers fire slightly before their start so the
       // audio is silent before the viewer hears the word. Skip/fast_forward
       // fire exactly on-time (earlyWindowSec = 0).
-      const earlyWindowSec = marker.action === 'mute' ? PROFANITY_MARKER_FIRE_EARLY_SEC : 0;
-      if (nowSec < marker.start_seconds - earlyWindowSec) return;
+      const earlyWindowSec = getMarkerEarlyWindowSec(marker.action);
+      if (!shouldFireMarker(marker, nowSec, firedMarkerIds)) return;
       firedMarkerIds.add(marker.id); // De-dupe: each marker fires at most once.
       console.log(MARKER_LOG_PREFIX, 'marker fired', {
         id: marker.id,
@@ -995,6 +995,26 @@
     };
   }
 
+  function hasNearbyAudioMuteMarker(markers, adjustedStart, muteEndSec, estimatedPlaceholderStartSec) {
+    return (Array.isArray(markers) ? markers : []).some((marker) => {
+      if (!marker || marker.action !== 'mute' || marker.source !== 'audio_chunk') return false;
+      const overlapsWindow = marker.start_seconds <= muteEndSec && marker.end_seconds >= adjustedStart;
+      const nearStart = Math.abs(marker.start_seconds - estimatedPlaceholderStartSec) <= AUDIO_MARKER_FALLBACK_SKIP_WINDOW_SEC;
+      return overlapsWindow || nearStart;
+    });
+  }
+
+  function getMarkerEarlyWindowSec(action) {
+    return action === 'mute' ? PROFANITY_MARKER_FIRE_EARLY_SEC : 0;
+  }
+
+  function shouldFireMarker(marker, nowSec, firedIds) {
+    if (!marker || !marker.id) return false;
+    if (firedIds && typeof firedIds.has === 'function' && firedIds.has(marker.id)) return false;
+    const earlyWindowSec = getMarkerEarlyWindowSec(marker.action);
+    return nowSec >= marker.start_seconds - earlyWindowSec;
+  }
+
   function applyMuteWindow(startSec, endSec, reason) {
     const video = findVideo();
     if (!video) return;
@@ -1110,12 +1130,7 @@
       });
       return;
     }
-    const audioMarkerNearby = markerEvents.some((marker) => {
-      if (marker.action !== 'mute' || marker.source !== 'audio_chunk') return false;
-      const overlapsWindow = marker.start_seconds <= muteEndSec && marker.end_seconds >= adjustedStart;
-      const nearStart = Math.abs(marker.start_seconds - estimatedPlaceholderStartSec) <= AUDIO_MARKER_FALLBACK_SKIP_WINDOW_SEC;
-      return overlapsWindow || nearStart;
-    });
+    const audioMarkerNearby = hasNearbyAudioMuteMarker(markerEvents, adjustedStart, muteEndSec, estimatedPlaceholderStartSec);
     if (audioMarkerNearby) {
       console.log(FALLBACK_LOG_PREFIX, 'mute skipped', {
         text: window.text,
@@ -1505,6 +1520,22 @@
     const segments = Array.from(document.querySelectorAll('.ytp-caption-segment')); // Collect caption spans
     if (segments.length === 0) return '';
     return segments.map((el) => el.textContent.trim()).join(' ').trim(); // Join segments into full line
+  }
+
+  if (typeof globalThis !== 'undefined' && globalThis.__ISWEEP_TEST_MODE__) {
+    globalThis.__ISWEEP_YT_TEST_HOOKS__ = {
+      estimatePlaceholderWordWindow,
+      hasNearbyAudioMuteMarker,
+      getMarkerEarlyWindowSec,
+      shouldFireMarker,
+      constants: {
+        PLACEHOLDER_WORD_PREROLL_SEC,
+        PLACEHOLDER_WORD_MUTE_SEC,
+        PROFANITY_MARKER_FIRE_EARLY_SEC,
+        AUDIO_MARKER_FALLBACK_SKIP_WINDOW_SEC,
+      },
+    };
+    return;
   }
 
   const observer = new MutationObserver(() => {

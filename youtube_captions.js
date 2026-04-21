@@ -973,7 +973,7 @@
     });
   }
 
-  function estimatePlaceholderWordWindow(text, captionStartSec, captionDurationSec, currentVideoTime, source) {
+  function estimatePlaceholderMuteWindow(text, captionStartSec, captionDurationSec, currentVideoTime, source) {
     const rawText = String(text || '');
     const placeholderMatch = REDACTED_PLACEHOLDER_PATTERN.exec(rawText);
     if (!placeholderMatch) return null;
@@ -992,9 +992,19 @@
       ? Number(captionDurationSec)
       : estimatedCaptionDurationSec;
 
-    let effectiveCaptionStartSec = Number.isFinite(Number(captionStartSec)) && Number(captionStartSec) >= 0
-      ? Number(captionStartSec)
-      : Math.max((Number.isFinite(Number(currentVideoTime)) ? Number(currentVideoTime) : 0) - effectiveCaptionDurationSec, 0);
+    const currentSec = Number.isFinite(Number(currentVideoTime)) ? Number(currentVideoTime) : 0;
+    const hasCaptionStart = Number.isFinite(Number(captionStartSec)) && Number(captionStartSec) >= 0;
+    const providedCaptionStartSec = hasCaptionStart ? Number(captionStartSec) : null;
+    // Immediate placeholder fallback often only knows "now" (detection time), not true caption start.
+    // When duration is missing and start ~= now, back-calculate a likely start from word count.
+    const startLooksLikeObservationTime = (
+      !hasCaptionDuration
+      && hasCaptionStart
+      && Math.abs(providedCaptionStartSec - currentSec) <= 0.08
+    );
+    let effectiveCaptionStartSec = startLooksLikeObservationTime
+      ? Math.max(currentSec - effectiveCaptionDurationSec, 0)
+      : (hasCaptionStart ? providedCaptionStartSec : Math.max(currentSec - effectiveCaptionDurationSec, 0));
     if (!Number.isFinite(effectiveCaptionStartSec)) effectiveCaptionStartSec = 0;
 
     const estimatedOffsetSec = (wordsBeforePlaceholder / totalWords) * effectiveCaptionDurationSec;
@@ -1039,6 +1049,10 @@
       muteEndSource,
       currentVideoTime: Number.isFinite(Number(currentVideoTime)) ? Number(currentVideoTime) : 0,
     };
+  }
+
+  function estimatePlaceholderWordWindow(text, captionStartSec, captionDurationSec, currentVideoTime, source) {
+    return estimatePlaceholderMuteWindow(text, captionStartSec, captionDurationSec, currentVideoTime, source);
   }
 
   function hasNearbyAudioMuteMarker(markers, adjustedStart, muteEndSec, estimatedPlaceholderStartSec) {
@@ -1139,7 +1153,7 @@
   }
 
   function requestPlaceholderFallbackMute(text, captionStartSec, captionDurationSec, currentVideoTime, reason, source) {
-    const window = estimatePlaceholderWordWindow(text, captionStartSec, captionDurationSec, currentVideoTime, source);
+    const window = estimatePlaceholderMuteWindow(text, captionStartSec, captionDurationSec, currentVideoTime, source);
     if (!window) return;
     const { adjustedStart, muteEndSec, estimatedPlaceholderStartSec } = window;
     const video = findVideo();
@@ -1640,13 +1654,17 @@
 
   if (typeof globalThis !== 'undefined' && globalThis.__ISWEEP_TEST_MODE__) {
     globalThis.__ISWEEP_YT_TEST_HOOKS__ = {
+      estimatePlaceholderMuteWindow,
       estimatePlaceholderWordWindow,
       hasNearbyAudioMuteMarker,
       getMarkerEarlyWindowSec,
       shouldFireMarker,
       constants: {
         PLACEHOLDER_WORD_PREROLL_SEC,
-        PLACEHOLDER_WORD_MUTE_SEC,
+        PLACEHOLDER_BLEED_SEC,
+        MIN_PLACEHOLDER_MUTE_SEC,
+        MAX_PLACEHOLDER_MUTE_SEC,
+        PLACEHOLDER_WORD_ESTIMATED_SEC,
         PROFANITY_MARKER_FIRE_EARLY_SEC,
         AUDIO_MARKER_FALLBACK_SKIP_WINDOW_SEC,
       },

@@ -25,7 +25,9 @@
   const REDACTED_PLACEHOLDER_MUTE_SECONDS = 3; // Fallback mute when captions redact profanity as [ __ ]
   const FALLBACK_PREROLL_SEC = 0.20; // Pull placeholder fallback slightly earlier so mute lands before the spoken word
   const PLACEHOLDER_WORD_PREROLL_SEC = 0.18; // Lead-in targeted to the hidden placeholder word, not the full caption line
-  const PLACEHOLDER_WORD_MUTE_SEC = 0.55; // Short window to cover the hidden word and immediate bleed
+  const PLACEHOLDER_BLEED_SEC = 0.08; // Small tail so mute ends near the first clean word boundary
+  const MIN_PLACEHOLDER_MUTE_SEC = 0.22; // Prevent too-short windows from missing the redacted word onset
+  const MAX_PLACEHOLDER_MUTE_SEC = 0.65; // Cap fallback windows to avoid muting well into clean speech
   const PLACEHOLDER_WORD_ESTIMATED_SEC = 0.30; // Fallback per-word estimate when caption duration is missing
   const FALLBACK_PLACEHOLDER_MAX_DELAY_SEC = 0.45; // Ignore delayed backend placeholder fallbacks once the word onset has already passed
   const REDACTED_PLACEHOLDER_PATTERN = /\[\s*[\u00A0_\s]{2,}\s*\]/; // Matches bracketed underscore placeholders from auto-captions
@@ -954,6 +956,23 @@
     return matches ? matches.length : 0;
   }
 
+  function isWordFilteredByCurrentRules(word) {
+    const normalizedWord = normalizeCaptionWord(word);
+    if (!normalizedWord) return false;
+    const filterMeta = getFilterWords();
+    const filters = filterMeta.words || [];
+    return filters.some((rawFilter) => {
+      const normalizedFilter = normalizeFilterWord(rawFilter);
+      if (!normalizedFilter) return false;
+      const variants = expandWordFamily(normalizedFilter);
+      const regexes = [maskToRegex(normalizedFilter), buildStretchRegex(normalizedFilter)];
+      variants.forEach((variant) => {
+        if (variant !== normalizedFilter) regexes.push(maskToRegex(variant));
+      });
+      return regexes.some((regex) => regex.test(normalizedWord));
+    });
+  }
+
   function estimatePlaceholderWordWindow(text, captionStartSec, captionDurationSec, currentVideoTime, source) {
     const rawText = String(text || '');
     const placeholderMatch = REDACTED_PLACEHOLDER_PATTERN.exec(rawText);
@@ -961,12 +980,14 @@
 
     const beforeText = rawText.slice(0, placeholderMatch.index);
     const afterText = rawText.slice(placeholderMatch.index + placeholderMatch[0].length);
-    const wordsBeforePlaceholder = countCaptionWords(beforeText);
-    const wordsAfterPlaceholder = countCaptionWords(afterText);
+    const beforeWords = beforeText.match(/[A-Za-z0-9']+/g) || [];
+    const afterWords = afterText.match(/[A-Za-z0-9']+/g) || [];
+    const wordsBeforePlaceholder = beforeWords.length;
+    const wordsAfterPlaceholder = afterWords.length;
     const totalWords = Math.max(wordsBeforePlaceholder + 1 + wordsAfterPlaceholder, 1);
 
     const hasCaptionDuration = Number.isFinite(Number(captionDurationSec)) && Number(captionDurationSec) > 0;
-    const estimatedCaptionDurationSec = Math.max(totalWords * PLACEHOLDER_WORD_ESTIMATED_SEC, PLACEHOLDER_WORD_MUTE_SEC);
+    const estimatedCaptionDurationSec = Math.max(totalWords * PLACEHOLDER_WORD_ESTIMATED_SEC, MAX_PLACEHOLDER_MUTE_SEC);
     const effectiveCaptionDurationSec = hasCaptionDuration
       ? Number(captionDurationSec)
       : estimatedCaptionDurationSec;
@@ -979,7 +1000,29 @@
     const estimatedOffsetSec = (wordsBeforePlaceholder / totalWords) * effectiveCaptionDurationSec;
     const estimatedPlaceholderStartSec = Math.max(effectiveCaptionStartSec + estimatedOffsetSec, 0);
     const adjustedStart = Math.max(estimatedPlaceholderStartSec - PLACEHOLDER_WORD_PREROLL_SEC, 0);
-    const muteEndSec = adjustedStart + PLACEHOLDER_WORD_MUTE_SEC;
+    const firstCleanAfterIndex = afterWords.findIndex((word) => !isWordFilteredByCurrentRules(word));
+    const hasCleanAfter = firstCleanAfterIndex >= 0;
+    const estimatedNextCleanWordStartSec = hasCleanAfter
+      ? Math.max(
+        effectiveCaptionStartSec + ((wordsBeforePlaceholder + 1 + firstCleanAfterIndex) / totalWords) * effectiveCaptionDurationSec,
+        adjustedStart
+      )
+      : null;
+
+    let muteEndSec = hasCleanAfter
+      ? estimatedNextCleanWordStartSec + PLACEHOLDER_BLEED_SEC
+      : adjustedStart + MAX_PLACEHOLDER_MUTE_SEC;
+    let muteEndSource = hasCleanAfter ? 'clean_word_anchor' : 'short_fallback_duration';
+
+    const minMuteEndSec = adjustedStart + MIN_PLACEHOLDER_MUTE_SEC;
+    const maxMuteEndSec = adjustedStart + MAX_PLACEHOLDER_MUTE_SEC;
+    if (muteEndSec < minMuteEndSec) {
+      muteEndSec = minMuteEndSec;
+    }
+    if (muteEndSec > maxMuteEndSec) {
+      muteEndSec = maxMuteEndSec;
+      if (muteEndSource === 'clean_word_anchor') muteEndSource = 'short_fallback_duration';
+    }
 
     return {
       text: rawText,
@@ -987,10 +1030,13 @@
       captionStartSec: effectiveCaptionStartSec,
       captionDurationSec: effectiveCaptionDurationSec,
       wordsBeforePlaceholder,
+      wordsAfterPlaceholder,
       totalWords,
       estimatedPlaceholderStartSec,
+      estimatedNextCleanWordStartSec,
       adjustedStart,
       muteEndSec,
+      muteEndSource,
       currentVideoTime: Number.isFinite(Number(currentVideoTime)) ? Number(currentVideoTime) : 0,
     };
   }
@@ -1013,6 +1059,20 @@
     if (firedIds && typeof firedIds.has === 'function' && firedIds.has(marker.id)) return false;
     const earlyWindowSec = getMarkerEarlyWindowSec(marker.action);
     return nowSec >= marker.start_seconds - earlyWindowSec;
+  }
+
+  function rescheduleMuteRestoreTimers(nowSec) {
+    const remainingMs = Math.max((muteLockUntilSec - nowSec) * 1000, 0);
+    if (restoreMuteTimeout) clearTimeout(restoreMuteTimeout);
+    restoreMuteTimeout = setTimeout(() => {
+      restoreMuteState('primary timer');
+    }, remainingMs);
+
+    clearHardRestore();
+    hardRestoreTimeout = setTimeout(() => {
+      restoreMuteState('hard restore');
+      console.log('[ISweep Timing] hard restore fired', { endSec: muteLockUntilSec });
+    }, remainingMs + HARD_RESTORE_GRACE_MS);
   }
 
   function applyMuteWindow(startSec, endSec, reason) {
@@ -1075,19 +1135,7 @@
     }
 
     // Safety restore timers
-    const remainingMs = Math.max((muteLockUntilSec - nowSec) * 1000, 0);
-
-    if (restoreMuteTimeout) clearTimeout(restoreMuteTimeout);
-    restoreMuteTimeout = setTimeout(() => {
-      restoreMuteState('primary timer');
-    }, remainingMs);
-
-    // Hard fail-safe to guarantee unmute
-    clearHardRestore();
-    hardRestoreTimeout = setTimeout(() => {
-      restoreMuteState('hard restore');
-      console.log('[ISweep Timing] hard restore fired', { endSec });
-    }, remainingMs + HARD_RESTORE_GRACE_MS);
+    rescheduleMuteRestoreTimers(nowSec);
   }
 
   function requestPlaceholderFallbackMute(text, captionStartSec, captionDurationSec, currentVideoTime, reason, source) {
@@ -1104,10 +1152,13 @@
       captionStartSec: window.captionStartSec,
       captionDurationSec: window.captionDurationSec,
       wordsBeforePlaceholder: window.wordsBeforePlaceholder,
+      wordsAfterPlaceholder: window.wordsAfterPlaceholder,
       totalWords: window.totalWords,
       estimatedPlaceholderStartSec,
+      estimatedNextCleanWordStartSec: window.estimatedNextCleanWordStartSec,
       adjustedStart,
       muteEndSec,
+      muteEndSource: window.muteEndSource,
       currentVideoTime: nowSec,
       source,
       reason,
@@ -1118,10 +1169,13 @@
         captionStartSec: window.captionStartSec,
         captionDurationSec: window.captionDurationSec,
         wordsBeforePlaceholder: window.wordsBeforePlaceholder,
+        wordsAfterPlaceholder: window.wordsAfterPlaceholder,
         totalWords: window.totalWords,
         estimatedPlaceholderStartSec,
+        estimatedNextCleanWordStartSec: window.estimatedNextCleanWordStartSec,
         adjustedStart,
         muteEndSec,
+        muteEndSource: window.muteEndSource,
         currentVideoTime: nowSec,
         onsetDelaySec,
         maxDelaySec: FALLBACK_PLACEHOLDER_MAX_DELAY_SEC,
@@ -1137,10 +1191,13 @@
         captionStartSec: window.captionStartSec,
         captionDurationSec: window.captionDurationSec,
         wordsBeforePlaceholder: window.wordsBeforePlaceholder,
+        wordsAfterPlaceholder: window.wordsAfterPlaceholder,
         totalWords: window.totalWords,
         estimatedPlaceholderStartSec,
+        estimatedNextCleanWordStartSec: window.estimatedNextCleanWordStartSec,
         adjustedStart,
         muteEndSec,
+        muteEndSource: window.muteEndSource,
         currentVideoTime: nowSec,
         source,
         reason,
@@ -1148,15 +1205,74 @@
       });
       return;
     }
+
+    if (
+      muteLockUntilSec > nowSec
+      && window.muteEndSource === 'clean_word_anchor'
+      && muteEndSec > muteLockUntilSec + 0.01
+    ) {
+      console.log(FALLBACK_LOG_PREFIX, 'mute skipped', {
+        text: window.text,
+        captionStartSec: window.captionStartSec,
+        captionDurationSec: window.captionDurationSec,
+        wordsBeforePlaceholder: window.wordsBeforePlaceholder,
+        wordsAfterPlaceholder: window.wordsAfterPlaceholder,
+        totalWords: window.totalWords,
+        estimatedPlaceholderStartSec,
+        estimatedNextCleanWordStartSec: window.estimatedNextCleanWordStartSec,
+        adjustedStart,
+        muteEndSec,
+        muteEndSource: window.muteEndSource,
+        currentVideoTime: nowSec,
+        source,
+        reason,
+        skippedBecause: 'would_extend_into_clean_speech',
+        activeMuteEndSec: muteLockUntilSec,
+      });
+      return;
+    }
+
+    if (
+      muteLockUntilSec > nowSec
+      && window.muteEndSource === 'clean_word_anchor'
+      && muteEndSec < muteLockUntilSec - 0.05
+      && muteEndSec > nowSec + 0.05
+    ) {
+      const prevEnd = muteLockUntilSec;
+      muteLockUntilSec = muteEndSec;
+      rescheduleMuteRestoreTimers(nowSec);
+      console.log(FALLBACK_LOG_PREFIX, 'mute refined', {
+        text: window.text,
+        captionStartSec: window.captionStartSec,
+        captionDurationSec: window.captionDurationSec,
+        wordsBeforePlaceholder: window.wordsBeforePlaceholder,
+        wordsAfterPlaceholder: window.wordsAfterPlaceholder,
+        totalWords: window.totalWords,
+        estimatedPlaceholderStartSec,
+        estimatedNextCleanWordStartSec: window.estimatedNextCleanWordStartSec,
+        adjustedStart,
+        previousMuteEndSec: prevEnd,
+        muteEndSec,
+        muteEndSource: window.muteEndSource,
+        currentVideoTime: nowSec,
+        source,
+        reason,
+      });
+      return;
+    }
+
     console.log(FALLBACK_LOG_PREFIX, 'mute requested', {
       text: window.text,
       captionStartSec: window.captionStartSec,
       captionDurationSec: window.captionDurationSec,
       wordsBeforePlaceholder: window.wordsBeforePlaceholder,
+      wordsAfterPlaceholder: window.wordsAfterPlaceholder,
       totalWords: window.totalWords,
       estimatedPlaceholderStartSec,
+      estimatedNextCleanWordStartSec: window.estimatedNextCleanWordStartSec,
       adjustedStart,
       muteEndSec,
+      muteEndSource: window.muteEndSource,
       currentVideoTime: nowSec,
       onsetDelaySec,
       source,

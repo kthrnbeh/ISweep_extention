@@ -203,6 +203,9 @@
   const MUTE_POST_BUFFER_MS = 280; // Small tail after the word
   const STALE_CAPTION_THRESHOLD_MS = 1200; // Ignore captions too far behind current playhead
   const HARD_RESTORE_GRACE_MS = 500; // Extra margin to force unmute
+  const CLEAN_CAPTION_STALE_MS = 1200;
+  const CLEAN_CAPTION_LOOKAHEAD_SEC = 0.15;
+  const CLEAN_CC_LOG_PREFIX = '[ISWEEP][CLEAN_CC]';
 
   // Audio watch-ahead constants.
   const AUDIO_AHEAD_LOG_PREFIX = '[ISWEEP][AUDIO_AHEAD]';
@@ -240,6 +243,8 @@
   let cleanCaptionTextEl = null;
   let cleanCaptionDragState = null;
   let preAnalyzedCleanCaptions = [];
+  let lastLiveCaptionObservedAtMs = 0;
+  let lastRenderedCleanCaptionKey = '';
 
   // Audio watch-ahead state.
   let audioCtx = null;
@@ -266,7 +271,8 @@
     const duration = Number(raw.duration_seconds);
     if (!Number.isFinite(start) || start < 0) return null;
     const action = String(raw.action || 'none');
-    if (!['mute', 'skip', 'fast_forward'].includes(action)) return null;
+    const hasDisplayText = Boolean(getCleanCaptionDisplayText(raw));
+    if (!['mute', 'skip', 'fast_forward'].includes(action) && !hasDisplayText) return null;
     const computedEnd = Number.isFinite(end) && end > start
       ? end
       : start + (Number.isFinite(duration) && duration > 0 ? duration : 0);
@@ -281,6 +287,111 @@
       matched_category: raw.matched_category || null,
       reason: raw.reason || '',
       source: raw.source || null,
+      text: typeof raw.text === 'string' ? raw.text : null,
+      clean_text: typeof raw.clean_text === 'string' ? raw.clean_text : null,
+      cleaned_text: typeof raw.cleaned_text === 'string' ? raw.cleaned_text : null,
+      caption_text: typeof raw.caption_text === 'string' ? raw.caption_text : null,
+    };
+  }
+
+  function isActionableMarker(marker) {
+    return Boolean(marker && ['mute', 'skip', 'fast_forward'].includes(marker.action));
+  }
+
+  function getCleanCaptionDisplayText(entry) {
+    if (!entry || typeof entry !== 'object') return '';
+    const candidates = [entry.clean_text, entry.cleaned_text, entry.caption_text, entry.text];
+    const match = candidates.find((value) => typeof value === 'string' && value.trim());
+    return match ? match.trim() : '';
+  }
+
+  function normalizePreAnalyzedCaptions(captions) {
+    if (!Array.isArray(captions)) return [];
+    return captions
+      .map((entry) => {
+        if (!entry || typeof entry !== 'object') return null;
+        const start = Number(entry.start_seconds);
+        const end = Number(entry.end_seconds);
+        const displayText = getCleanCaptionDisplayText(entry);
+        if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start || !displayText) return null;
+        return {
+          start_seconds: start,
+          end_seconds: end,
+          text: typeof entry.text === 'string' ? entry.text : displayText,
+          clean_text: typeof entry.clean_text === 'string' ? entry.clean_text : null,
+          cleaned_text: typeof entry.cleaned_text === 'string' ? entry.cleaned_text : null,
+          caption_text: typeof entry.caption_text === 'string' ? entry.caption_text : null,
+        };
+      })
+      .filter(Boolean)
+      .sort((a, b) => a.start_seconds - b.start_seconds);
+  }
+
+  function findTimedCleanCaptionEntry(entries, nowSec, lookaheadSec = CLEAN_CAPTION_LOOKAHEAD_SEC) {
+    if (!Array.isArray(entries) || !Number.isFinite(Number(nowSec))) return null;
+    const now = Number(nowSec);
+    const exact = entries.find((entry) => {
+      const displayText = getCleanCaptionDisplayText(entry);
+      return displayText && now >= entry.start_seconds && now <= entry.end_seconds;
+    });
+    if (exact) return exact;
+    return entries.find((entry) => {
+      const displayText = getCleanCaptionDisplayText(entry);
+      return displayText
+        && now >= entry.start_seconds - lookaheadSec
+        && now <= entry.end_seconds + lookaheadSec;
+    }) || null;
+  }
+
+  function getBestCleanCaptionText(liveText, nowSec, options = {}) {
+    const preAnalyzedCaptions = Array.isArray(options.preAnalyzedCaptions) ? options.preAnalyzedCaptions : preAnalyzedCleanCaptions;
+    const markers = Array.isArray(options.markerEntries) ? options.markerEntries : markerEvents;
+    const liveCaptionObservedAtMs = Number.isFinite(Number(options.liveCaptionObservedAtMs))
+      ? Number(options.liveCaptionObservedAtMs)
+      : lastLiveCaptionObservedAtMs;
+    const nowMs = Number.isFinite(Number(options.nowMs)) ? Number(options.nowMs) : Date.now();
+    const lookaheadSec = Number.isFinite(Number(options.lookaheadSec)) ? Number(options.lookaheadSec) : CLEAN_CAPTION_LOOKAHEAD_SEC;
+    const staleMs = Number.isFinite(Number(options.staleMs)) ? Number(options.staleMs) : CLEAN_CAPTION_STALE_MS;
+
+    const preAnalyzedEntry = findTimedCleanCaptionEntry(preAnalyzedCaptions, nowSec, lookaheadSec);
+    if (preAnalyzedEntry) {
+      return {
+        text: getCleanCaptionDisplayText(preAnalyzedEntry),
+        source: 'pre_analyzed',
+        stale: false,
+      };
+    }
+
+    const markerTextEntry = findTimedCleanCaptionEntry(markers, nowSec, lookaheadSec);
+    if (markerTextEntry) {
+      return {
+        text: getCleanCaptionDisplayText(markerTextEntry),
+        source: 'marker_text',
+        stale: false,
+      };
+    }
+
+    const maskedLiveText = toCleanCaptionText(String(liveText || ''));
+    if (maskedLiveText) {
+      const isStale = liveCaptionObservedAtMs > 0 && (nowMs - liveCaptionObservedAtMs) > staleMs;
+      if (isStale) {
+        return {
+          text: '',
+          source: 'live_masked',
+          stale: true,
+        };
+      }
+      return {
+        text: maskedLiveText,
+        source: 'live_masked',
+        stale: false,
+      };
+    }
+
+    return {
+      text: '',
+      source: null,
+      stale: false,
     };
   }
 
@@ -360,10 +471,15 @@
 
   function tickMarkerScheduler() {
     const video = findVideo();
-    if (!video || !markerEvents.length) return;
+    if (!video) return;
     const nowSec = video.currentTime || 0;
 
+    updateCleanOverlay(lastCaptionText, nowSec);
+
+    if (!markerEvents.length) return;
+
     markerEvents.forEach((marker) => {
+      if (!isActionableMarker(marker)) return;
       if (firedMarkerIds.has(marker.id)) return;
       // Mute markers fire slightly before their start so the
       // audio is silent before the viewer hears the word. Skip/fast_forward
@@ -1048,31 +1164,6 @@
       });
   }
 
-  function normalizePreAnalyzedCaptions(captions) {
-    if (!Array.isArray(captions)) return [];
-    return captions
-      .map((entry) => {
-        if (!entry || typeof entry !== 'object') return null;
-        const start = Number(entry.start_seconds);
-        const end = Number(entry.end_seconds);
-        const text = String(entry.text || '').trim();
-        if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start || !text) return null;
-        return {
-          start_seconds: start,
-          end_seconds: end,
-          text,
-        };
-      })
-      .filter(Boolean)
-      .sort((a, b) => a.start_seconds - b.start_seconds);
-  }
-
-  function getPreAnalyzedCaptionAtTime(nowSec) {
-    if (!preAnalyzedCleanCaptions.length || !Number.isFinite(Number(nowSec))) return null;
-    const now = Number(nowSec);
-    return preAnalyzedCleanCaptions.find((entry) => now >= entry.start_seconds && now <= entry.end_seconds) || null;
-  }
-
   function applyCleanCaptionOverlayStyles() {
     if (!cleanCaptionOverlayEl || !cleanCaptionTextEl) return;
 
@@ -1193,13 +1284,44 @@
     ensureCleanCaptionOverlay();
     if (!cleanCaptionOverlayEl || !cleanCaptionTextEl) return;
 
-    const preAnalyzed = getPreAnalyzedCaptionAtTime(nowSec);
-    // TODO: Replace text source with pre-analyzed cleaned captions when available
-    const sourceText = preAnalyzed ? preAnalyzed.text : String(liveText || '');
-    const cleanedText = toCleanCaptionText(sourceText);
-    cleanCaptionTextEl.textContent = cleanedText;
-    cleanCaptionOverlayEl.style.visibility = cleanedText ? 'visible' : 'hidden';
-    cleanCaptionOverlayEl.dataset.source = preAnalyzed ? 'pre_analyzed' : 'live';
+    const overlayState = getBestCleanCaptionText(liveText, nowSec);
+    const nextKey = `${overlayState.source || 'none'}:${overlayState.text}`;
+
+    if (overlayState.stale) {
+      if (lastRenderedCleanCaptionKey !== 'stale') {
+        console.log(CLEAN_CC_LOG_PREFIX, 'skipped stale caption', {
+          source: overlayState.source,
+          nowSec,
+        });
+      }
+      cleanCaptionTextEl.textContent = '';
+      cleanCaptionOverlayEl.style.visibility = 'hidden';
+      cleanCaptionOverlayEl.dataset.source = 'stale';
+      lastRenderedCleanCaptionKey = 'stale';
+    } else if (!overlayState.text) {
+      if (lastRenderedCleanCaptionKey !== 'none') {
+        console.log(CLEAN_CC_LOG_PREFIX, 'no active caption text', { nowSec });
+      }
+      cleanCaptionTextEl.textContent = '';
+      cleanCaptionOverlayEl.style.visibility = 'hidden';
+      cleanCaptionOverlayEl.dataset.source = 'none';
+      lastRenderedCleanCaptionKey = 'none';
+    } else {
+      cleanCaptionTextEl.textContent = overlayState.text;
+      cleanCaptionOverlayEl.style.visibility = 'visible';
+      cleanCaptionOverlayEl.dataset.source = overlayState.source || 'live_masked';
+      if (lastRenderedCleanCaptionKey !== nextKey) {
+        console.log(CLEAN_CC_LOG_PREFIX, 'text updated', {
+          source: overlayState.source || 'live_masked',
+          text: overlayState.text,
+        });
+        console.log(CLEAN_CC_LOG_PREFIX, 'overlay source', {
+          source: overlayState.source || 'live_masked',
+        });
+      }
+      lastRenderedCleanCaptionKey = nextKey;
+    }
+
     if (!cleanCaptionSettings.cleanCaptionsEnabled) {
       cleanCaptionOverlayEl.style.display = 'none';
     }
@@ -1896,6 +2018,7 @@
     const now = video && typeof video.currentTime === 'number' ? video.currentTime : null; // Current playback time
     const prevDuration = captionStartTime !== null && now !== null ? Math.max(0, now - captionStartTime) : null; // Duration of previous caption
     let appliedMuteThisCycle = false;
+    lastLiveCaptionObservedAtMs = Date.now();
 
     // Immediate local fallback: when [ __ ] appears, mute right away instead of waiting for backend round-trip.
     if (hasRedactedPlaceholder(text) && now !== null) {
@@ -1940,12 +2063,17 @@
     globalThis.__ISWEEP_YT_TEST_HOOKS__ = {
       estimatePlaceholderMuteWindow,
       estimatePlaceholderWordWindow,
+      getCleanCaptionDisplayText,
+      findTimedCleanCaptionEntry,
+      getBestCleanCaptionText,
       normalizeCleanCaptionSettings,
       toCleanCaptionText,
       hasNearbyAudioMuteMarker,
       getMarkerEarlyWindowSec,
       shouldFireMarker,
       constants: {
+        CLEAN_CAPTION_STALE_MS,
+        CLEAN_CAPTION_LOOKAHEAD_SEC,
         PLACEHOLDER_WORD_PREROLL_SEC,
         PLACEHOLDER_BLEED_SEC,
         MIN_PLACEHOLDER_MUTE_SEC,
@@ -1981,6 +2109,7 @@
       }
       lastCaptionText = '';
       captionStartTime = null;
+      lastLiveCaptionObservedAtMs = 0;
       updateCleanOverlay('', 0);
       captionBuffer = '';
       if (bufferTimer) {

@@ -116,3 +116,73 @@ test('clean caption text masks blocked words', () => {
   assert.equal(cleaned.includes('___'), true, 'placeholder should stay masked');
   assert.equal(cleaned.includes('This'), true, 'clean words should remain visible');
 });
+
+test('pre-analyzed clean text wins over live text when timing matches', () => {
+  const hooks = loadYoutubeTimingHooks();
+  const result = hooks.getBestCleanCaptionText('live fallback', 10.2, {
+    preAnalyzedCaptions: [
+      { start_seconds: 10, end_seconds: 10.5, clean_text: 'pre analyzed line' },
+    ],
+    markerEntries: [
+      { start_seconds: 10, end_seconds: 10.5, cleaned_text: 'marker line' },
+    ],
+    liveCaptionObservedAtMs: Date.now(),
+    nowMs: Date.now(),
+  });
+
+  assert.deepEqual(result, {
+    text: 'pre analyzed line',
+    source: 'pre_analyzed',
+    stale: false,
+  });
+});
+
+test('live masked text is used when no pre-analyzed caption exists', () => {
+  const hooks = loadYoutubeTimingHooks();
+  const result = hooks.getBestCleanCaptionText('that was shit', 20, {
+    preAnalyzedCaptions: [],
+    markerEntries: [],
+    liveCaptionObservedAtMs: Date.now(),
+    nowMs: Date.now(),
+  });
+
+  assert.equal(result.source, 'live_masked');
+  assert.equal(result.stale, false);
+  assert.equal(/shit/i.test(result.text), false);
+  assert.equal(result.text.includes('____'), true);
+});
+
+test('stale live caption text is not displayed', () => {
+  const hooks = loadYoutubeTimingHooks();
+  const nowMs = 5000;
+  const result = hooks.getBestCleanCaptionText('still here', 30, {
+    preAnalyzedCaptions: [],
+    markerEntries: [],
+    liveCaptionObservedAtMs: nowMs - hooks.constants.CLEAN_CAPTION_STALE_MS - 10,
+    nowMs,
+  });
+
+  assert.deepEqual(result, {
+    text: '',
+    source: 'live_masked',
+    stale: true,
+  });
+});
+
+test('marker text is used when timed metadata matches and no pre-analyzed caption exists', () => {
+  const hooks = loadYoutubeTimingHooks();
+  const result = hooks.getBestCleanCaptionText('fallback live', 15.05, {
+    preAnalyzedCaptions: [],
+    markerEntries: [
+      { start_seconds: 15, end_seconds: 15.4, caption_text: 'marker caption line' },
+    ],
+    liveCaptionObservedAtMs: Date.now(),
+    nowMs: Date.now(),
+  });
+
+  assert.deepEqual(result, {
+    text: 'marker caption line',
+    source: 'marker_text',
+    stale: false,
+  });
+});

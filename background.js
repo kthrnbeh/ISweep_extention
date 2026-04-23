@@ -392,6 +392,8 @@ async function handleMarkerAnalyze(videoId, forceRefresh = false) {
       status: payload.status || 'error',
       source: payload.source || null,
       events: Array.isArray(payload.events) ? payload.events : [],
+      cleaned_captions: Array.isArray(payload.cleaned_captions) ? payload.cleaned_captions : [],
+      clean_captions: Array.isArray(payload.clean_captions) ? payload.clean_captions : [],
       failure_reason: payload.failure_reason || null,
     };
 

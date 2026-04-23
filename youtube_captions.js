@@ -233,7 +233,7 @@
     cleanCaptionsEnabled: true,
     cleanCaptionStyle: 'transparent_white',
     cleanCaptionTextSize: 'medium',
-    cleanCaptionPosition: null,
+    cleanCaptionPosition: { x: 0.5, y: 0.8 },
   };
   let cleanCaptionSettings = { ...CLEAN_CAPTION_DEFAULTS };
   let cleanCaptionOverlayEl = null;
@@ -813,7 +813,7 @@
       preAnalyzedCleanCaptions = [];
       stopAudioCapture('video_id_lost');
       resetMarkerEngine('missing_video_id');
-      updateCleanCaptionOverlay('', 0);
+      updateCleanOverlay('', 0);
       return;
     }
     if (newVideoId === activeVideoId) return;
@@ -969,19 +969,53 @@
       ? settings.cleanCaptionTextSize
       : 'medium';
     const enabled = settings.cleanCaptionsEnabled !== false;
-    const position = settings.cleanCaptionPosition
+    let position = { ...CLEAN_CAPTION_DEFAULTS.cleanCaptionPosition };
+    if (
+      settings.cleanCaptionPosition
       && Number.isFinite(Number(settings.cleanCaptionPosition.x))
       && Number.isFinite(Number(settings.cleanCaptionPosition.y))
-      ? {
-        x: Number(settings.cleanCaptionPosition.x),
-        y: Number(settings.cleanCaptionPosition.y),
+    ) {
+      const rawX = Number(settings.cleanCaptionPosition.x);
+      const rawY = Number(settings.cleanCaptionPosition.y);
+      if (rawX >= 0 && rawX <= 1 && rawY >= 0 && rawY <= 1) {
+        position = { x: rawX, y: rawY };
+      } else if (typeof window !== 'undefined' && window.innerWidth > 0 && window.innerHeight > 0) {
+        position = {
+          x: Math.max(0, Math.min(1, rawX / window.innerWidth)),
+          y: Math.max(0, Math.min(1, rawY / window.innerHeight)),
+        };
       }
-      : null;
+    }
     return {
       cleanCaptionsEnabled: enabled,
       cleanCaptionStyle: style,
       cleanCaptionTextSize: textSize,
       cleanCaptionPosition: position,
+    };
+  }
+
+  function clampCaptionOverlayBounds(left, top, overlayWidth, overlayHeight) {
+    const maxLeft = Math.max(window.innerWidth - overlayWidth - 8, 8);
+    const maxTop = Math.max(window.innerHeight - overlayHeight - 8, 8);
+    return {
+      left: Math.max(8, Math.min(left, maxLeft)),
+      top: Math.max(8, Math.min(top, maxTop)),
+    };
+  }
+
+  function getCaptionOverlayScreenPosition(position, overlayWidth, overlayHeight) {
+    const normalized = position || CLEAN_CAPTION_DEFAULTS.cleanCaptionPosition;
+    const centeredLeft = window.innerWidth * normalized.x - (overlayWidth / 2);
+    const centeredTop = window.innerHeight * normalized.y - (overlayHeight / 2);
+    return clampCaptionOverlayBounds(centeredLeft, centeredTop, overlayWidth, overlayHeight);
+  }
+
+  function getNormalizedCaptionPosition(left, top, overlayWidth, overlayHeight) {
+    const centerX = left + (overlayWidth / 2);
+    const centerY = top + (overlayHeight / 2);
+    return {
+      x: Math.max(0, Math.min(1, centerX / Math.max(window.innerWidth, 1))),
+      y: Math.max(0, Math.min(1, centerY / Math.max(window.innerHeight, 1))),
     };
   }
 
@@ -1045,25 +1079,21 @@
     cleanCaptionOverlayEl.style.display = cleanCaptionSettings.cleanCaptionsEnabled ? 'block' : 'none';
     cleanCaptionOverlayEl.style.background = cleanCaptionSettings.cleanCaptionStyle === 'white_black'
       ? 'rgba(255, 255, 255, 0.96)'
-      : 'rgba(0, 0, 0, 0.20)';
+      : 'rgba(0, 0, 0, 0.30)';
     cleanCaptionTextEl.style.color = cleanCaptionSettings.cleanCaptionStyle === 'white_black' ? '#111111' : '#ffffff';
 
-    const sizeMap = { small: '18px', medium: '22px', large: '28px' };
+    const sizeMap = { small: '14px', medium: '18px', large: '24px' };
     cleanCaptionTextEl.style.fontSize = sizeMap[cleanCaptionSettings.cleanCaptionTextSize] || sizeMap.medium;
 
-    if (cleanCaptionSettings.cleanCaptionPosition) {
-      const x = Math.max(8, cleanCaptionSettings.cleanCaptionPosition.x);
-      const y = Math.max(8, cleanCaptionSettings.cleanCaptionPosition.y);
-      cleanCaptionOverlayEl.style.left = `${x}px`;
-      cleanCaptionOverlayEl.style.top = `${y}px`;
-      cleanCaptionOverlayEl.style.bottom = 'auto';
-      cleanCaptionOverlayEl.style.transform = 'none';
-    } else {
-      cleanCaptionOverlayEl.style.left = '50%';
-      cleanCaptionOverlayEl.style.bottom = '13%';
-      cleanCaptionOverlayEl.style.top = 'auto';
-      cleanCaptionOverlayEl.style.transform = 'translateX(-50%)';
-    }
+    const rect = getCaptionOverlayScreenPosition(
+      cleanCaptionSettings.cleanCaptionPosition,
+      cleanCaptionOverlayEl.offsetWidth,
+      cleanCaptionOverlayEl.offsetHeight
+    );
+    cleanCaptionOverlayEl.style.left = `${rect.left}px`;
+    cleanCaptionOverlayEl.style.top = `${rect.top}px`;
+    cleanCaptionOverlayEl.style.bottom = 'auto';
+    cleanCaptionOverlayEl.style.transform = 'none';
   }
 
   function ensureCleanCaptionOverlay() {
@@ -1072,8 +1102,10 @@
       return;
     }
 
-    const existing = document.getElementById('isweep-clean-caption-overlay');
+    const existing = document.getElementById('isweep-caption-overlay')
+      || document.getElementById('isweep-clean-caption-overlay');
     if (existing) {
+      existing.id = 'isweep-caption-overlay';
       cleanCaptionOverlayEl = existing;
       cleanCaptionTextEl = existing.querySelector('.isweep-clean-caption-text');
       applyCleanCaptionOverlayStyles();
@@ -1081,16 +1113,17 @@
     }
 
     const overlay = document.createElement('div');
-    overlay.id = 'isweep-clean-caption-overlay';
+    overlay.id = 'isweep-caption-overlay';
     overlay.style.position = 'fixed';
-    overlay.style.left = '50%';
-    overlay.style.bottom = '13%';
-    overlay.style.transform = 'translateX(-50%)';
+    overlay.style.left = '0';
+    overlay.style.top = '0';
+    overlay.style.transform = 'none';
     overlay.style.maxWidth = '70vw';
     overlay.style.padding = '10px 14px';
     overlay.style.borderRadius = '10px';
     overlay.style.zIndex = '2147483647';
     overlay.style.cursor = 'grab';
+    overlay.style.pointerEvents = 'auto';
     overlay.style.userSelect = 'none';
     overlay.style.webkitUserSelect = 'none';
     overlay.style.touchAction = 'none';
@@ -1104,6 +1137,7 @@
     text.style.letterSpacing = '0.2px';
     text.style.minWidth = '140px';
     text.style.wordBreak = 'break-word';
+    text.style.pointerEvents = 'none';
 
     overlay.appendChild(text);
     document.body.appendChild(overlay);
@@ -1125,12 +1159,14 @@
 
     overlay.addEventListener('pointermove', (event) => {
       if (!cleanCaptionDragState || cleanCaptionDragState.pointerId !== event.pointerId) return;
-      const maxX = Math.max(window.innerWidth - overlay.offsetWidth - 8, 8);
-      const maxY = Math.max(window.innerHeight - overlay.offsetHeight - 8, 8);
-      const x = Math.max(8, Math.min(event.clientX - cleanCaptionDragState.offsetX, maxX));
-      const y = Math.max(8, Math.min(event.clientY - cleanCaptionDragState.offsetY, maxY));
-      overlay.style.left = `${x}px`;
-      overlay.style.top = `${y}px`;
+      const rect = clampCaptionOverlayBounds(
+        event.clientX - cleanCaptionDragState.offsetX,
+        event.clientY - cleanCaptionDragState.offsetY,
+        overlay.offsetWidth,
+        overlay.offsetHeight
+      );
+      overlay.style.left = `${rect.left}px`;
+      overlay.style.top = `${rect.top}px`;
     });
 
     overlay.addEventListener('pointerup', async (event) => {
@@ -1141,10 +1177,7 @@
       const rect = overlay.getBoundingClientRect();
       cleanCaptionSettings = {
         ...cleanCaptionSettings,
-        cleanCaptionPosition: {
-          x: Math.round(rect.left),
-          y: Math.round(rect.top),
-        },
+        cleanCaptionPosition: getNormalizedCaptionPosition(rect.left, rect.top, rect.width, rect.height),
       };
       await chrome.storage.local.set({
         [STORAGE_KEYS.CLEAN_CAPTION_SETTINGS]: cleanCaptionSettings,
@@ -1156,11 +1189,12 @@
     applyCleanCaptionOverlayStyles();
   }
 
-  function updateCleanCaptionOverlay(liveText, nowSec) {
+  function updateCleanOverlay(liveText, nowSec) {
     ensureCleanCaptionOverlay();
     if (!cleanCaptionOverlayEl || !cleanCaptionTextEl) return;
 
     const preAnalyzed = getPreAnalyzedCaptionAtTime(nowSec);
+    // TODO: Replace text source with pre-analyzed cleaned captions when available
     const sourceText = preAnalyzed ? preAnalyzed.text : String(liveText || '');
     const cleanedText = toCleanCaptionText(sourceText);
     cleanCaptionTextEl.textContent = cleanedText;
@@ -1878,7 +1912,7 @@
       appliedMuteThisCycle = true;
     }
 
-    updateCleanCaptionOverlay(text, now || 0);
+    updateCleanOverlay(text, now || 0);
 
     // Restore audio on caption change only when this cycle didn't apply a new mute.
     if (!appliedMuteThisCycle) {
@@ -1947,7 +1981,7 @@
       }
       lastCaptionText = '';
       captionStartTime = null;
-      updateCleanCaptionOverlay('', 0);
+      updateCleanOverlay('', 0);
       captionBuffer = '';
       if (bufferTimer) {
         clearTimeout(bufferTimer);

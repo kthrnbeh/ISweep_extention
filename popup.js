@@ -24,7 +24,7 @@ const CLEAN_CAPTION_DEFAULTS = {
   cleanCaptionsEnabled: true,
   cleanCaptionStyle: 'transparent_white',
   cleanCaptionTextSize: 'medium',
-  cleanCaptionPosition: null,
+  cleanCaptionPosition: { x: 0.5, y: 0.8 },
 };
 
 function normalizeCleanCaptionSettings(raw) {
@@ -38,10 +38,10 @@ function normalizeCleanCaptionSettings(raw) {
     && Number.isFinite(Number(data.cleanCaptionPosition.x))
     && Number.isFinite(Number(data.cleanCaptionPosition.y))
     ? {
-      x: Number(data.cleanCaptionPosition.x),
-      y: Number(data.cleanCaptionPosition.y),
+      x: Math.max(0, Math.min(1, Number(data.cleanCaptionPosition.x))),
+      y: Math.max(0, Math.min(1, Number(data.cleanCaptionPosition.y))),
     }
-    : null;
+    : { ...CLEAN_CAPTION_DEFAULTS.cleanCaptionPosition };
   return {
     cleanCaptionsEnabled: enabled,
     cleanCaptionStyle: style,
@@ -267,7 +267,7 @@ function setupEventListeners() {
     btnResetCaptionPosition.addEventListener('click', async () => {
       await saveCleanCaptionSettings({
         ...cleanCaptionSettingsCache,
-        cleanCaptionPosition: null,
+        cleanCaptionPosition: { ...CLEAN_CAPTION_DEFAULTS.cleanCaptionPosition },
       });
     });
   }
@@ -297,7 +297,11 @@ function renderCleanCaptionControls() {
   if (btnCleanCaptionsToggle) {
     btnCleanCaptionsToggle.dataset.enabled = cleanCaptionSettingsCache.cleanCaptionsEnabled ? 'true' : 'false';
     btnCleanCaptionsToggle.setAttribute('aria-pressed', cleanCaptionSettingsCache.cleanCaptionsEnabled ? 'true' : 'false');
-    btnCleanCaptionsToggle.textContent = cleanCaptionSettingsCache.cleanCaptionsEnabled ? 'CC ON' : 'CC OFF';
+    btnCleanCaptionsToggle.textContent = '[CC]';
+    btnCleanCaptionsToggle.setAttribute(
+      'aria-label',
+      cleanCaptionSettingsCache.cleanCaptionsEnabled ? 'Clean captions on' : 'Clean captions off'
+    );
   }
   if (cleanCaptionStyleSelect) {
     cleanCaptionStyleSelect.value = cleanCaptionSettingsCache.cleanCaptionStyle;

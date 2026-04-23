@@ -91,13 +91,13 @@ test('clean caption settings normalization applies defaults safely', () => {
     cleanCaptionsEnabled: false,
     cleanCaptionStyle: 'white_black',
     cleanCaptionTextSize: 'large',
-    cleanCaptionPosition: { x: 120, y: 240 },
+    cleanCaptionPosition: { x: 0.4, y: 0.7 },
   });
 
   assert.equal(normalized.cleanCaptionsEnabled, false);
   assert.equal(normalized.cleanCaptionStyle, 'white_black');
   assert.equal(normalized.cleanCaptionTextSize, 'large');
-  assert.deepEqual(normalized.cleanCaptionPosition, { x: 120, y: 240 });
+  assert.deepEqual(normalized.cleanCaptionPosition, { x: 0.4, y: 0.7 });
 
   const fallback = hooks.normalizeCleanCaptionSettings({
     cleanCaptionStyle: 'invalid',
@@ -106,6 +106,7 @@ test('clean caption settings normalization applies defaults safely', () => {
   assert.equal(fallback.cleanCaptionsEnabled, true);
   assert.equal(fallback.cleanCaptionStyle, 'transparent_white');
   assert.equal(fallback.cleanCaptionTextSize, 'medium');
+  assert.deepEqual(fallback.cleanCaptionPosition, { x: 0.5, y: 0.8 });
 });
 
 test('clean caption text masks blocked words', () => {

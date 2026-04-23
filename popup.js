@@ -16,8 +16,39 @@ const STORAGE_KEYS = {
   USER_ID: 'isweepUserId',         // Legacy user id key
   PREFS: 'isweepPreferences',      // Cached preferences
   BACKEND_URL: 'isweepBackendUrl', // Backend base URL
-  FRONTEND_URL: 'isweepFrontendUrl'// Frontend base URL override
+  FRONTEND_URL: 'isweepFrontendUrl',// Frontend base URL override
+  CLEAN_CAPTION_SETTINGS: 'isweepCleanCaptionSettings',
 };
+
+const CLEAN_CAPTION_DEFAULTS = {
+  cleanCaptionsEnabled: true,
+  cleanCaptionStyle: 'transparent_white',
+  cleanCaptionTextSize: 'medium',
+  cleanCaptionPosition: null,
+};
+
+function normalizeCleanCaptionSettings(raw) {
+  const data = raw && typeof raw === 'object' ? raw : {};
+  const style = data.cleanCaptionStyle === 'white_black' ? 'white_black' : 'transparent_white';
+  const textSize = ['small', 'medium', 'large'].includes(data.cleanCaptionTextSize)
+    ? data.cleanCaptionTextSize
+    : 'medium';
+  const enabled = data.cleanCaptionsEnabled !== false;
+  const position = data.cleanCaptionPosition
+    && Number.isFinite(Number(data.cleanCaptionPosition.x))
+    && Number.isFinite(Number(data.cleanCaptionPosition.y))
+    ? {
+      x: Number(data.cleanCaptionPosition.x),
+      y: Number(data.cleanCaptionPosition.y),
+    }
+    : null;
+  return {
+    cleanCaptionsEnabled: enabled,
+    cleanCaptionStyle: style,
+    cleanCaptionTextSize: textSize,
+    cleanCaptionPosition: position,
+  };
+}
 
 // Shared token key used by the site and the bridge content script.
 const TOKEN_KEY = 'isweep_auth_token';
@@ -66,6 +97,14 @@ const linkResetFilters = document.getElementById('linkResetFilters'); // Reset f
 const linkManageAccount = document.getElementById('linkManageAccount'); // Manage account link
 const linkLogout = document.getElementById('linkLogout'); // Logout link
 const signedInStatus = document.getElementById('signedInStatus'); // Status line about prefs cache
+const btnCleanCaptionsToggle = document.getElementById('btnCleanCaptionsToggle');
+const btnCaptionAppearance = document.getElementById('btnCaptionAppearance');
+const captionSettingsPanel = document.getElementById('captionSettingsPanel');
+const cleanCaptionStyleSelect = document.getElementById('cleanCaptionStyle');
+const cleanCaptionTextSizeSelect = document.getElementById('cleanCaptionTextSize');
+const btnResetCaptionPosition = document.getElementById('btnResetCaptionPosition');
+
+let cleanCaptionSettingsCache = { ...CLEAN_CAPTION_DEFAULTS };
 
 /**
  * Initialize popup on load
@@ -110,6 +149,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     
     // Set up event listeners
     setupEventListeners();
+    await initCleanCaptionControls();
     
   } catch (error) {
     console.error(LOG_PREFIX, 'Error initializing:', error);
@@ -190,6 +230,47 @@ function setupEventListeners() {
   linkResetFilters.addEventListener('click', handleResetFilters); // Open reset filters section
   linkManageAccount.addEventListener('click', handleManageAccount); // Open account page
   linkLogout.addEventListener('click', handleLogout); // Log out
+
+  if (btnCleanCaptionsToggle) {
+    btnCleanCaptionsToggle.addEventListener('click', async () => {
+      const next = {
+        ...cleanCaptionSettingsCache,
+        cleanCaptionsEnabled: !cleanCaptionSettingsCache.cleanCaptionsEnabled,
+      };
+      await saveCleanCaptionSettings(next);
+    });
+  }
+  if (btnCaptionAppearance && captionSettingsPanel) {
+    btnCaptionAppearance.addEventListener('click', () => {
+      const willShow = captionSettingsPanel.classList.contains('hidden');
+      captionSettingsPanel.classList.toggle('hidden', !willShow);
+      btnCaptionAppearance.setAttribute('aria-expanded', willShow ? 'true' : 'false');
+    });
+  }
+  if (cleanCaptionStyleSelect) {
+    cleanCaptionStyleSelect.addEventListener('change', async () => {
+      await saveCleanCaptionSettings({
+        ...cleanCaptionSettingsCache,
+        cleanCaptionStyle: cleanCaptionStyleSelect.value,
+      });
+    });
+  }
+  if (cleanCaptionTextSizeSelect) {
+    cleanCaptionTextSizeSelect.addEventListener('change', async () => {
+      await saveCleanCaptionSettings({
+        ...cleanCaptionSettingsCache,
+        cleanCaptionTextSize: cleanCaptionTextSizeSelect.value,
+      });
+    });
+  }
+  if (btnResetCaptionPosition) {
+    btnResetCaptionPosition.addEventListener('click', async () => {
+      await saveCleanCaptionSettings({
+        ...cleanCaptionSettingsCache,
+        cleanCaptionPosition: null,
+      });
+    });
+  }
   
   // Allow Enter key in email input
   emailInput.addEventListener('keypress', (e) => {
@@ -204,6 +285,35 @@ function setupEventListeners() {
       }
     });
   }
+}
+
+async function initCleanCaptionControls() {
+  const store = await chrome.storage.local.get([STORAGE_KEYS.CLEAN_CAPTION_SETTINGS]);
+  cleanCaptionSettingsCache = normalizeCleanCaptionSettings(store[STORAGE_KEYS.CLEAN_CAPTION_SETTINGS]);
+  renderCleanCaptionControls();
+}
+
+function renderCleanCaptionControls() {
+  if (btnCleanCaptionsToggle) {
+    btnCleanCaptionsToggle.dataset.enabled = cleanCaptionSettingsCache.cleanCaptionsEnabled ? 'true' : 'false';
+    btnCleanCaptionsToggle.setAttribute('aria-pressed', cleanCaptionSettingsCache.cleanCaptionsEnabled ? 'true' : 'false');
+    btnCleanCaptionsToggle.textContent = cleanCaptionSettingsCache.cleanCaptionsEnabled ? 'CC ON' : 'CC OFF';
+  }
+  if (cleanCaptionStyleSelect) {
+    cleanCaptionStyleSelect.value = cleanCaptionSettingsCache.cleanCaptionStyle;
+  }
+  if (cleanCaptionTextSizeSelect) {
+    cleanCaptionTextSizeSelect.value = cleanCaptionSettingsCache.cleanCaptionTextSize;
+  }
+}
+
+async function saveCleanCaptionSettings(nextSettings) {
+  cleanCaptionSettingsCache = normalizeCleanCaptionSettings(nextSettings);
+  await chrome.storage.local.set({
+    [STORAGE_KEYS.CLEAN_CAPTION_SETTINGS]: cleanCaptionSettingsCache,
+  });
+  renderCleanCaptionControls();
+  console.log(LOG_PREFIX, 'clean caption settings saved', cleanCaptionSettingsCache);
 }
 
 async function handleSyncPrefs(e) {

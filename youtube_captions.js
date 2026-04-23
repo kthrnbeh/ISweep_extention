@@ -7,7 +7,10 @@
 
   const LOG_PREFIX = '[ISWEEP][YT]';
   const MARKER_LOG_PREFIX = '[ISWEEP][MARKERS]';
-  const STORAGE_KEYS = { PREFS: 'isweepPreferences' };
+  const STORAGE_KEYS = {
+    PREFS: 'isweepPreferences',
+    CLEAN_CAPTION_SETTINGS: 'isweepCleanCaptionSettings',
+  };
   // Track caption text and when it started so we can measure how long words are spoken.
   // Playback-only: ISweep never edits media or captions; it only controls live playback state (mute/unmute/seek/rate).
   let lastCaptionText = '';
@@ -225,6 +228,19 @@
   let markerFallbackLogVideoId = null;
   let markerPastEndLogged = false;
 
+  // Clean caption overlay state.
+  const CLEAN_CAPTION_DEFAULTS = {
+    cleanCaptionsEnabled: true,
+    cleanCaptionStyle: 'transparent_white',
+    cleanCaptionTextSize: 'medium',
+    cleanCaptionPosition: null,
+  };
+  let cleanCaptionSettings = { ...CLEAN_CAPTION_DEFAULTS };
+  let cleanCaptionOverlayEl = null;
+  let cleanCaptionTextEl = null;
+  let cleanCaptionDragState = null;
+  let preAnalyzedCleanCaptions = [];
+
   // Audio watch-ahead state.
   let audioCtx = null;
   let audioProcessor = null;
@@ -427,6 +443,7 @@
       if (!response || response.status !== 'ready') {
         const fallbackReason = response?.failure_reason || `status:${response?.status || 'unknown'}`;
         resetMarkerEngine(fallbackReason);
+        preAnalyzedCleanCaptions = [];
         console.log(MARKER_LOG_PREFIX, 'watch-ahead unavailable; live caption fallback active', {
           videoId,
           status: response?.status || 'unknown',
@@ -434,6 +451,10 @@
         });
         return;
       }
+
+      preAnalyzedCleanCaptions = normalizePreAnalyzedCaptions(
+        response.cleaned_captions || response.clean_captions || []
+      );
 
       setMarkerEvents(response.events, response.source || 'transcript');
     } catch (err) {
@@ -789,13 +810,16 @@
         console.log(MARKER_LOG_PREFIX, 'video id change', { from: activeVideoId, to: null });
       }
       activeVideoId = null;
+      preAnalyzedCleanCaptions = [];
       stopAudioCapture('video_id_lost');
       resetMarkerEngine('missing_video_id');
+      updateCleanCaptionOverlay('', 0);
       return;
     }
     if (newVideoId === activeVideoId) return;
     console.log(MARKER_LOG_PREFIX, 'video id change', { from: activeVideoId, to: newVideoId });
     activeVideoId = newVideoId;
+    preAnalyzedCleanCaptions = [];
     audioAheadFailed = false;           // Allow a fresh capture attempt for the new video
     stopAudioCapture('video_changed');
     resetMarkerEngine('video changed');
@@ -886,6 +910,10 @@
     if (changes[STORAGE_KEYS.PREFS]) {
       cachedPreferences = changes[STORAGE_KEYS.PREFS].newValue || null;
     }
+    if (changes[STORAGE_KEYS.CLEAN_CAPTION_SETTINGS]) {
+      cleanCaptionSettings = normalizeCleanCaptionSettings(changes[STORAGE_KEYS.CLEAN_CAPTION_SETTINGS].newValue);
+      applyCleanCaptionOverlayStyles();
+    }
   });
 
   async function requestPrefSync() {
@@ -932,6 +960,226 @@
       note: 'no saved words loaded',
     });
     return { words: fallback, source: 'fallback', customCount, categoryCount };
+  }
+
+  function normalizeCleanCaptionSettings(raw) {
+    const settings = raw && typeof raw === 'object' ? raw : {};
+    const style = settings.cleanCaptionStyle === 'white_black' ? 'white_black' : 'transparent_white';
+    const textSize = ['small', 'medium', 'large'].includes(settings.cleanCaptionTextSize)
+      ? settings.cleanCaptionTextSize
+      : 'medium';
+    const enabled = settings.cleanCaptionsEnabled !== false;
+    const position = settings.cleanCaptionPosition
+      && Number.isFinite(Number(settings.cleanCaptionPosition.x))
+      && Number.isFinite(Number(settings.cleanCaptionPosition.y))
+      ? {
+        x: Number(settings.cleanCaptionPosition.x),
+        y: Number(settings.cleanCaptionPosition.y),
+      }
+      : null;
+    return {
+      cleanCaptionsEnabled: enabled,
+      cleanCaptionStyle: style,
+      cleanCaptionTextSize: textSize,
+      cleanCaptionPosition: position,
+    };
+  }
+
+  function maskCaptionWord(word) {
+    const length = Math.max(String(word || '').replace(/[^A-Za-z0-9']/g, '').length, 3);
+    return '_'.repeat(length);
+  }
+
+  function toCleanCaptionText(text) {
+    const raw = String(text || '');
+    if (!raw.trim()) return '';
+    const filterMeta = getFilterWords();
+    const filters = filterMeta.words || [];
+    return raw
+      .replace(REDACTED_PLACEHOLDER_PATTERN, '___')
+      .replace(/[A-Za-z0-9']+/g, (word) => {
+        const normalizedWord = normalizeCaptionWord(word);
+        if (!normalizedWord) return word;
+        const blocked = filters.some((rawFilter) => {
+          const normalizedFilter = normalizeFilterWord(rawFilter);
+          if (!normalizedFilter) return false;
+          const variants = expandWordFamily(normalizedFilter);
+          const regexes = [maskToRegex(normalizedFilter), buildStretchRegex(normalizedFilter)];
+          variants.forEach((variant) => {
+            if (variant !== normalizedFilter) regexes.push(maskToRegex(variant));
+          });
+          return regexes.some((regex) => regex.test(normalizedWord));
+        });
+        return blocked ? maskCaptionWord(word) : word;
+      });
+  }
+
+  function normalizePreAnalyzedCaptions(captions) {
+    if (!Array.isArray(captions)) return [];
+    return captions
+      .map((entry) => {
+        if (!entry || typeof entry !== 'object') return null;
+        const start = Number(entry.start_seconds);
+        const end = Number(entry.end_seconds);
+        const text = String(entry.text || '').trim();
+        if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start || !text) return null;
+        return {
+          start_seconds: start,
+          end_seconds: end,
+          text,
+        };
+      })
+      .filter(Boolean)
+      .sort((a, b) => a.start_seconds - b.start_seconds);
+  }
+
+  function getPreAnalyzedCaptionAtTime(nowSec) {
+    if (!preAnalyzedCleanCaptions.length || !Number.isFinite(Number(nowSec))) return null;
+    const now = Number(nowSec);
+    return preAnalyzedCleanCaptions.find((entry) => now >= entry.start_seconds && now <= entry.end_seconds) || null;
+  }
+
+  function applyCleanCaptionOverlayStyles() {
+    if (!cleanCaptionOverlayEl || !cleanCaptionTextEl) return;
+
+    cleanCaptionOverlayEl.style.display = cleanCaptionSettings.cleanCaptionsEnabled ? 'block' : 'none';
+    cleanCaptionOverlayEl.style.background = cleanCaptionSettings.cleanCaptionStyle === 'white_black'
+      ? 'rgba(255, 255, 255, 0.96)'
+      : 'rgba(0, 0, 0, 0.20)';
+    cleanCaptionTextEl.style.color = cleanCaptionSettings.cleanCaptionStyle === 'white_black' ? '#111111' : '#ffffff';
+
+    const sizeMap = { small: '18px', medium: '22px', large: '28px' };
+    cleanCaptionTextEl.style.fontSize = sizeMap[cleanCaptionSettings.cleanCaptionTextSize] || sizeMap.medium;
+
+    if (cleanCaptionSettings.cleanCaptionPosition) {
+      const x = Math.max(8, cleanCaptionSettings.cleanCaptionPosition.x);
+      const y = Math.max(8, cleanCaptionSettings.cleanCaptionPosition.y);
+      cleanCaptionOverlayEl.style.left = `${x}px`;
+      cleanCaptionOverlayEl.style.top = `${y}px`;
+      cleanCaptionOverlayEl.style.bottom = 'auto';
+      cleanCaptionOverlayEl.style.transform = 'none';
+    } else {
+      cleanCaptionOverlayEl.style.left = '50%';
+      cleanCaptionOverlayEl.style.bottom = '13%';
+      cleanCaptionOverlayEl.style.top = 'auto';
+      cleanCaptionOverlayEl.style.transform = 'translateX(-50%)';
+    }
+  }
+
+  function ensureCleanCaptionOverlay() {
+    if (cleanCaptionOverlayEl && document.body.contains(cleanCaptionOverlayEl)) {
+      applyCleanCaptionOverlayStyles();
+      return;
+    }
+
+    const existing = document.getElementById('isweep-clean-caption-overlay');
+    if (existing) {
+      cleanCaptionOverlayEl = existing;
+      cleanCaptionTextEl = existing.querySelector('.isweep-clean-caption-text');
+      applyCleanCaptionOverlayStyles();
+      return;
+    }
+
+    const overlay = document.createElement('div');
+    overlay.id = 'isweep-clean-caption-overlay';
+    overlay.style.position = 'fixed';
+    overlay.style.left = '50%';
+    overlay.style.bottom = '13%';
+    overlay.style.transform = 'translateX(-50%)';
+    overlay.style.maxWidth = '70vw';
+    overlay.style.padding = '10px 14px';
+    overlay.style.borderRadius = '10px';
+    overlay.style.zIndex = '2147483647';
+    overlay.style.cursor = 'grab';
+    overlay.style.userSelect = 'none';
+    overlay.style.webkitUserSelect = 'none';
+    overlay.style.touchAction = 'none';
+    overlay.style.boxShadow = '0 2px 10px rgba(0,0,0,0.22)';
+
+    const text = document.createElement('div');
+    text.className = 'isweep-clean-caption-text';
+    text.style.fontWeight = '600';
+    text.style.lineHeight = '1.35';
+    text.style.textAlign = 'center';
+    text.style.letterSpacing = '0.2px';
+    text.style.minWidth = '140px';
+    text.style.wordBreak = 'break-word';
+
+    overlay.appendChild(text);
+    document.body.appendChild(overlay);
+
+    overlay.addEventListener('pointerdown', (event) => {
+      if (event.button !== 0) return;
+      event.preventDefault();
+      overlay.setPointerCapture(event.pointerId);
+      const rect = overlay.getBoundingClientRect();
+      cleanCaptionDragState = {
+        pointerId: event.pointerId,
+        offsetX: event.clientX - rect.left,
+        offsetY: event.clientY - rect.top,
+      };
+      overlay.style.cursor = 'grabbing';
+      overlay.style.transform = 'none';
+      overlay.style.bottom = 'auto';
+    });
+
+    overlay.addEventListener('pointermove', (event) => {
+      if (!cleanCaptionDragState || cleanCaptionDragState.pointerId !== event.pointerId) return;
+      const maxX = Math.max(window.innerWidth - overlay.offsetWidth - 8, 8);
+      const maxY = Math.max(window.innerHeight - overlay.offsetHeight - 8, 8);
+      const x = Math.max(8, Math.min(event.clientX - cleanCaptionDragState.offsetX, maxX));
+      const y = Math.max(8, Math.min(event.clientY - cleanCaptionDragState.offsetY, maxY));
+      overlay.style.left = `${x}px`;
+      overlay.style.top = `${y}px`;
+    });
+
+    overlay.addEventListener('pointerup', async (event) => {
+      if (!cleanCaptionDragState || cleanCaptionDragState.pointerId !== event.pointerId) return;
+      overlay.releasePointerCapture(event.pointerId);
+      cleanCaptionDragState = null;
+      overlay.style.cursor = 'grab';
+      const rect = overlay.getBoundingClientRect();
+      cleanCaptionSettings = {
+        ...cleanCaptionSettings,
+        cleanCaptionPosition: {
+          x: Math.round(rect.left),
+          y: Math.round(rect.top),
+        },
+      };
+      await chrome.storage.local.set({
+        [STORAGE_KEYS.CLEAN_CAPTION_SETTINGS]: cleanCaptionSettings,
+      });
+    });
+
+    cleanCaptionOverlayEl = overlay;
+    cleanCaptionTextEl = text;
+    applyCleanCaptionOverlayStyles();
+  }
+
+  function updateCleanCaptionOverlay(liveText, nowSec) {
+    ensureCleanCaptionOverlay();
+    if (!cleanCaptionOverlayEl || !cleanCaptionTextEl) return;
+
+    const preAnalyzed = getPreAnalyzedCaptionAtTime(nowSec);
+    const sourceText = preAnalyzed ? preAnalyzed.text : String(liveText || '');
+    const cleanedText = toCleanCaptionText(sourceText);
+    cleanCaptionTextEl.textContent = cleanedText;
+    cleanCaptionOverlayEl.style.visibility = cleanedText ? 'visible' : 'hidden';
+    cleanCaptionOverlayEl.dataset.source = preAnalyzed ? 'pre_analyzed' : 'live';
+    if (!cleanCaptionSettings.cleanCaptionsEnabled) {
+      cleanCaptionOverlayEl.style.display = 'none';
+    }
+  }
+
+  async function loadCleanCaptionSettingsFromStorage() {
+    try {
+      const store = await chrome.storage.local.get([STORAGE_KEYS.CLEAN_CAPTION_SETTINGS]);
+      cleanCaptionSettings = normalizeCleanCaptionSettings(store[STORAGE_KEYS.CLEAN_CAPTION_SETTINGS]);
+    } catch (err) {
+      console.warn('[ISWEEP][FALLBACK] clean caption settings load failed', err?.message || err);
+      cleanCaptionSettings = { ...CLEAN_CAPTION_DEFAULTS };
+    }
+    ensureCleanCaptionOverlay();
   }
 
   function findVideo() {
@@ -1630,6 +1878,8 @@
       appliedMuteThisCycle = true;
     }
 
+    updateCleanCaptionOverlay(text, now || 0);
+
     // Restore audio on caption change only when this cycle didn't apply a new mute.
     if (!appliedMuteThisCycle) {
       restoreMuteAfterCaptionChange();
@@ -1656,6 +1906,8 @@
     globalThis.__ISWEEP_YT_TEST_HOOKS__ = {
       estimatePlaceholderMuteWindow,
       estimatePlaceholderWordWindow,
+      normalizeCleanCaptionSettings,
+      toCleanCaptionText,
       hasNearbyAudioMuteMarker,
       getMarkerEarlyWindowSec,
       shouldFireMarker,
@@ -1673,6 +1925,7 @@
   }
 
   const observer = new MutationObserver(() => {
+    ensureCleanCaptionOverlay();
     const caption = extractCaptionText();
 
     // If captions disappear, flush the final caption immediately and restore audio; empty snapshots should not debounce.
@@ -1694,6 +1947,7 @@
       }
       lastCaptionText = '';
       captionStartTime = null;
+      updateCleanCaptionOverlay('', 0);
       captionBuffer = '';
       if (bufferTimer) {
         clearTimeout(bufferTimer);
@@ -1739,6 +1993,7 @@
     }
     loadPreferencesFromStorage();
     requestPrefSync(); // Refresh prefs on load so blocklist/custom words propagate
+    loadCleanCaptionSettingsFromStorage();
     clearMuteState('init');
     ensureMarkerSchedulerRunning();
     startVideoWatchLoop();

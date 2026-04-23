@@ -84,3 +84,34 @@ test('marker early-fire timing applies only to mute markers and fires once', () 
   const fired = new Set(['m1']);
   assert.equal(hooks.shouldFireMarker(muteMarker, 50.2, fired), false, 'marker should fire only once');
 });
+
+test('clean caption settings normalization applies defaults safely', () => {
+  const hooks = loadYoutubeTimingHooks();
+  const normalized = hooks.normalizeCleanCaptionSettings({
+    cleanCaptionsEnabled: false,
+    cleanCaptionStyle: 'white_black',
+    cleanCaptionTextSize: 'large',
+    cleanCaptionPosition: { x: 120, y: 240 },
+  });
+
+  assert.equal(normalized.cleanCaptionsEnabled, false);
+  assert.equal(normalized.cleanCaptionStyle, 'white_black');
+  assert.equal(normalized.cleanCaptionTextSize, 'large');
+  assert.deepEqual(normalized.cleanCaptionPosition, { x: 120, y: 240 });
+
+  const fallback = hooks.normalizeCleanCaptionSettings({
+    cleanCaptionStyle: 'invalid',
+    cleanCaptionTextSize: 'huge',
+  });
+  assert.equal(fallback.cleanCaptionsEnabled, true);
+  assert.equal(fallback.cleanCaptionStyle, 'transparent_white');
+  assert.equal(fallback.cleanCaptionTextSize, 'medium');
+});
+
+test('clean caption text masks blocked words', () => {
+  const hooks = loadYoutubeTimingHooks();
+  const cleaned = hooks.toCleanCaptionText('This is shit and [ __ ] now.');
+  assert.equal(/shit/i.test(cleaned), false, 'blocked word should be masked');
+  assert.equal(cleaned.includes('___'), true, 'placeholder should stay masked');
+  assert.equal(cleaned.includes('This'), true, 'clean words should remain visible');
+});

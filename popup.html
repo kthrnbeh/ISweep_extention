@@ -69,6 +69,32 @@
         <span class="status-text" id="statusText">ISweep is Active</span>
       </div>
 
+      <!-- Clean Caption Controls -->
+      <div class="caption-controls" id="captionControls">
+        <div class="caption-controls-header">
+          <button id="btnCleanCaptionsToggle" class="btn-cc" type="button" aria-pressed="true" title="Toggle clean captions">CC</button>
+          <button id="btnCaptionAppearance" class="btn-dot" type="button" aria-expanded="false" title="Caption appearance settings">•</button>
+        </div>
+        <div id="captionSettingsPanel" class="caption-settings hidden">
+          <label class="caption-setting-row">
+            <span>Style</span>
+            <select id="cleanCaptionStyle">
+              <option value="transparent_white">Transparent + White</option>
+              <option value="white_black">White + Black</option>
+            </select>
+          </label>
+          <label class="caption-setting-row">
+            <span>Text size</span>
+            <select id="cleanCaptionTextSize">
+              <option value="small">Small</option>
+              <option value="medium">Medium</option>
+              <option value="large">Large</option>
+            </select>
+          </label>
+          <button id="btnResetCaptionPosition" class="btn-link" type="button">Reset caption position</button>
+        </div>
+      </div>
+
       <!-- Primary Action -->
       <button id="btnOpenSettings" class="btn btn-primary">Open Filters →</button> <!-- Opens Filters page -->
       <button id="btnSyncPrefs" class="btn btn-secondary" style="margin-top:8px;">Sync Preferences</button> <!-- Sync preferences with backend -->

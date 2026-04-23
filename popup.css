@@ -156,6 +156,75 @@ body {
   color: var(--color-text-primary);
 }
 
+.caption-controls {
+  border: 1px solid var(--color-border);
+  border-radius: var(--border-radius-small);
+  padding: 10px;
+  background: #f9fafb;
+}
+
+.caption-controls-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.btn-cc {
+  min-width: 56px;
+  padding: 8px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  background: #ffffff;
+  color: var(--color-text-primary);
+  cursor: pointer;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+}
+
+.btn-cc[data-enabled="true"] {
+  background: #30C3D9;
+  border-color: #30C3D9;
+  color: #ffffff;
+}
+
+.btn-dot {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 1px solid var(--color-border);
+  background: #ffffff;
+  color: var(--color-text-primary);
+  cursor: pointer;
+  font-size: 18px;
+  line-height: 24px;
+  font-weight: 700;
+}
+
+.caption-settings {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--color-border);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.caption-setting-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.caption-setting-row select {
+  width: 165px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-size: 13px;
+}
+
 /* Buttons */
 .btn {
   width: 100%;

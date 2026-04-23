@@ -205,7 +205,7 @@
   const HARD_RESTORE_GRACE_MS = 500; // Extra margin to force unmute
   const CLEAN_CAPTION_STALE_MS = 1200;
   const CLEAN_CAPTION_LOOKAHEAD_SEC = 0.15;
-  const CLEAN_CC_LOG_PREFIX = '[ISWEEP][CLEAN_CC]';
+  const CLEAN_CAPTION_LOG_PREFIX = '[ISWEEP][CLEAN_CC]';
 
   // Audio watch-ahead constants.
   const AUDIO_AHEAD_LOG_PREFIX = '[ISWEEP][AUDIO_AHEAD]';
@@ -272,6 +272,9 @@
     if (!Number.isFinite(start) || start < 0) return null;
     const action = String(raw.action || 'none');
     const hasDisplayText = Boolean(getCleanCaptionDisplayText(raw));
+    // Some markers are display-only: they carry replacement text for clean captions
+    // but do not trigger playback actions like mute/skip/fast_forward. Keep those
+    // markers valid so caption cleanup can work independently of playback control.
     if (!['mute', 'skip', 'fast_forward'].includes(action) && !hasDisplayText) return null;
     const computedEnd = Number.isFinite(end) && end > start
       ? end
@@ -2014,7 +2017,8 @@
     const text = (rawText || '').trim();
     if (!text || text.length < 2 || text === lastCaptionText) return; // Ignore empty/short/duplicate
 
-    const video = findVideo();
+    let appliedMuteThisCycle = false;
+    // Record when a live caption was last seen so getBestCleanCaptionText can ignore stale caption text.
     const now = video && typeof video.currentTime === 'number' ? video.currentTime : null; // Current playback time
     const prevDuration = captionStartTime !== null && now !== null ? Math.max(0, now - captionStartTime) : null; // Duration of previous caption
     let appliedMuteThisCycle = false;
@@ -2105,7 +2109,7 @@
           processEndedCaption(lastCaptionText, durationSeconds, now);
           // A disappearing caption is a boundary; restore audio immediately and rely on safety only as fallback.
           restoreMuteAfterCaptionChange();
-        }
+      lastLiveCaptionObservedAtMs = -1;
       }
       lastCaptionText = '';
       captionStartTime = null;

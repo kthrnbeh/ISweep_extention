@@ -388,12 +388,14 @@ async function handleMarkerAnalyze(videoId, forceRefresh = false) {
     }
 
     const payload = responseBody ? JSON.parse(responseBody) : {};
+    const normalizedCleanedCaptions = Array.isArray(payload.cleaned_captions)
+      ? payload.cleaned_captions
+      : (Array.isArray(payload.clean_captions) ? payload.clean_captions : []);
     const normalized = {
       status: payload.status || 'error',
       source: payload.source || null,
       events: Array.isArray(payload.events) ? payload.events : [],
-      cleaned_captions: Array.isArray(payload.cleaned_captions) ? payload.cleaned_captions : [],
-      clean_captions: Array.isArray(payload.clean_captions) ? payload.clean_captions : [],
+      cleaned_captions: normalizedCleanedCaptions,
       failure_reason: payload.failure_reason || null,
     };
 

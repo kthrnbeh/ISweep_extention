@@ -215,3 +215,45 @@ test('marker text is used when timed metadata matches and no pre-analyzed captio
     stale: false,
   });
 });
+
+test('timed entry bounds prefer word timings over segment bounds', () => {
+  const hooks = loadYoutubeTimingHooks();
+  const bounds = hooks.getEntryTimingBounds({
+    start_seconds: 10.0,
+    end_seconds: 14.0,
+    words: [
+      { word: 'What', start: 10.4, end: 10.8 },
+      { word: 'heck', start: 10.8, end: 11.2 },
+    ],
+  });
+
+  assert.deepEqual(bounds, {
+    start_seconds: 10.4,
+    end_seconds: 11.2,
+  });
+});
+
+test('best clean caption selection matches using word-timing lookahead', () => {
+  const hooks = loadYoutubeTimingHooks();
+  const result = hooks.getBestCleanCaptionText('live fallback', 12.86, {
+    preAnalyzedCaptions: [
+      {
+        start_seconds: 12.0,
+        end_seconds: 14.0,
+        clean_text: 'word aligned',
+        words: [
+          { word: 'badword', start: 12.4, end: 12.8 },
+          { word: 'clean', start: 12.9, end: 13.2 },
+        ],
+        clean_resume_time: 12.9,
+      },
+    ],
+    markerEntries: [],
+    liveCaptionObservedAtMs: Date.now(),
+    nowMs: Date.now(),
+  });
+
+  assert.equal(result.source, 'pre_analyzed');
+  assert.equal(result.text, 'word aligned');
+  assert.equal(result.cleanResumeTime, 12.9);
+});

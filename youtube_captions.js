@@ -205,7 +205,7 @@
   const HARD_RESTORE_GRACE_MS = 500; // Extra margin to force unmute
   const CLEAN_CAPTION_STALE_MS = 1200;
   const CLEAN_CAPTION_LOOKAHEAD_SEC = 0.15;
-  const CLEAN_CAPTION_LOG_PREFIX = '[ISWEEP][CLEAN_CC]';
+  const CLEAN_CC_LOG_PREFIX = '[ISWEEP][CLEAN_CC]';
 
   // Audio watch-ahead constants.
   const AUDIO_AHEAD_LOG_PREFIX = '[ISWEEP][AUDIO_AHEAD]';
@@ -294,6 +294,13 @@
       clean_text: typeof raw.clean_text === 'string' ? raw.clean_text : null,
       cleaned_text: typeof raw.cleaned_text === 'string' ? raw.cleaned_text : null,
       caption_text: typeof raw.caption_text === 'string' ? raw.caption_text : null,
+      clean_resume_time: Number.isFinite(Number(raw.clean_resume_time))
+        ? Number(raw.clean_resume_time)
+        : null,
+      blocked_word_start: Number.isFinite(Number(raw.blocked_word_start))
+        ? Number(raw.blocked_word_start)
+        : null,
+      words: normalizeTimedWords(raw.words),
     };
   }
 
@@ -306,6 +313,45 @@
     const candidates = [entry.clean_text, entry.cleaned_text, entry.caption_text, entry.text];
     const match = candidates.find((value) => typeof value === 'string' && value.trim());
     return match ? match.trim() : '';
+  }
+
+  function normalizeTimedWords(words) {
+    if (!Array.isArray(words)) return [];
+    return words
+      .map((wordEntry) => {
+        if (!wordEntry || typeof wordEntry !== 'object') return null;
+        const start = Number(wordEntry.start);
+        const end = Number(wordEntry.end);
+        const word = String(wordEntry.word || '').trim();
+        if (!word || !Number.isFinite(start) || !Number.isFinite(end)) return null;
+        if (end < start) return null;
+        return { word, start, end };
+      })
+      .filter(Boolean)
+      .sort((a, b) => a.start - b.start);
+  }
+
+  function getEntryTimingBounds(entry) {
+    if (!entry || typeof entry !== 'object') return null;
+    const fallbackStart = Number(entry.start_seconds);
+    const fallbackEnd = Number(entry.end_seconds);
+    const words = normalizeTimedWords(entry.words);
+
+    if (words.length) {
+      return {
+        start_seconds: words[0].start,
+        end_seconds: words[words.length - 1].end,
+      };
+    }
+
+    if (!Number.isFinite(fallbackStart) || !Number.isFinite(fallbackEnd) || fallbackEnd <= fallbackStart) {
+      return null;
+    }
+
+    return {
+      start_seconds: fallbackStart,
+      end_seconds: fallbackEnd,
+    };
   }
 
   function normalizePreAnalyzedCaptions(captions) {
@@ -324,6 +370,10 @@
           clean_text: typeof entry.clean_text === 'string' ? entry.clean_text : null,
           cleaned_text: typeof entry.cleaned_text === 'string' ? entry.cleaned_text : null,
           caption_text: typeof entry.caption_text === 'string' ? entry.caption_text : null,
+          clean_resume_time: Number.isFinite(Number(entry.clean_resume_time))
+            ? Number(entry.clean_resume_time)
+            : null,
+          words: normalizeTimedWords(entry.words),
         };
       })
       .filter(Boolean)
@@ -335,14 +385,17 @@
     const now = Number(nowSec);
     const exact = entries.find((entry) => {
       const displayText = getCleanCaptionDisplayText(entry);
-      return displayText && now >= entry.start_seconds && now <= entry.end_seconds;
+      const bounds = getEntryTimingBounds(entry);
+      return displayText && bounds && now >= bounds.start_seconds && now <= bounds.end_seconds;
     });
     if (exact) return exact;
     return entries.find((entry) => {
       const displayText = getCleanCaptionDisplayText(entry);
+      const bounds = getEntryTimingBounds(entry);
       return displayText
-        && now >= entry.start_seconds - lookaheadSec
-        && now <= entry.end_seconds + lookaheadSec;
+        && bounds
+        && now >= bounds.start_seconds - lookaheadSec
+        && now <= bounds.end_seconds + lookaheadSec;
     }) || null;
   }
 
@@ -362,6 +415,9 @@
         text: getCleanCaptionDisplayText(preAnalyzedEntry),
         source: 'pre_analyzed',
         stale: false,
+        cleanResumeTime: Number.isFinite(Number(preAnalyzedEntry.clean_resume_time))
+          ? Number(preAnalyzedEntry.clean_resume_time)
+          : null,
       };
     }
 
@@ -371,6 +427,9 @@
         text: getCleanCaptionDisplayText(markerTextEntry),
         source: 'marker_text',
         stale: false,
+        cleanResumeTime: Number.isFinite(Number(markerTextEntry.clean_resume_time))
+          ? Number(markerTextEntry.clean_resume_time)
+          : null,
       };
     }
 
@@ -388,6 +447,7 @@
         text: maskedLiveText,
         source: 'live_masked',
         stale: false,
+        cleanResumeTime: null,
       };
     }
 
@@ -395,6 +455,7 @@
       text: '',
       source: null,
       stale: false,
+      cleanResumeTime: null,
     };
   }
 
@@ -430,12 +491,24 @@
     if (!video) return;
 
     if (marker.action === 'mute') {
-      applyMuteWindow(marker.start_seconds, marker.end_seconds, `marker:${marker.id}`);
+      const markerStartSec = Number.isFinite(Number(marker.blocked_word_start))
+        ? Math.max(Number(marker.blocked_word_start), marker.start_seconds)
+        : marker.start_seconds;
+      let markerEndSec = marker.end_seconds;
+      if (Number.isFinite(Number(marker.clean_resume_time))) {
+        const resumeSec = Number(marker.clean_resume_time);
+        if (resumeSec > markerStartSec) {
+          markerEndSec = Math.min(markerEndSec, resumeSec);
+        }
+      }
+      applyMuteWindow(markerStartSec, markerEndSec, `marker:${marker.id}`);
       console.log(MARKER_LOG_PREFIX, 'marker applied', {
         id: marker.id,
         action: 'mute',
-        start: marker.start_seconds,
-        end: marker.end_seconds,
+        start: markerStartSec,
+        end: markerEndSec,
+        clean_resume_time: marker.clean_resume_time || null,
+        blocked_word_start: marker.blocked_word_start || null,
         source: marker.source || 'unknown',
       });
       return;
@@ -2017,7 +2090,7 @@
     const text = (rawText || '').trim();
     if (!text || text.length < 2 || text === lastCaptionText) return; // Ignore empty/short/duplicate
 
-    let appliedMuteThisCycle = false;
+    const video = findVideo();
     // Record when a live caption was last seen so getBestCleanCaptionText can ignore stale caption text.
     const now = video && typeof video.currentTime === 'number' ? video.currentTime : null; // Current playback time
     const prevDuration = captionStartTime !== null && now !== null ? Math.max(0, now - captionStartTime) : null; // Duration of previous caption
@@ -2068,6 +2141,8 @@
       estimatePlaceholderMuteWindow,
       estimatePlaceholderWordWindow,
       getCleanCaptionDisplayText,
+      normalizeTimedWords,
+      getEntryTimingBounds,
       findTimedCleanCaptionEntry,
       getBestCleanCaptionText,
       normalizeCleanCaptionSettings,
@@ -2109,7 +2184,8 @@
           processEndedCaption(lastCaptionText, durationSeconds, now);
           // A disappearing caption is a boundary; restore audio immediately and rely on safety only as fallback.
           restoreMuteAfterCaptionChange();
-      lastLiveCaptionObservedAtMs = -1;
+          lastLiveCaptionObservedAtMs = 0;
+        }
       }
       lastCaptionText = '';
       captionStartTime = null;

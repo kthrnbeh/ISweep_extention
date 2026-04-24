@@ -205,6 +205,8 @@
   const HARD_RESTORE_GRACE_MS = 500; // Extra margin to force unmute
   const CLEAN_CAPTION_STALE_MS = 1200;
   const CLEAN_CAPTION_LOOKAHEAD_SEC = 0.15;
+  const CLEAN_CC_BRIDGE_GAP_MS = 250;
+  const CLEAN_CC_FADE_MS = 120;
   const CLEAN_CC_LOG_PREFIX = '[ISWEEP][CLEAN_CC]';
 
   // Audio watch-ahead constants.
@@ -245,6 +247,9 @@
   let preAnalyzedCleanCaptions = [];
   let lastLiveCaptionObservedAtMs = 0;
   let lastRenderedCleanCaptionKey = '';
+  let lastRenderedOverlayText = '';
+  let lastRenderedOverlaySource = 'none';
+  let lastRenderedOverlayAtMs = 0;
 
   // Audio watch-ahead state.
   let audioCtx = null;
@@ -1097,16 +1102,18 @@
     }
   }
 
-  chrome.storage.onChanged.addListener((changes, areaName) => {
-    if (areaName !== 'local') return;
-    if (changes[STORAGE_KEYS.PREFS]) {
-      cachedPreferences = changes[STORAGE_KEYS.PREFS].newValue || null;
-    }
-    if (changes[STORAGE_KEYS.CLEAN_CAPTION_SETTINGS]) {
-      cleanCaptionSettings = normalizeCleanCaptionSettings(changes[STORAGE_KEYS.CLEAN_CAPTION_SETTINGS].newValue);
-      applyCleanCaptionOverlayStyles();
-    }
-  });
+  if (typeof chrome !== 'undefined' && chrome?.storage?.onChanged?.addListener) {
+    chrome.storage.onChanged.addListener((changes, areaName) => {
+      if (areaName !== 'local') return;
+      if (changes[STORAGE_KEYS.PREFS]) {
+        cachedPreferences = changes[STORAGE_KEYS.PREFS].newValue || null;
+      }
+      if (changes[STORAGE_KEYS.CLEAN_CAPTION_SETTINGS]) {
+        cleanCaptionSettings = normalizeCleanCaptionSettings(changes[STORAGE_KEYS.CLEAN_CAPTION_SETTINGS].newValue);
+        applyCleanCaptionOverlayStyles();
+      }
+    });
+  }
 
   async function requestPrefSync() {
     try {
@@ -1305,6 +1312,8 @@
     text.style.minWidth = '140px';
     text.style.wordBreak = 'break-word';
     text.style.pointerEvents = 'none';
+    text.style.opacity = '1';
+    text.style.transition = `opacity ${CLEAN_CC_FADE_MS}ms ease`;
 
     overlay.appendChild(text);
     document.body.appendChild(overlay);
@@ -1356,46 +1365,113 @@
     applyCleanCaptionOverlayStyles();
   }
 
+  function resolveOverlayDisplayState(overlayState, previousState, nowMs, bridgeGapMs = CLEAN_CC_BRIDGE_GAP_MS) {
+    const prior = previousState && typeof previousState === 'object'
+      ? previousState
+      : { text: '', source: 'none', visible: false, updatedAtMs: 0 };
+
+    if (overlayState.stale) {
+      return { text: '', source: 'stale', visible: false, stale: true, bridged: false };
+    }
+
+    if (overlayState.text) {
+      return {
+        text: overlayState.text,
+        source: overlayState.source || 'live_masked',
+        visible: true,
+        stale: false,
+        bridged: false,
+      };
+    }
+
+    const ageMs = Math.max(0, nowMs - Number(prior.updatedAtMs || 0));
+    if (prior.visible && prior.text && ageMs <= bridgeGapMs) {
+      return {
+        text: prior.text,
+        source: prior.source || 'bridge',
+        visible: true,
+        stale: false,
+        bridged: true,
+      };
+    }
+
+    return { text: '', source: 'none', visible: false, stale: false, bridged: false };
+  }
+
   function updateCleanOverlay(liveText, nowSec) {
     ensureCleanCaptionOverlay();
     if (!cleanCaptionOverlayEl || !cleanCaptionTextEl) return;
 
     const overlayState = getBestCleanCaptionText(liveText, nowSec);
-    const nextKey = `${overlayState.source || 'none'}:${overlayState.text}`;
+    const nowMs = Date.now();
+    const resolved = resolveOverlayDisplayState(
+      overlayState,
+      {
+        text: lastRenderedOverlayText,
+        source: lastRenderedOverlaySource,
+        visible: Boolean(lastRenderedOverlayText),
+        updatedAtMs: lastRenderedOverlayAtMs,
+      },
+      nowMs,
+      CLEAN_CC_BRIDGE_GAP_MS,
+    );
+    const nextKey = `${resolved.source || 'none'}:${resolved.text}`;
 
-    if (overlayState.stale) {
+    if (resolved.stale) {
       if (lastRenderedCleanCaptionKey !== 'stale') {
-        console.log(CLEAN_CC_LOG_PREFIX, 'skipped stale caption', {
-          source: overlayState.source,
+        console.log(CLEAN_CC_LOG_PREFIX, 'stale clear', {
+          source: overlayState.source || 'live_masked',
           nowSec,
         });
       }
       cleanCaptionTextEl.textContent = '';
+      cleanCaptionTextEl.style.opacity = '0';
       cleanCaptionOverlayEl.style.visibility = 'hidden';
       cleanCaptionOverlayEl.dataset.source = 'stale';
       lastRenderedCleanCaptionKey = 'stale';
-    } else if (!overlayState.text) {
+      lastRenderedOverlayText = '';
+      lastRenderedOverlaySource = 'stale';
+      lastRenderedOverlayAtMs = nowMs;
+    } else if (!resolved.visible) {
       if (lastRenderedCleanCaptionKey !== 'none') {
         console.log(CLEAN_CC_LOG_PREFIX, 'no active caption text', { nowSec });
       }
       cleanCaptionTextEl.textContent = '';
+      cleanCaptionTextEl.style.opacity = '0';
       cleanCaptionOverlayEl.style.visibility = 'hidden';
       cleanCaptionOverlayEl.dataset.source = 'none';
       lastRenderedCleanCaptionKey = 'none';
+      lastRenderedOverlayText = '';
+      lastRenderedOverlaySource = 'none';
+      lastRenderedOverlayAtMs = nowMs;
     } else {
-      cleanCaptionTextEl.textContent = overlayState.text;
-      cleanCaptionOverlayEl.style.visibility = 'visible';
-      cleanCaptionOverlayEl.dataset.source = overlayState.source || 'live_masked';
-      if (lastRenderedCleanCaptionKey !== nextKey) {
-        console.log(CLEAN_CC_LOG_PREFIX, 'text updated', {
-          source: overlayState.source || 'live_masked',
-          text: overlayState.text,
-        });
-        console.log(CLEAN_CC_LOG_PREFIX, 'overlay source', {
-          source: overlayState.source || 'live_masked',
+      if (resolved.bridged && lastRenderedCleanCaptionKey !== nextKey) {
+        console.log(CLEAN_CC_LOG_PREFIX, 'bridge gap', {
+          source: resolved.source,
+          bridge_ms: CLEAN_CC_BRIDGE_GAP_MS,
         });
       }
+
+      cleanCaptionTextEl.style.opacity = '0';
+      cleanCaptionTextEl.textContent = resolved.text;
+      cleanCaptionOverlayEl.style.visibility = 'visible';
+      cleanCaptionOverlayEl.dataset.source = resolved.source || 'live_masked';
+      if (lastRenderedCleanCaptionKey !== nextKey) {
+        console.log(CLEAN_CC_LOG_PREFIX, 'fade update', {
+          source: resolved.source || 'live_masked',
+          fade_ms: CLEAN_CC_FADE_MS,
+        });
+        console.log(CLEAN_CC_LOG_PREFIX, 'overlay source', {
+          source: resolved.source || 'live_masked',
+        });
+      }
+      requestAnimationFrame(() => {
+        if (cleanCaptionTextEl) cleanCaptionTextEl.style.opacity = '1';
+      });
       lastRenderedCleanCaptionKey = nextKey;
+      lastRenderedOverlayText = resolved.text;
+      lastRenderedOverlaySource = resolved.source || 'live_masked';
+      lastRenderedOverlayAtMs = nowMs;
     }
 
     if (!cleanCaptionSettings.cleanCaptionsEnabled) {
@@ -2145,6 +2221,7 @@
       getEntryTimingBounds,
       findTimedCleanCaptionEntry,
       getBestCleanCaptionText,
+      resolveOverlayDisplayState,
       normalizeCleanCaptionSettings,
       toCleanCaptionText,
       hasNearbyAudioMuteMarker,
@@ -2153,6 +2230,8 @@
       constants: {
         CLEAN_CAPTION_STALE_MS,
         CLEAN_CAPTION_LOOKAHEAD_SEC,
+        CLEAN_CC_BRIDGE_GAP_MS,
+        CLEAN_CC_FADE_MS,
         PLACEHOLDER_WORD_PREROLL_SEC,
         PLACEHOLDER_BLEED_SEC,
         MIN_PLACEHOLDER_MUTE_SEC,

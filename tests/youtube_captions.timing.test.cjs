@@ -97,7 +97,8 @@ test('clean caption settings normalization applies defaults safely', () => {
   assert.equal(normalized.cleanCaptionsEnabled, false);
   assert.equal(normalized.cleanCaptionStyle, 'white_black');
   assert.equal(normalized.cleanCaptionTextSize, 'large');
-  assert.deepEqual(normalized.cleanCaptionPosition, { x: 0.4, y: 0.7 });
+  assert.equal(normalized.cleanCaptionPosition.x, 0.4);
+  assert.equal(normalized.cleanCaptionPosition.y, 0.7);
 
   const fallback = hooks.normalizeCleanCaptionSettings({
     cleanCaptionStyle: 'invalid',
@@ -106,7 +107,8 @@ test('clean caption settings normalization applies defaults safely', () => {
   assert.equal(fallback.cleanCaptionsEnabled, true);
   assert.equal(fallback.cleanCaptionStyle, 'transparent_white');
   assert.equal(fallback.cleanCaptionTextSize, 'medium');
-  assert.deepEqual(fallback.cleanCaptionPosition, { x: 0.5, y: 0.8 });
+  assert.equal(fallback.cleanCaptionPosition.x, 0.5);
+  assert.equal(fallback.cleanCaptionPosition.y, 0.8);
 });
 
 test('clean caption text masks blocked words', () => {
@@ -132,11 +134,10 @@ test('clean caption text follows precedence order: pre-analyzed, then marker, th
     nowMs,
   });
 
-  assert.deepEqual(preAnalyzedResult, {
-    text: 'pre analyzed line',
-    source: 'pre_analyzed',
-    stale: false,
-  });
+  assert.equal(preAnalyzedResult.text, 'pre analyzed line');
+  assert.equal(preAnalyzedResult.source, 'pre_analyzed');
+  assert.equal(preAnalyzedResult.stale, false);
+  assert.equal(preAnalyzedResult.cleanResumeTime, null);
 
   const markerResult = hooks.getBestCleanCaptionText('live fallback', 15.05, {
     preAnalyzedCaptions: [],
@@ -147,11 +148,10 @@ test('clean caption text follows precedence order: pre-analyzed, then marker, th
     nowMs,
   });
 
-  assert.deepEqual(markerResult, {
-    text: 'marker caption line',
-    source: 'marker_text',
-    stale: false,
-  });
+  assert.equal(markerResult.text, 'marker caption line');
+  assert.equal(markerResult.source, 'marker_text');
+  assert.equal(markerResult.stale, false);
+  assert.equal(markerResult.cleanResumeTime, null);
 
   const liveResult = hooks.getBestCleanCaptionText('that was shit', 20, {
     preAnalyzedCaptions: [],
@@ -191,11 +191,9 @@ test('stale live caption text is not displayed', () => {
     nowMs,
   });
 
-  assert.deepEqual(result, {
-    text: '',
-    source: 'live_masked',
-    stale: true,
-  });
+  assert.equal(result.text, '');
+  assert.equal(result.source, 'live_masked');
+  assert.equal(result.stale, true);
 });
 
 test('marker text is used when timed metadata matches and no pre-analyzed caption exists', () => {
@@ -209,11 +207,68 @@ test('marker text is used when timed metadata matches and no pre-analyzed captio
     nowMs: Date.now(),
   });
 
-  assert.deepEqual(result, {
-    text: 'marker caption line',
-    source: 'marker_text',
-    stale: false,
+  assert.equal(result.text, 'marker caption line');
+  assert.equal(result.source, 'marker_text');
+  assert.equal(result.stale, false);
+  assert.equal(result.cleanResumeTime, null);
+});
+
+test('overlay bridges small timing gaps', () => {
+  const hooks = loadYoutubeTimingHooks();
+  const nowMs = 1000;
+  const resolved = hooks.resolveOverlayDisplayState(
+    { text: '', source: null, stale: false },
+    {
+      text: 'previous caption',
+      source: 'pre_analyzed',
+      visible: true,
+      updatedAtMs: nowMs - 120,
+    },
+    nowMs,
+    hooks.constants.CLEAN_CC_BRIDGE_GAP_MS,
+  );
+
+  assert.equal(resolved.visible, true);
+  assert.equal(resolved.bridged, true);
+  assert.equal(resolved.text, 'previous caption');
+  assert.equal(resolved.source, 'pre_analyzed');
+});
+
+test('stale captions still clear', () => {
+  const hooks = loadYoutubeTimingHooks();
+  const resolved = hooks.resolveOverlayDisplayState(
+    { text: '', source: 'live_masked', stale: true },
+    {
+      text: 'old caption',
+      source: 'pre_analyzed',
+      visible: true,
+      updatedAtMs: 1000,
+    },
+    1100,
+    hooks.constants.CLEAN_CC_BRIDGE_GAP_MS,
+  );
+
+  assert.equal(resolved.visible, false);
+  assert.equal(resolved.stale, true);
+  assert.equal(resolved.text, '');
+  assert.equal(resolved.source, 'stale');
+});
+
+test('pre-analyzed remains preferred over live-masked', () => {
+  const hooks = loadYoutubeTimingHooks();
+  const nowMs = Date.now();
+  const result = hooks.getBestCleanCaptionText('this is shit', 42.1, {
+    preAnalyzedCaptions: [
+      { start_seconds: 42.0, end_seconds: 42.6, clean_text: 'clean from pre' },
+    ],
+    markerEntries: [],
+    liveCaptionObservedAtMs: nowMs,
+    nowMs,
   });
+
+  assert.equal(result.source, 'pre_analyzed');
+  assert.equal(result.text, 'clean from pre');
+  assert.equal(result.stale, false);
 });
 
 test('timed entry bounds prefer word timings over segment bounds', () => {
@@ -227,10 +282,8 @@ test('timed entry bounds prefer word timings over segment bounds', () => {
     ],
   });
 
-  assert.deepEqual(bounds, {
-    start_seconds: 10.4,
-    end_seconds: 11.2,
-  });
+  assert.equal(bounds.start_seconds, 10.4);
+  assert.equal(bounds.end_seconds, 11.2);
 });
 
 test('best clean caption selection matches using word-timing lookahead', () => {

@@ -432,7 +432,7 @@ async function handleMarkerAnalyze(videoId, forceRefresh = false) {
 }
 
 // Receives a real-time audio chunk from youtube_captions.js, forwards to /audio/analyze,
-// and returns { status, source, events, failure_reason, chunk_offset_seconds }.
+// and returns { status, source, events, cleaned_captions, failure_reason, cached }.
 async function handleAudioAhead(videoId, audioChunk, mimeType, startSeconds, endSeconds) {
   const AUDIO_LOG = '[ISWEEP][AUDIO_AHEAD]';
   const cleanVideoId = (videoId || '').trim();
@@ -479,6 +479,8 @@ async function handleAudioAhead(videoId, audioChunk, mimeType, startSeconds, end
         video_id: cleanVideoId,
         audio_chunk: audioChunk,
         mime_type: mimeType || 'audio/wav',
+        chunk_start_seconds: normalizedStart,
+        chunk_end_seconds: normalizedEnd,
         start_seconds: normalizedStart,
         end_seconds: normalizedEnd,
       }),
@@ -507,7 +509,9 @@ async function handleAudioAhead(videoId, audioChunk, mimeType, startSeconds, end
       start_seconds: normalizedStart,
       end_seconds: normalizedEnd,
       events: Array.isArray(payload.events) ? payload.events : [],
+      cleaned_captions: Array.isArray(payload.cleaned_captions) ? payload.cleaned_captions : [],
       failure_reason: payload.failure_reason || null,
+      cached: payload.cached === true,
     };
     console.log(AUDIO_LOG, 'chunk result', {
       videoId: cleanVideoId,

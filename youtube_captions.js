@@ -174,10 +174,15 @@
     return Boolean(video.muted) === Boolean(targetMuted);
   }
 
+  function shouldISweepUnmute(previousMutedState) {
+    return previousMutedState === false;
+  }
+
   function restoreMuteState(reason) {
     const video = findVideo();
     if (video && previousMuteState !== null) {
-      setMutedState(previousMuteState, `restore:${reason}`);
+      const targetMuted = shouldISweepUnmute(previousMuteState) ? false : true;
+      setMutedState(targetMuted, `restore:${reason}`);
       console.log('[ISweep Timing] mute restored', { reason });
     }
     clearMuteState(reason);
@@ -211,6 +216,8 @@
 
   // Audio watch-ahead constants.
   const AUDIO_AHEAD_LOG_PREFIX = '[ISWEEP][AUDIO_AHEAD]';
+  const AUDIO_CAPTURE_LOG_PREFIX = '[ISWEEP][AUDIO_CAPTURE]';
+  const WORD_MUTE_LOG_PREFIX = '[ISWEEP][WORD_MUTE]';
   const FALLBACK_LOG_PREFIX = '[ISWEEP][FALLBACK]';
   // 300 ms chunks give the scheduler a much tighter profanity timing window
   // than 1 s chunks without flooding the backend with near-frame-sized requests.
@@ -245,6 +252,8 @@
   let cleanCaptionTextEl = null;
   let cleanCaptionDragState = null;
   let preAnalyzedCleanCaptions = [];
+  let preCachedAudioCleanCaptions = [];
+  let liveAudioCleanCaptions = [];
   let lastLiveCaptionObservedAtMs = 0;
   let lastRenderedCleanCaptionKey = '';
   let lastRenderedOverlayText = '';
@@ -405,6 +414,13 @@
   }
 
   function getBestCleanCaptionText(liveText, nowSec, options = {}) {
+    // Priority order: pre-cached audio STT -> live audio STT -> pre-analyzed transcript -> marker text -> live caption fallback.
+    const preCachedAudioCaptions = Array.isArray(options.preCachedAudioCaptions)
+      ? options.preCachedAudioCaptions
+      : preCachedAudioCleanCaptions;
+    const liveAudioCaptions = Array.isArray(options.liveAudioCaptions)
+      ? options.liveAudioCaptions
+      : liveAudioCleanCaptions;
     const preAnalyzedCaptions = Array.isArray(options.preAnalyzedCaptions) ? options.preAnalyzedCaptions : preAnalyzedCleanCaptions;
     const markers = Array.isArray(options.markerEntries) ? options.markerEntries : markerEvents;
     const liveCaptionObservedAtMs = Number.isFinite(Number(options.liveCaptionObservedAtMs))
@@ -413,6 +429,30 @@
     const nowMs = Number.isFinite(Number(options.nowMs)) ? Number(options.nowMs) : Date.now();
     const lookaheadSec = Number.isFinite(Number(options.lookaheadSec)) ? Number(options.lookaheadSec) : CLEAN_CAPTION_LOOKAHEAD_SEC;
     const staleMs = Number.isFinite(Number(options.staleMs)) ? Number(options.staleMs) : CLEAN_CAPTION_STALE_MS;
+
+    const preCachedAudioEntry = findTimedCleanCaptionEntry(preCachedAudioCaptions, nowSec, lookaheadSec);
+    if (preCachedAudioEntry) {
+      return {
+        text: getCleanCaptionDisplayText(preCachedAudioEntry),
+        source: 'audio_stt_cached',
+        stale: false,
+        cleanResumeTime: Number.isFinite(Number(preCachedAudioEntry.clean_resume_time))
+          ? Number(preCachedAudioEntry.clean_resume_time)
+          : null,
+      };
+    }
+
+    const liveAudioEntry = findTimedCleanCaptionEntry(liveAudioCaptions, nowSec, lookaheadSec);
+    if (liveAudioEntry) {
+      return {
+        text: getCleanCaptionDisplayText(liveAudioEntry),
+        source: 'audio_stt_live',
+        stale: false,
+        cleanResumeTime: Number.isFinite(Number(liveAudioEntry.clean_resume_time))
+          ? Number(liveAudioEntry.clean_resume_time)
+          : null,
+      };
+    }
 
     const preAnalyzedEntry = findTimedCleanCaptionEntry(preAnalyzedCaptions, nowSec, lookaheadSec);
     if (preAnalyzedEntry) {
@@ -496,16 +536,15 @@
     if (!video) return;
 
     if (marker.action === 'mute') {
-      const markerStartSec = Number.isFinite(Number(marker.blocked_word_start))
-        ? Math.max(Number(marker.blocked_word_start), marker.start_seconds)
-        : marker.start_seconds;
-      let markerEndSec = marker.end_seconds;
-      if (Number.isFinite(Number(marker.clean_resume_time))) {
-        const resumeSec = Number(marker.clean_resume_time);
-        if (resumeSec > markerStartSec) {
-          markerEndSec = Math.min(markerEndSec, resumeSec);
-        }
-      }
+      const muteWindow = getMuteWindowFromMarker(marker);
+      const markerStartSec = muteWindow.start_seconds;
+      const markerEndSec = muteWindow.end_seconds;
+      console.log(WORD_MUTE_LOG_PREFIX, 'applied', {
+        id: marker.id,
+        source: marker.source || 'unknown',
+        blocked_word_start: marker.blocked_word_start || markerStartSec,
+        clean_resume_time: marker.clean_resume_time || markerEndSec,
+      });
       applyMuteWindow(markerStartSec, markerEndSec, `marker:${marker.id}`);
       console.log(MARKER_LOG_PREFIX, 'marker applied', {
         id: marker.id,
@@ -516,6 +555,12 @@
         blocked_word_start: marker.blocked_word_start || null,
         source: marker.source || 'unknown',
       });
+      if (Number.isFinite(Number(marker.clean_resume_time))) {
+        console.log(WORD_MUTE_LOG_PREFIX, 'clean resume', {
+          id: marker.id,
+          clean_resume_time: marker.clean_resume_time,
+        });
+      }
       return;
     }
 
@@ -548,6 +593,23 @@
       }, durationMs || 8000);
       console.log(MARKER_LOG_PREFIX, 'marker fired', { id: marker.id, action: 'fast_forward', durationMs, restoreRate });
     }
+  }
+
+  function getMuteWindowFromMarker(marker) {
+    const markerStartSec = Number.isFinite(Number(marker && marker.blocked_word_start))
+      ? Math.max(Number(marker.blocked_word_start), Number(marker && marker.start_seconds) || 0)
+      : Number(marker && marker.start_seconds) || 0;
+    let markerEndSec = Number(marker && marker.end_seconds) || markerStartSec;
+    if (Number.isFinite(Number(marker && marker.clean_resume_time))) {
+      const resumeSec = Number(marker.clean_resume_time);
+      if (resumeSec > markerStartSec) {
+        markerEndSec = Math.min(markerEndSec, resumeSec);
+      }
+    }
+    return {
+      start_seconds: markerStartSec,
+      end_seconds: Math.max(markerEndSec, markerStartSec),
+    };
   }
 
   function tickMarkerScheduler() {
@@ -753,8 +815,14 @@
       samplesCollected: sampleCount,
       wavBytes: wavBuf.byteLength,
     });
+    console.log(AUDIO_CAPTURE_LOG_PREFIX, 'chunk ready', {
+      videoId, chunk_start_seconds: chunkStartSec, chunk_end_seconds: chunkEndSec,
+    });
     console.log(AUDIO_AHEAD_LOG_PREFIX, 'sending chunk', {
       videoId, start_seconds: chunkStartSec, end_seconds: chunkEndSec,
+    });
+    console.log(AUDIO_CAPTURE_LOG_PREFIX, 'chunk sent', {
+      videoId, chunk_start_seconds: chunkStartSec, chunk_end_seconds: chunkEndSec,
     });
     chrome.runtime.sendMessage({
       type: 'isweep_audio_chunk',
@@ -779,6 +847,14 @@
       if (response.status === 'ready' && Array.isArray(response.events) && response.events.length > 0) {
         mergeAudioMarkers(response.events, videoId);
       }
+      if (response.status === 'ready' && Array.isArray(response.cleaned_captions)) {
+        const normalizedAudioCaptions = normalizePreAnalyzedCaptions(response.cleaned_captions);
+        if (response.cached === true) {
+          preCachedAudioCleanCaptions = normalizedAudioCaptions;
+        } else {
+          liveAudioCleanCaptions = normalizedAudioCaptions;
+        }
+      }
     }).catch((err) => {
       console.warn(AUDIO_AHEAD_LOG_PREFIX, 'failure_reason: analyze_exception', {
         videoId, start_seconds: chunkStartSec, end_seconds: chunkEndSec,
@@ -796,7 +872,7 @@
     }
     const normalized = (Array.isArray(newEvents) ? newEvents : [])
       .map(normalizeMarkerEvent)
-      .map((event) => (event ? { ...event, source: event.source || 'audio_chunk' } : null))
+      .map((event) => (event ? { ...event, source: event.source || 'audio_stt' } : null))
       .filter(Boolean)
       .filter((e) => !firedMarkerIds.has(e.id));
     if (!normalized.length) return;
@@ -825,6 +901,16 @@
       videoId: activeVideoId,
       addedCount: normalized.length,
       totalCount: markerEvents.length,
+    });
+    normalized.forEach((event) => {
+      if (event.action === 'mute') {
+        console.log(WORD_MUTE_LOG_PREFIX, 'marker scheduled', {
+          id: event.id,
+          source: event.source || 'audio_stt',
+          blocked_word_start: event.blocked_word_start || event.start_seconds,
+          clean_resume_time: event.clean_resume_time || event.end_seconds,
+        });
+      }
     });
   }
 
@@ -978,6 +1064,10 @@
       audioAheadVideoId = activeVideoId;
       audioChunkStartSec = video.currentTime || 0;
       audioSampleBufs = [];
+      console.log(AUDIO_CAPTURE_LOG_PREFIX, 'started', {
+        videoId: activeVideoId,
+        chunkSec: AUDIO_CHUNK_SEC,
+      });
       console.log(AUDIO_AHEAD_LOG_PREFIX, 'audio capture started', {
         videoId: activeVideoId,
         method: captureMethod,
@@ -1017,6 +1107,8 @@
     console.log(MARKER_LOG_PREFIX, 'video id change', { from: activeVideoId, to: newVideoId });
     activeVideoId = newVideoId;
     preAnalyzedCleanCaptions = [];
+    preCachedAudioCleanCaptions = [];
+    liveAudioCleanCaptions = [];
     audioAheadFailed = false;           // Allow a fresh capture attempt for the new video
     stopAudioCapture('video_changed');
     resetMarkerEngine('video changed');
@@ -2119,7 +2211,8 @@
     }
     clearHardRestore();
     if (video && previousMuteState !== null) {
-      setMutedState(previousMuteState, 'caption_change_restore');
+      const targetMuted = shouldISweepUnmute(previousMuteState) ? false : true;
+      setMutedState(targetMuted, 'caption_change_restore');
       log('Restored mute state on caption change');
     }
     previousMuteState = null;
@@ -2221,6 +2314,8 @@
       getEntryTimingBounds,
       findTimedCleanCaptionEntry,
       getBestCleanCaptionText,
+      getMuteWindowFromMarker,
+      shouldISweepUnmute,
       resolveOverlayDisplayState,
       normalizeCleanCaptionSettings,
       toCleanCaptionText,

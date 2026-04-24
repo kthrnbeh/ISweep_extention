@@ -119,11 +119,53 @@ test('clean caption text masks blocked words', () => {
   assert.equal(cleaned.includes('This'), true, 'clean words should remain visible');
 });
 
-test('clean caption text follows precedence order: pre-analyzed, then marker, then live', () => {
+test('clean caption text follows precedence order: audio cached, audio live, pre-analyzed, marker, then live', () => {
   const hooks = loadYoutubeTimingHooks();
   const nowMs = Date.now();
 
+  const audioCachedResult = hooks.getBestCleanCaptionText('live fallback', 10.2, {
+    preCachedAudioCaptions: [
+      { start_seconds: 10, end_seconds: 10.5, clean_text: 'audio cached line' },
+    ],
+    liveAudioCaptions: [
+      { start_seconds: 10, end_seconds: 10.5, clean_text: 'audio live line' },
+    ],
+    preAnalyzedCaptions: [
+      { start_seconds: 10, end_seconds: 10.5, clean_text: 'pre analyzed line' },
+    ],
+    markerEntries: [
+      { start_seconds: 10, end_seconds: 10.5, cleaned_text: 'marker line' },
+    ],
+    liveCaptionObservedAtMs: nowMs,
+    nowMs,
+  });
+
+  assert.equal(audioCachedResult.text, 'audio cached line');
+  assert.equal(audioCachedResult.source, 'audio_stt_cached');
+  assert.equal(audioCachedResult.stale, false);
+
+  const audioLiveResult = hooks.getBestCleanCaptionText('live fallback', 11.2, {
+    preCachedAudioCaptions: [],
+    liveAudioCaptions: [
+      { start_seconds: 11, end_seconds: 11.5, clean_text: 'audio live line' },
+    ],
+    preAnalyzedCaptions: [
+      { start_seconds: 11, end_seconds: 11.5, clean_text: 'pre analyzed line' },
+    ],
+    markerEntries: [
+      { start_seconds: 11, end_seconds: 11.5, cleaned_text: 'marker line' },
+    ],
+    liveCaptionObservedAtMs: nowMs,
+    nowMs,
+  });
+
+  assert.equal(audioLiveResult.text, 'audio live line');
+  assert.equal(audioLiveResult.source, 'audio_stt_live');
+  assert.equal(audioLiveResult.stale, false);
+
   const preAnalyzedResult = hooks.getBestCleanCaptionText('live fallback', 10.2, {
+    preCachedAudioCaptions: [],
+    liveAudioCaptions: [],
     preAnalyzedCaptions: [
       { start_seconds: 10, end_seconds: 10.5, clean_text: 'pre analyzed line' },
     ],
@@ -140,6 +182,8 @@ test('clean caption text follows precedence order: pre-analyzed, then marker, th
   assert.equal(preAnalyzedResult.cleanResumeTime, null);
 
   const markerResult = hooks.getBestCleanCaptionText('live fallback', 15.05, {
+    preCachedAudioCaptions: [],
+    liveAudioCaptions: [],
     preAnalyzedCaptions: [],
     markerEntries: [
       { start_seconds: 15, end_seconds: 15.4, caption_text: 'marker caption line' },
@@ -154,6 +198,8 @@ test('clean caption text follows precedence order: pre-analyzed, then marker, th
   assert.equal(markerResult.cleanResumeTime, null);
 
   const liveResult = hooks.getBestCleanCaptionText('that was shit', 20, {
+    preCachedAudioCaptions: [],
+    liveAudioCaptions: [],
     preAnalyzedCaptions: [],
     markerEntries: [],
     liveCaptionObservedAtMs: nowMs,
@@ -164,6 +210,25 @@ test('clean caption text follows precedence order: pre-analyzed, then marker, th
   assert.equal(liveResult.stale, false);
   assert.equal(/shit/i.test(liveResult.text), false);
   assert.equal(liveResult.text.includes('____'), true);
+});
+
+test('mute window uses blocked word start and clean resume time', () => {
+  const hooks = loadYoutubeTimingHooks();
+  const window = hooks.getMuteWindowFromMarker({
+    start_seconds: 5.0,
+    end_seconds: 6.0,
+    blocked_word_start: 5.25,
+    clean_resume_time: 5.7,
+  });
+
+  assert.equal(window.start_seconds, 5.25);
+  assert.equal(window.end_seconds, 5.7);
+});
+
+test('manual mute remains muted after restore logic', () => {
+  const hooks = loadYoutubeTimingHooks();
+  assert.equal(hooks.shouldISweepUnmute(true), false);
+  assert.equal(hooks.shouldISweepUnmute(false), true);
 });
 
 test('live masked text is used when no pre-analyzed caption exists', () => {

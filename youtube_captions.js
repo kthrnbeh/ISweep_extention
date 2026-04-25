@@ -535,6 +535,8 @@
     const video = findVideo();
     if (!video) return;
 
+    // ISweep does not edit media; it only applies temporary playback controls and separate overlay captions.
+
     if (marker.action === 'mute') {
       const muteWindow = getMuteWindowFromMarker(marker);
       const markerStartSec = muteWindow.start_seconds;
@@ -1067,6 +1069,9 @@
       console.log(AUDIO_CAPTURE_LOG_PREFIX, 'started', {
         videoId: activeVideoId,
         chunkSec: AUDIO_CHUNK_SEC,
+      });
+      console.log(AUDIO_CAPTURE_LOG_PREFIX, 'captions_required=false', {
+        videoId: activeVideoId,
       });
       console.log(AUDIO_AHEAD_LOG_PREFIX, 'audio capture started', {
         videoId: activeVideoId,

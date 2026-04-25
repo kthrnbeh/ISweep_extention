@@ -45,6 +45,25 @@ Wires the browser to the ISweep backend: signs in, syncs preferences, and applie
 - ISweep only adjusts live playback state (mute/unmute/skip/fast-forward) based on captions and backend decisions.
 - It never edits, rewrites, or saves media, video files, or caption files.
 
+## Audio STT smoke logs (captions optional)
+For audio-first watch-ahead verification (including captions off), expect these logs during playback.
+
+Page console:
+- `[ISWEEP][AUDIO_CAPTURE] started`
+- `[ISWEEP][AUDIO_CAPTURE] captions_required=false`
+- `[ISWEEP][AUDIO_CAPTURE] chunk ready`
+- `[ISWEEP][AUDIO_CAPTURE] chunk sent`
+- `[ISWEEP][WORD_MUTE] marker scheduled`
+- `[ISWEEP][WORD_MUTE] applied`
+- `[ISWEEP][WORD_MUTE] clean resume`
+
+Backend terminal:
+- `[ISWEEP][AUDIO_STT] chunk received`
+- `[ISWEEP][AUDIO_STT] whisper started`
+- `[ISWEEP][AUDIO_STT] word timestamps generated`
+- `[ISWEEP][AUDIO_STT] cached saved`
+- `[ISWEEP][AUDIO_STT] cached hit`
+
 ## Notes
 - Tokens are stored locally for dev; clear via popup logout.
 - If backend is unreachable, decisions default to `none` and logs include the reason.

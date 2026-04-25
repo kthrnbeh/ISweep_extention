@@ -263,6 +263,8 @@
   let cleanCaptionOverlayEnabledLogged = false;
   let cleanCaptionWaitingLogged = false;
   let cleanCaptionNativeWarningLogged = false;
+  let lastAppliedCleanCaptionStyle = null;
+  let lastAppliedCleanCaptionSize = null;
 
   // Audio watch-ahead state.
   let audioCtx = null;
@@ -402,6 +404,39 @@
       })
       .filter(Boolean)
       .sort((a, b) => a.start_seconds - b.start_seconds);
+  }
+
+  function buildAudioResponseCaptions(response, fallbackStartSec, fallbackEndSec) {
+    const payload = response && typeof response === 'object' ? response : {};
+    const normalizedStart = Number.isFinite(Number(payload.start_seconds))
+      ? Number(payload.start_seconds)
+      : (Number.isFinite(Number(fallbackStartSec)) ? Number(fallbackStartSec) : 0);
+    const normalizedEnd = Number.isFinite(Number(payload.end_seconds))
+      ? Math.max(Number(payload.end_seconds), normalizedStart)
+      : (Number.isFinite(Number(fallbackEndSec)) ? Math.max(Number(fallbackEndSec), normalizedStart) : normalizedStart);
+
+    if (Array.isArray(payload.cleaned_captions)) {
+      return normalizePreAnalyzedCaptions(payload.cleaned_captions);
+    }
+    if (Array.isArray(payload.clean_captions)) {
+      return normalizePreAnalyzedCaptions(payload.clean_captions);
+    }
+
+    const topLevelText = [payload.clean_text, payload.cleaned_text, payload.caption_text, payload.text]
+      .find((value) => typeof value === 'string' && value.trim());
+    if (!topLevelText) return [];
+
+    return normalizePreAnalyzedCaptions([
+      {
+        start_seconds: normalizedStart,
+        end_seconds: normalizedEnd,
+        text: typeof payload.text === 'string' ? payload.text : topLevelText,
+        clean_text: typeof payload.clean_text === 'string' ? payload.clean_text : null,
+        cleaned_text: typeof payload.cleaned_text === 'string' ? payload.cleaned_text : null,
+        caption_text: typeof payload.caption_text === 'string' ? payload.caption_text : null,
+        words: Array.isArray(payload.words) ? payload.words : [],
+      },
+    ]);
   }
 
   function findTimedCleanCaptionEntry(entries, nowSec, lookaheadSec = CLEAN_CAPTION_LOOKAHEAD_SEC) {
@@ -850,6 +885,12 @@
         });
         return;
       }
+      console.log(AUDIO_CAPTURE_LOG_PREFIX, 'response received', {
+        videoId,
+        chunk_start_seconds: chunkStartSec,
+        chunk_end_seconds: chunkEndSec,
+        status: response.status || 'unknown',
+      });
       console.log(AUDIO_AHEAD_LOG_PREFIX, 'chunk result', {
         videoId, start_seconds: chunkStartSec, end_seconds: chunkEndSec,
         status: response.status,
@@ -859,19 +900,17 @@
       if (response.status === 'ready' && Array.isArray(response.events) && response.events.length > 0) {
         mergeAudioMarkers(response.events, videoId);
       }
-      const normalizedAudioCaptions = normalizePreAnalyzedCaptions(
-        Array.isArray(response.cleaned_captions)
-          ? response.cleaned_captions
-          : (Array.isArray(response.clean_captions)
-            ? response.clean_captions
-            : [response])
-      );
+      const normalizedAudioCaptions = buildAudioResponseCaptions(response, chunkStartSec, chunkEndSec);
       if (response.status === 'ready' && normalizedAudioCaptions.length > 0) {
         if (response.cached === true) {
           preCachedAudioCleanCaptions = normalizedAudioCaptions;
         } else {
           liveAudioCleanCaptions = normalizedAudioCaptions;
         }
+        console.log(CLEAN_CC_LOG_PREFIX, 'audio caption stored', {
+          source: response.cached === true ? 'audio_stt_cached' : 'audio_stt_live',
+          count: normalizedAudioCaptions.length,
+        });
         updateCleanOverlay(lastCaptionText, findVideo()?.currentTime || 0);
       }
     }).catch((err) => {
@@ -1088,6 +1127,12 @@
         chunkSec: AUDIO_CHUNK_SEC,
       });
       console.log(AUDIO_CAPTURE_LOG_PREFIX, 'captions_required=false', {
+        videoId: activeVideoId,
+      });
+      console.log(AUDIO_CAPTURE_LOG_PREFIX, 'source=video_element', {
+        videoId: activeVideoId,
+      });
+      console.log(AUDIO_CAPTURE_LOG_PREFIX, 'microphone_used=false', {
         videoId: activeVideoId,
       });
       console.log(AUDIO_AHEAD_LOG_PREFIX, 'audio capture started', {
@@ -1385,6 +1430,19 @@
     const sizeMap = { small: '14px', medium: '18px', large: '24px' };
     cleanCaptionTextEl.style.fontSize = sizeMap[cleanCaptionSettings.cleanCaptionTextSize] || sizeMap.medium;
 
+    if (lastAppliedCleanCaptionStyle !== cleanCaptionSettings.cleanCaptionStyle) {
+      lastAppliedCleanCaptionStyle = cleanCaptionSettings.cleanCaptionStyle;
+      console.log(CLEAN_CC_LOG_PREFIX, 'style applied', {
+        style: cleanCaptionSettings.cleanCaptionStyle,
+      });
+    }
+    if (lastAppliedCleanCaptionSize !== cleanCaptionSettings.cleanCaptionTextSize) {
+      lastAppliedCleanCaptionSize = cleanCaptionSettings.cleanCaptionTextSize;
+      console.log(CLEAN_CC_LOG_PREFIX, 'size applied', {
+        size: cleanCaptionSettings.cleanCaptionTextSize,
+      });
+    }
+
     const rect = getCaptionOverlayScreenPosition(
       cleanCaptionSettings.cleanCaptionPosition,
       cleanCaptionOverlayEl.offsetWidth,
@@ -1455,6 +1513,7 @@
         offsetX: event.clientX - rect.left,
         offsetY: event.clientY - rect.top,
       };
+      console.log(CLEAN_CC_LOG_PREFIX, 'drag start');
       overlay.style.cursor = 'grabbing';
       overlay.style.transform = 'none';
       overlay.style.bottom = 'auto';
@@ -1484,6 +1543,9 @@
       };
       await chrome.storage.local.set({
         [STORAGE_KEYS.CLEAN_CAPTION_SETTINGS]: cleanCaptionSettings,
+      });
+      console.log(CLEAN_CC_LOG_PREFIX, 'drag saved', {
+        position: cleanCaptionSettings.cleanCaptionPosition,
       });
     });
 
@@ -2399,6 +2461,8 @@
       shouldISweepUnmute,
       resolveOverlayDisplayState,
       normalizePreAnalyzedCaptions,
+      buildAudioResponseCaptions,
+      getNormalizedCaptionPosition,
       normalizeCleanCaptionSettings,
       toCleanCaptionText,
       hasNearbyAudioMuteMarker,

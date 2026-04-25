@@ -10,6 +10,7 @@ function loadYoutubeTimingHooks() {
   const context = {
     console: { log() {}, warn() {}, error() {} },
     globalThis: {},
+    window: { innerWidth: 1280, innerHeight: 720 },
     __ISWEEP_TEST_MODE__: true,
     setTimeout,
     clearTimeout,
@@ -435,4 +436,61 @@ test('overlay state remains display-only metadata', () => {
   assert.equal('start_seconds' in resolved, false);
   assert.equal('end_seconds' in resolved, false);
   assert.equal(resolved.visible, true);
+});
+
+test('audio caption response with top-level clean_text becomes timed overlay entry', () => {
+  const hooks = loadYoutubeTimingHooks();
+  const entries = hooks.buildAudioResponseCaptions(
+    {
+      status: 'ready',
+      source: 'audio_stt',
+      start_seconds: 50.0,
+      end_seconds: 50.8,
+      text: 'You are a jerk',
+      clean_text: 'You are a ___',
+    },
+    50.0,
+    50.8,
+  );
+
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].clean_text, 'You are a ___');
+  assert.equal(entries[0].start_seconds, 50.0);
+  assert.equal(entries[0].end_seconds, 50.8);
+});
+
+test('audio_stt caption replaces waiting placeholder', () => {
+  const hooks = loadYoutubeTimingHooks();
+  const waiting = hooks.resolveOverlayDisplayState(
+    { text: '', source: null, stale: false },
+    { text: '', source: 'none', visible: false, updatedAtMs: 0 },
+    1000,
+    hooks.constants.CLEAN_CC_BRIDGE_GAP_MS,
+    { cleanCaptionsEnabled: true, placeholderText: 'ISweep captions listening...' },
+  );
+  assert.equal(waiting.source, 'waiting_audio_text');
+
+  const spoken = hooks.resolveOverlayDisplayState(
+    { text: 'hello there', source: 'audio_stt_live', stale: false },
+    { text: waiting.text, source: waiting.source, visible: waiting.visible, updatedAtMs: 1000 },
+    1010,
+    hooks.constants.CLEAN_CC_BRIDGE_GAP_MS,
+    { cleanCaptionsEnabled: true, placeholderText: 'ISweep captions listening...' },
+  );
+  assert.equal(spoken.visible, true);
+  assert.equal(spoken.text, 'hello there');
+  assert.equal(spoken.source, 'audio_stt_live');
+});
+
+test('overlay drag save helper returns normalized position', () => {
+  const hooks = loadYoutubeTimingHooks();
+  const pos = hooks.getNormalizedCaptionPosition(320, 360, 200, 60);
+  assert.ok(pos.x > 0 && pos.x < 1);
+  assert.ok(pos.y > 0 && pos.y < 1);
+});
+
+test('audio capture path does not use microphone getUserMedia', () => {
+  const filePath = path.resolve(__dirname, '..', 'youtube_captions.js');
+  const source = fs.readFileSync(filePath, 'utf8');
+  assert.equal(/getUserMedia\s*\(\s*\{\s*audio\s*:\s*true/i.test(source), false);
 });

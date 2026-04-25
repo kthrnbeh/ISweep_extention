@@ -91,6 +91,28 @@ test('audio result normalization handles unauthorized and network-unavailable di
   assert.equal(unavailableResult.failure_reason, 'backend_not_running');
 });
 
+test('audio non-ok response preserves backend failure reason and body snippet', async () => {
+  const bg = loadBackgroundContext();
+  bg.getAuthToken = async () => 'token';
+  bg.getBackendUrl = async () => 'http://127.0.0.1:5000';
+  bg.fetch = async () => ({
+    ok: false,
+    status: 500,
+    text: async () => JSON.stringify({
+      status: 'error',
+      failure_reason: 'audio_decode_failed',
+      error: 'decoder failed',
+    }),
+  });
+
+  const result = await bg.handleAudioAhead('video1', 'ZmFrZQ==', 'audio/wav', 10, 11);
+  assert.equal(result.status, 'error');
+  assert.equal(result.failure_reason, 'audio_decode_failed');
+  assert.equal(result.backend_status, 500);
+  assert.equal(typeof result.backend_body, 'string');
+  assert.equal(result.backend_body.includes('audio_decode_failed'), true);
+});
+
 test('audio chunk result shape normalization preserves status/failure_reason from backend payload', async () => {
   const bg = loadBackgroundContext();
   bg.getAuthToken = async () => 'token';

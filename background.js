@@ -492,14 +492,31 @@ async function handleAudioAhead(videoId, audioChunk, mimeType, startSeconds, end
       return { status: 'error', events: [], failure_reason: 'unauthorized' };
     }
     if (!res.ok) {
+      let backendFailureReason = null;
+      try {
+        const parsed = responseBody ? JSON.parse(responseBody) : null;
+        if (parsed && typeof parsed === 'object') {
+          backendFailureReason = typeof parsed.failure_reason === 'string'
+            ? parsed.failure_reason
+            : (typeof parsed.error === 'string' ? parsed.error : null);
+        }
+      } catch (_) {}
       const failureReason = 'analyze_exception';
-      console.warn(AUDIO_LOG, 'chunk failed', {
+      const meta = {
         videoId: cleanVideoId,
         status: res.status,
         failureReason,
+        backend_failure_reason: backendFailureReason,
         body: (responseBody || '').slice(0, 200),
-      });
-      return { status: 'error', events: [], failure_reason: failureReason };
+      };
+      console.error(`${AUDIO_LOG} chunk failed ${JSON.stringify(meta)}`, meta);
+      return {
+        status: 'error',
+        events: [],
+        failure_reason: backendFailureReason || failureReason,
+        backend_status: res.status,
+        backend_body: (responseBody || '').slice(0, 500),
+      };
     }
 
     const payload = responseBody ? JSON.parse(responseBody) : {};

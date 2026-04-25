@@ -459,6 +459,38 @@ test('audio caption response with top-level clean_text becomes timed overlay ent
   assert.equal(entries[0].end_seconds, 50.8);
 });
 
+test('overlay receives audio_stt text when backend returns cleaned_captions', () => {
+  const hooks = loadYoutubeTimingHooks();
+  const entries = hooks.buildAudioResponseCaptions(
+    {
+      status: 'ready',
+      source: 'audio_stt',
+      cleaned_captions: [
+        {
+          start_seconds: 70.0,
+          end_seconds: 70.7,
+          text: 'You are jerk',
+          clean_text: 'You are ___',
+        },
+      ],
+    },
+    70.0,
+    70.7,
+  );
+
+  const best = hooks.getBestCleanCaptionText('', 70.2, {
+    preCachedAudioCaptions: [],
+    liveAudioCaptions: entries,
+    preAnalyzedCaptions: [],
+    markerEntries: [],
+    liveCaptionObservedAtMs: Date.now(),
+    nowMs: Date.now(),
+  });
+
+  assert.equal(best.source, 'audio_stt_live');
+  assert.equal(best.text, 'You are ___');
+});
+
 test('audio_stt caption replaces waiting placeholder', () => {
   const hooks = loadYoutubeTimingHooks();
   const waiting = hooks.resolveOverlayDisplayState(

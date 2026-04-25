@@ -316,8 +316,23 @@ async function saveCleanCaptionSettings(nextSettings) {
   await chrome.storage.local.set({
     [STORAGE_KEYS.CLEAN_CAPTION_SETTINGS]: cleanCaptionSettingsCache,
   });
+  await notifyActiveYouTubeTabCleanCaptionSettings(cleanCaptionSettingsCache);
   renderCleanCaptionControls();
   console.log(LOG_PREFIX, 'clean caption settings saved', cleanCaptionSettingsCache);
+}
+
+async function notifyActiveYouTubeTabCleanCaptionSettings(settings) {
+  try {
+    const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!activeTab?.id) return;
+    if (!/youtube\.com\/watch/i.test(String(activeTab.url || ''))) return;
+    await chrome.tabs.sendMessage(activeTab.id, {
+      type: 'isweep_clean_caption_settings_changed',
+      settings,
+    });
+  } catch (_) {
+    // Best effort: content script may not be ready yet; storage.onChanged is fallback.
+  }
 }
 
 async function handleSyncPrefs(e) {

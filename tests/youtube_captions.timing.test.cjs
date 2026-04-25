@@ -299,6 +299,36 @@ test('overlay bridges small timing gaps', () => {
   assert.equal(resolved.source, 'pre_analyzed');
 });
 
+test('overlay shows placeholder when enabled and no caption text exists', () => {
+  const hooks = loadYoutubeTimingHooks();
+  const resolved = hooks.resolveOverlayDisplayState(
+    { text: '', source: null, stale: false },
+    { text: '', source: 'none', visible: false, updatedAtMs: 0 },
+    1000,
+    hooks.constants.CLEAN_CC_BRIDGE_GAP_MS,
+    { cleanCaptionsEnabled: true, placeholderText: 'ISweep captions listening...' },
+  );
+
+  assert.equal(resolved.visible, true);
+  assert.equal(resolved.source, 'waiting_audio_text');
+  assert.equal(resolved.text, 'ISweep captions listening...');
+});
+
+test('overlay can be disabled without requiring caption text state', () => {
+  const hooks = loadYoutubeTimingHooks();
+  const resolved = hooks.resolveOverlayDisplayState(
+    { text: '', source: null, stale: false },
+    { text: '', source: 'none', visible: false, updatedAtMs: 0 },
+    1000,
+    hooks.constants.CLEAN_CC_BRIDGE_GAP_MS,
+    { cleanCaptionsEnabled: false, placeholderText: 'ISweep captions listening...' },
+  );
+
+  assert.equal(resolved.visible, false);
+  assert.equal(resolved.source, 'disabled');
+  assert.equal(resolved.text, '');
+});
+
 test('stale captions still clear', () => {
   const hooks = loadYoutubeTimingHooks();
   const resolved = hooks.resolveOverlayDisplayState(
@@ -374,4 +404,35 @@ test('best clean caption selection matches using word-timing lookahead', () => {
   assert.equal(result.source, 'pre_analyzed');
   assert.equal(result.text, 'word aligned');
   assert.equal(result.cleanResumeTime, 12.9);
+});
+
+test('audio caption fallback masks blocked words when clean_text is missing', () => {
+  const hooks = loadYoutubeTimingHooks();
+  const normalized = hooks.normalizePreAnalyzedCaptions([
+    {
+      start_seconds: 5,
+      end_seconds: 6,
+      text: 'You are shit',
+    },
+  ]);
+
+  assert.equal(normalized.length, 1);
+  assert.equal(/shit/i.test(normalized[0].clean_text), false);
+  assert.equal(normalized[0].clean_text.includes('___'), true);
+});
+
+test('overlay state remains display-only metadata', () => {
+  const hooks = loadYoutubeTimingHooks();
+  const resolved = hooks.resolveOverlayDisplayState(
+    { text: 'hello', source: 'audio_stt_live', stale: false },
+    { text: '', source: 'none', visible: false, updatedAtMs: 0 },
+    1000,
+    hooks.constants.CLEAN_CC_BRIDGE_GAP_MS,
+    { cleanCaptionsEnabled: true, placeholderText: 'ISweep captions listening...' },
+  );
+
+  assert.equal('action' in resolved, false);
+  assert.equal('start_seconds' in resolved, false);
+  assert.equal('end_seconds' in resolved, false);
+  assert.equal(resolved.visible, true);
 });

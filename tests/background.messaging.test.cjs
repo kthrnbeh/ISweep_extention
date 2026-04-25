@@ -150,3 +150,50 @@ test('audio result forwards chunk aliases and preserves cleaned captions/cache f
   assert.equal(Array.isArray(result.cleaned_captions), true);
   assert.equal(result.cleaned_captions.length, 1);
 });
+
+test('audio result accepts clean_captions alias from backend payload', async () => {
+  const bg = loadBackgroundContext();
+  bg.getAuthToken = async () => 'token';
+  bg.getBackendUrl = async () => 'http://127.0.0.1:5000';
+  bg.fetch = async () => ({
+    ok: true,
+    status: 200,
+    text: async () => JSON.stringify({
+      status: 'ready',
+      source: 'audio_stt',
+      events: [],
+      clean_captions: [{ start_seconds: 1.0, end_seconds: 1.5, clean_text: 'safe text' }],
+      failure_reason: null,
+      cached: false,
+    }),
+  });
+
+  const result = await bg.handleAudioAhead('video1', 'ZmFrZQ==', 'audio/wav', 1, 2);
+  assert.equal(result.status, 'ready');
+  assert.equal(Array.isArray(result.cleaned_captions), true);
+  assert.equal(result.cleaned_captions.length, 1);
+});
+
+test('audio result preserves top-level text fields for single-entry overlay fallback', async () => {
+  const bg = loadBackgroundContext();
+  bg.getAuthToken = async () => 'token';
+  bg.getBackendUrl = async () => 'http://127.0.0.1:5000';
+  bg.fetch = async () => ({
+    ok: true,
+    status: 200,
+    text: async () => JSON.stringify({
+      status: 'ready',
+      source: 'audio_stt',
+      events: [],
+      text: 'You are a jerk',
+      clean_text: 'You are a ___',
+      failure_reason: null,
+      cached: false,
+    }),
+  });
+
+  const result = await bg.handleAudioAhead('video1', 'ZmFrZQ==', 'audio/wav', 1, 2);
+  assert.equal(result.status, 'ready');
+  assert.equal(result.text, 'You are a jerk');
+  assert.equal(result.clean_text, 'You are a ___');
+});

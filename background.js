@@ -503,13 +503,22 @@ async function handleAudioAhead(videoId, audioChunk, mimeType, startSeconds, end
     }
 
     const payload = responseBody ? JSON.parse(responseBody) : {};
+    const normalizedCleanedCaptions = Array.isArray(payload.cleaned_captions)
+      ? payload.cleaned_captions
+      : (Array.isArray(payload.clean_captions) ? payload.clean_captions : []);
     const result = {
       status: payload.status || 'error',
       source: payload.source || 'audio_chunk',
       start_seconds: normalizedStart,
       end_seconds: normalizedEnd,
       events: Array.isArray(payload.events) ? payload.events : [],
-      cleaned_captions: Array.isArray(payload.cleaned_captions) ? payload.cleaned_captions : [],
+      cleaned_captions: normalizedCleanedCaptions,
+      clean_captions: normalizedCleanedCaptions,
+      text: typeof payload.text === 'string' ? payload.text : null,
+      clean_text: typeof payload.clean_text === 'string' ? payload.clean_text : null,
+      cleaned_text: typeof payload.cleaned_text === 'string' ? payload.cleaned_text : null,
+      caption_text: typeof payload.caption_text === 'string' ? payload.caption_text : null,
+      words: Array.isArray(payload.words) ? payload.words : [],
       failure_reason: payload.failure_reason || null,
       cached: payload.cached === true,
     };

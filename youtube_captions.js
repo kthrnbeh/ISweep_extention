@@ -213,6 +213,7 @@
   const CLEAN_CC_BRIDGE_GAP_MS = 250;
   const CLEAN_CC_FADE_MS = 120;
   const CLEAN_CC_LOG_PREFIX = '[ISWEEP][CLEAN_CC]';
+  const CLEAN_CC_PLACEHOLDER_TEXT = 'ISweep captions listening...';
 
   // Audio watch-ahead constants.
   const AUDIO_AHEAD_LOG_PREFIX = '[ISWEEP][AUDIO_AHEAD]';
@@ -259,6 +260,9 @@
   let lastRenderedOverlayText = '';
   let lastRenderedOverlaySource = 'none';
   let lastRenderedOverlayAtMs = 0;
+  let cleanCaptionOverlayEnabledLogged = false;
+  let cleanCaptionWaitingLogged = false;
+  let cleanCaptionNativeWarningLogged = false;
 
   // Audio watch-ahead state.
   let audioCtx = null;
@@ -324,9 +328,13 @@
 
   function getCleanCaptionDisplayText(entry) {
     if (!entry || typeof entry !== 'object') return '';
-    const candidates = [entry.clean_text, entry.cleaned_text, entry.caption_text, entry.text];
-    const match = candidates.find((value) => typeof value === 'string' && value.trim());
-    return match ? match.trim() : '';
+    const cleanCandidates = [entry.clean_text, entry.cleaned_text];
+    const cleanMatch = cleanCandidates.find((value) => typeof value === 'string' && value.trim());
+    if (cleanMatch) return cleanMatch.trim();
+    const rawCandidates = [entry.caption_text, entry.text];
+    const rawMatch = rawCandidates.find((value) => typeof value === 'string' && value.trim());
+    if (!rawMatch) return '';
+    return toCleanCaptionText(rawMatch.trim());
   }
 
   function normalizeTimedWords(words) {
@@ -381,7 +389,9 @@
           start_seconds: start,
           end_seconds: end,
           text: typeof entry.text === 'string' ? entry.text : displayText,
-          clean_text: typeof entry.clean_text === 'string' ? entry.clean_text : null,
+          clean_text: typeof entry.clean_text === 'string' && entry.clean_text.trim()
+            ? entry.clean_text
+            : displayText,
           cleaned_text: typeof entry.cleaned_text === 'string' ? entry.cleaned_text : null,
           caption_text: typeof entry.caption_text === 'string' ? entry.caption_text : null,
           clean_resume_time: Number.isFinite(Number(entry.clean_resume_time))
@@ -849,13 +859,20 @@
       if (response.status === 'ready' && Array.isArray(response.events) && response.events.length > 0) {
         mergeAudioMarkers(response.events, videoId);
       }
-      if (response.status === 'ready' && Array.isArray(response.cleaned_captions)) {
-        const normalizedAudioCaptions = normalizePreAnalyzedCaptions(response.cleaned_captions);
+      const normalizedAudioCaptions = normalizePreAnalyzedCaptions(
+        Array.isArray(response.cleaned_captions)
+          ? response.cleaned_captions
+          : (Array.isArray(response.clean_captions)
+            ? response.clean_captions
+            : [response])
+      );
+      if (response.status === 'ready' && normalizedAudioCaptions.length > 0) {
         if (response.cached === true) {
           preCachedAudioCleanCaptions = normalizedAudioCaptions;
         } else {
           liveAudioCleanCaptions = normalizedAudioCaptions;
         }
+        updateCleanOverlay(lastCaptionText, findVideo()?.currentTime || 0);
       }
     }).catch((err) => {
       console.warn(AUDIO_AHEAD_LOG_PREFIX, 'failure_reason: analyze_exception', {
@@ -1208,7 +1225,19 @@
       if (changes[STORAGE_KEYS.CLEAN_CAPTION_SETTINGS]) {
         cleanCaptionSettings = normalizeCleanCaptionSettings(changes[STORAGE_KEYS.CLEAN_CAPTION_SETTINGS].newValue);
         applyCleanCaptionOverlayStyles();
+        updateCleanOverlay(lastCaptionText, findVideo()?.currentTime || 0);
       }
+    });
+  }
+
+  if (typeof chrome !== 'undefined' && chrome?.runtime?.onMessage?.addListener) {
+    chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+      if (!message || message.type !== 'isweep_clean_caption_settings_changed') return;
+      cleanCaptionSettings = normalizeCleanCaptionSettings(message.settings);
+      applyCleanCaptionOverlayStyles();
+      updateCleanOverlay(lastCaptionText, findVideo()?.currentTime || 0);
+      sendResponse({ ok: true });
+      return true;
     });
   }
 
@@ -1414,6 +1443,7 @@
 
     overlay.appendChild(text);
     document.body.appendChild(overlay);
+    console.log(CLEAN_CC_LOG_PREFIX, 'overlay created');
 
     overlay.addEventListener('pointerdown', (event) => {
       if (event.button !== 0) return;
@@ -1462,10 +1492,16 @@
     applyCleanCaptionOverlayStyles();
   }
 
-  function resolveOverlayDisplayState(overlayState, previousState, nowMs, bridgeGapMs = CLEAN_CC_BRIDGE_GAP_MS) {
+  function resolveOverlayDisplayState(overlayState, previousState, nowMs, bridgeGapMs = CLEAN_CC_BRIDGE_GAP_MS, options = {}) {
+    const cleanCaptionsEnabled = options.cleanCaptionsEnabled !== false;
+    const placeholderText = typeof options.placeholderText === 'string' ? options.placeholderText : CLEAN_CC_PLACEHOLDER_TEXT;
     const prior = previousState && typeof previousState === 'object'
       ? previousState
       : { text: '', source: 'none', visible: false, updatedAtMs: 0 };
+
+    if (!cleanCaptionsEnabled) {
+      return { text: '', source: 'disabled', visible: false, stale: false, bridged: false };
+    }
 
     if (overlayState.stale) {
       return { text: '', source: 'stale', visible: false, stale: true, bridged: false };
@@ -1492,7 +1528,22 @@
       };
     }
 
-    return { text: '', source: 'none', visible: false, stale: false, bridged: false };
+    return {
+      text: placeholderText,
+      source: 'waiting_audio_text',
+      visible: true,
+      stale: false,
+      bridged: false,
+      waiting: true,
+    };
+  }
+
+  function maybeLogNativeCaptionOverlayWarning() {
+    if (cleanCaptionNativeWarningLogged) return;
+    const nativeCaptionVisible = Boolean(document.querySelector('.ytp-caption-window-container .ytp-caption-segment'));
+    if (!nativeCaptionVisible) return;
+    cleanCaptionNativeWarningLogged = true;
+    console.log(CLEAN_CC_LOG_PREFIX, 'YouTube captions may still be visible; ISweep overlay is separate');
   }
 
   function updateCleanOverlay(liveText, nowSec) {
@@ -1511,6 +1562,10 @@
       },
       nowMs,
       CLEAN_CC_BRIDGE_GAP_MS,
+      {
+        cleanCaptionsEnabled: cleanCaptionSettings.cleanCaptionsEnabled,
+        placeholderText: CLEAN_CC_PLACEHOLDER_TEXT,
+      },
     );
     const nextKey = `${resolved.source || 'none'}:${resolved.text}`;
 
@@ -1542,6 +1597,20 @@
       lastRenderedOverlaySource = 'none';
       lastRenderedOverlayAtMs = nowMs;
     } else {
+      if (!cleanCaptionOverlayEnabledLogged && cleanCaptionSettings.cleanCaptionsEnabled) {
+        console.log(CLEAN_CC_LOG_PREFIX, 'overlay enabled');
+        cleanCaptionOverlayEnabledLogged = true;
+      }
+
+      if (resolved.source === 'waiting_audio_text') {
+        if (!cleanCaptionWaitingLogged) {
+          console.log(CLEAN_CC_LOG_PREFIX, 'waiting for audio text');
+          cleanCaptionWaitingLogged = true;
+        }
+      } else {
+        cleanCaptionWaitingLogged = false;
+      }
+
       if (resolved.bridged && lastRenderedCleanCaptionKey !== nextKey) {
         console.log(CLEAN_CC_LOG_PREFIX, 'bridge gap', {
           source: resolved.source,
@@ -1554,6 +1623,9 @@
       cleanCaptionOverlayEl.style.visibility = 'visible';
       cleanCaptionOverlayEl.dataset.source = resolved.source || 'live_masked';
       if (lastRenderedCleanCaptionKey !== nextKey) {
+        const sourceLabel = String(resolved.source || 'live_masked');
+        const canonicalSource = sourceLabel.startsWith('audio_stt') ? 'audio_stt' : sourceLabel;
+        console.log(CLEAN_CC_LOG_PREFIX, 'text updated', { source: canonicalSource });
         console.log(CLEAN_CC_LOG_PREFIX, 'fade update', {
           source: resolved.source || 'live_masked',
           fade_ms: CLEAN_CC_FADE_MS,
@@ -1569,10 +1641,13 @@
       lastRenderedOverlayText = resolved.text;
       lastRenderedOverlaySource = resolved.source || 'live_masked';
       lastRenderedOverlayAtMs = nowMs;
+      maybeLogNativeCaptionOverlayWarning();
     }
 
     if (!cleanCaptionSettings.cleanCaptionsEnabled) {
       cleanCaptionOverlayEl.style.display = 'none';
+      cleanCaptionOverlayEnabledLogged = false;
+      cleanCaptionWaitingLogged = false;
     }
   }
 
@@ -1585,6 +1660,7 @@
       cleanCaptionSettings = { ...CLEAN_CAPTION_DEFAULTS };
     }
     ensureCleanCaptionOverlay();
+    updateCleanOverlay('', findVideo()?.currentTime || 0);
   }
 
   function findVideo() {
@@ -2322,6 +2398,7 @@
       getMuteWindowFromMarker,
       shouldISweepUnmute,
       resolveOverlayDisplayState,
+      normalizePreAnalyzedCaptions,
       normalizeCleanCaptionSettings,
       toCleanCaptionText,
       hasNearbyAudioMuteMarker,

@@ -114,6 +114,11 @@ test('clean caption settings normalization applies defaults safely', () => {
 
 test('clean caption text masks blocked words', () => {
   const hooks = loadYoutubeTimingHooks();
+  hooks.setCachedPreferences({
+    enabled: true,
+    blocklist: { enabled: true, items: ['shit'] },
+    categories: { language: { enabled: true, items: ['shit'] } },
+  });
   const cleaned = hooks.toCleanCaptionText('This is shit and [ __ ] now.');
   assert.equal(/shit/i.test(cleaned), false, 'blocked word should be masked');
   assert.equal(cleaned.includes('___'), true, 'placeholder should stay masked');
@@ -122,6 +127,11 @@ test('clean caption text masks blocked words', () => {
 
 test('clean caption text follows precedence order: audio cached, audio live, pre-analyzed, marker, then live', () => {
   const hooks = loadYoutubeTimingHooks();
+  hooks.setCachedPreferences({
+    enabled: true,
+    blocklist: { enabled: true, items: ['shit'] },
+    categories: { language: { enabled: true, items: ['shit'] } },
+  });
   const nowMs = Date.now();
 
   const audioCachedResult = hooks.getBestCleanCaptionText('live fallback', 10.2, {
@@ -234,6 +244,11 @@ test('manual mute remains muted after restore logic', () => {
 
 test('live masked text is used when no pre-analyzed caption exists', () => {
   const hooks = loadYoutubeTimingHooks();
+  hooks.setCachedPreferences({
+    enabled: true,
+    blocklist: { enabled: true, items: ['shit'] },
+    categories: { language: { enabled: true, items: ['shit'] } },
+  });
   const result = hooks.getBestCleanCaptionText('that was shit', 20, {
     preAnalyzedCaptions: [],
     markerEntries: [],
@@ -300,7 +315,7 @@ test('overlay bridges small timing gaps', () => {
   assert.equal(resolved.source, 'pre_analyzed');
 });
 
-test('overlay hides instead of showing placeholder when no caption text exists', () => {
+test('overlay shows waiting placeholder when no caption text exists', () => {
   const hooks = loadYoutubeTimingHooks();
   const resolved = hooks.resolveOverlayDisplayState(
     { text: '', source: null, stale: false },
@@ -310,9 +325,9 @@ test('overlay hides instead of showing placeholder when no caption text exists',
     { cleanCaptionsEnabled: true, placeholderText: 'ISweep captions listening...' },
   );
 
-  assert.equal(resolved.visible, false);
+  assert.equal(resolved.visible, true);
   assert.equal(resolved.source, 'waiting_audio_text');
-  assert.equal(resolved.text, '');
+  assert.equal(resolved.text, 'ISweep captions listening...');
   assert.equal(resolved.waiting, true);
 });
 
@@ -410,6 +425,11 @@ test('best clean caption selection matches using word-timing lookahead', () => {
 
 test('audio caption fallback masks blocked words when clean_text is missing', () => {
   const hooks = loadYoutubeTimingHooks();
+  hooks.setCachedPreferences({
+    enabled: true,
+    blocklist: { enabled: true, items: ['shit'] },
+    categories: { language: { enabled: true, items: ['shit'] } },
+  });
   const normalized = hooks.normalizePreAnalyzedCaptions([
     {
       start_seconds: 5,
@@ -502,6 +522,8 @@ test('audio_stt caption replaces waiting placeholder', () => {
     { cleanCaptionsEnabled: true, placeholderText: 'ISweep captions listening...' },
   );
   assert.equal(waiting.source, 'waiting_audio_text');
+  assert.equal(waiting.visible, true);
+  assert.equal(waiting.text, 'ISweep captions listening...');
 
   const spoken = hooks.resolveOverlayDisplayState(
     { text: 'hello there', source: 'audio_stt_live', stale: false },
@@ -513,6 +535,26 @@ test('audio_stt caption replaces waiting placeholder', () => {
   assert.equal(spoken.visible, true);
   assert.equal(spoken.text, 'hello there');
   assert.equal(spoken.source, 'audio_stt_live');
+});
+
+test('masking follows stored preferences as source of truth', () => {
+  const hooks = loadYoutubeTimingHooks();
+  hooks.setCachedPreferences({
+    enabled: true,
+    blocklist: { enabled: true, items: ['jerk'] },
+    categories: { language: { enabled: true, items: ['jerk'] } },
+  });
+  const masked = hooks.toCleanCaptionText('You are a jerk');
+  assert.equal(masked.includes('jerk'), false);
+  assert.equal(masked.includes('___') || masked.includes('____'), true);
+
+  hooks.setCachedPreferences({
+    enabled: true,
+    blocklist: { enabled: true, items: ['different'] },
+    categories: { language: { enabled: true, items: ['different'] } },
+  });
+  const unmasked = hooks.toCleanCaptionText('You are a jerk');
+  assert.equal(unmasked.includes('jerk'), true);
 });
 
 test('overlay drag save helper returns normalized position', () => {

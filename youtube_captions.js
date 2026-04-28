@@ -1318,18 +1318,14 @@
       });
       return { words: combined, source: 'prefs', customCount, categoryCount };
     }
-
-    const fallback = [...LANGUAGE_KEYWORDS, ...SEXUAL_KEYWORDS, ...VIOLENCE_KEYWORDS]
-      .map(normalizeFilterWord)
-      .filter(Boolean);
     console.log('[ISWEEP][FILTERS]', {
-      source: 'fallback',
-      count: fallback.length,
+      source: 'prefs_missing',
+      count: 0,
       customCount,
       categoryCount,
-      note: 'no saved words loaded',
+      note: 'no saved words loaded; masking uses preferences only',
     });
-    return { words: fallback, source: 'fallback', customCount, categoryCount };
+    return { words: [], source: 'prefs_missing', customCount, categoryCount };
   }
 
   function normalizeCleanCaptionSettings(raw) {
@@ -1590,11 +1586,12 @@
       };
     }
 
-    // No real text available — hide the overlay instead of showing a placeholder.
+    // No real text available yet — show waiting placeholder so CC can appear
+    // immediately without requiring YouTube native captions.
     return {
-      text: '',
+      text: placeholderText,
       source: 'waiting_audio_text',
-      visible: false,
+      visible: true,
       stale: false,
       bridged: false,
       waiting: true,
@@ -2481,6 +2478,9 @@
         PLACEHOLDER_WORD_ESTIMATED_SEC,
         PROFANITY_MARKER_FIRE_EARLY_SEC,
         AUDIO_MARKER_FALLBACK_SKIP_WINDOW_SEC,
+      },
+      setCachedPreferences: (prefs) => {
+        cachedPreferences = prefs || null;
       },
     };
     return;

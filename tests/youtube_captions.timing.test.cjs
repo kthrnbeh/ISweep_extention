@@ -569,3 +569,27 @@ test('audio capture path does not use microphone getUserMedia', () => {
   const source = fs.readFileSync(filePath, 'utf8');
   assert.equal(/getUserMedia\s*\(\s*\{\s*audio\s*:\s*true/i.test(source), false);
 });
+
+test('audio marker overlap dedupe detects near-identical overlap windows', () => {
+  const hooks = loadYoutubeTimingHooks();
+  const existing = {
+    action: 'mute',
+    start_seconds: 10.0,
+    end_seconds: 10.5,
+  };
+  const incoming = {
+    action: 'mute',
+    start_seconds: 10.05,
+    end_seconds: 10.55,
+  };
+
+  assert.equal(hooks.shouldDedupAudioMarker(existing, incoming), true);
+});
+
+test('audio marker source priority ranks audio before transcript and caption fallback', () => {
+  const hooks = loadYoutubeTimingHooks();
+  assert.equal(hooks.markerSourcePriority('audio'), 0);
+  assert.equal(hooks.markerSourcePriority('audio_stt'), 0);
+  assert.equal(hooks.markerSourcePriority('transcript'), 1);
+  assert.equal(hooks.markerSourcePriority('live_masked'), 2);
+});

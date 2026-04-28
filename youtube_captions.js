@@ -217,17 +217,18 @@
 
   // Audio watch-ahead constants.
   const AUDIO_AHEAD_LOG_PREFIX = '[ISWEEP][AUDIO_AHEAD]';
+  const AUDIO_LOG_PREFIX = '[ISWEEP][AUDIO]';
   const AUDIO_CAPTURE_LOG_PREFIX = '[ISWEEP][AUDIO_CAPTURE]';
   const WORD_MUTE_LOG_PREFIX = '[ISWEEP][WORD_MUTE]';
   const FALLBACK_LOG_PREFIX = '[ISWEEP][FALLBACK]';
-  // 300 ms chunks give the scheduler a much tighter profanity timing window
-  // than 1 s chunks without flooding the backend with near-frame-sized requests.
-  const AUDIO_CHUNK_SEC = 0.30;
+  const AUDIO_CHUNK_SEC = 2.0;
+  const AUDIO_CHUNK_OVERLAP_SEC = 0.5;
   const AUDIO_SAMPLE_RATE = 16000;    // 16 kHz mono — standard for speech recognition
   const MARKER_SCHEDULER_INTERVAL_MS = 100;
+  const AUDIO_PREROLL_MS = 120;
   // Audio-derived mute markers already include backend pre-roll, so keep the
   // scheduler lead short and specific to profanity muting.
-  const PROFANITY_MARKER_FIRE_EARLY_SEC = 0.12;
+  const PROFANITY_MARKER_FIRE_EARLY_SEC = AUDIO_PREROLL_MS / 1000;
   const AUDIO_MARKER_FALLBACK_SKIP_WINDOW_SEC = 0.75;
 
   // Marker engine state. Future audio watch-ahead analyzers can emit the same marker shape.
@@ -270,6 +271,7 @@
   let audioCtx = null;
   let audioProcessor = null;
   let audioSampleBufs = [];    // Float32Arrays accumulated for the current chunk
+  let audioChunkWarm = false;
   let audioChunkStartSec = 0; // video.currentTime when the current chunk began
   let audioAheadActive = false;
   let audioAheadVideoId = null;
@@ -558,6 +560,45 @@
     console.log(MARKER_LOG_PREFIX, 'engine reset', { reason });
   }
 
+  function markerSourcePriority(source) {
+    const value = String(source || '').toLowerCase();
+    if (value.startsWith('audio')) return 0;
+    if (value.startsWith('transcript') || value.startsWith('pre')) return 1;
+    return 2;
+  }
+
+  function shouldDedupAudioMarker(existing, incoming) {
+    if (!existing || !incoming) return false;
+    if (existing.action !== incoming.action) return false;
+    const overlapStart = Math.max(Number(existing.start_seconds) || 0, Number(incoming.start_seconds) || 0);
+    const overlapEnd = Math.min(Number(existing.end_seconds) || 0, Number(incoming.end_seconds) || 0);
+    if (overlapEnd <= overlapStart) return false;
+    const existingDur = Math.max((Number(existing.end_seconds) || 0) - (Number(existing.start_seconds) || 0), 0.001);
+    const incomingDur = Math.max((Number(incoming.end_seconds) || 0) - (Number(incoming.start_seconds) || 0), 0.001);
+    const overlapDur = overlapEnd - overlapStart;
+    const overlapRatio = overlapDur / Math.min(existingDur, incomingDur);
+    return overlapRatio >= 0.7;
+  }
+
+  function takeTailSampleBuffers(sampleBufs, tailSamples) {
+    const target = Math.max(Math.floor(Number(tailSamples) || 0), 0);
+    if (!target || !Array.isArray(sampleBufs) || sampleBufs.length === 0) return [];
+    const out = [];
+    let remaining = target;
+    for (let i = sampleBufs.length - 1; i >= 0 && remaining > 0; i -= 1) {
+      const buf = sampleBufs[i];
+      if (!buf || !buf.length) continue;
+      if (buf.length <= remaining) {
+        out.unshift(new Float32Array(buf));
+        remaining -= buf.length;
+      } else {
+        out.unshift(new Float32Array(buf.slice(buf.length - remaining)));
+        remaining = 0;
+      }
+    }
+    return out;
+  }
+
   function setMarkerEvents(events, source) {
     const normalized = (Array.isArray(events) ? events : [])
       .map(normalizeMarkerEvent)
@@ -602,6 +643,14 @@
         blocked_word_start: marker.blocked_word_start || null,
         source: marker.source || 'unknown',
       });
+      if (String(marker.source || '').toLowerCase().startsWith('audio')) {
+        console.log(AUDIO_LOG_PREFIX, 'marker applied', {
+          id: marker.id,
+          start_seconds: markerStartSec,
+          end_seconds: markerEndSec,
+          source: marker.source || 'audio',
+        });
+      }
       if (Number.isFinite(Number(marker.clean_resume_time))) {
         console.log(WORD_MUTE_LOG_PREFIX, 'clean resume', {
           id: marker.id,
@@ -834,7 +883,6 @@
   function flushAudioChunk() {
     if (!audioSampleBufs.length) return;
     const bufs = audioSampleBufs.slice();
-    audioSampleBufs = [];
     const chunkStartSec = audioChunkStartSec;
     const videoId = audioAheadVideoId;
     if (!videoId) return;
@@ -853,7 +901,14 @@
     if (!(chunkEndSec > chunkStartSec)) {
       chunkEndSec = chunkStartSec + Math.max(measuredDurationSec, 0.05);
     }
-    audioChunkStartSec = chunkEndSec;
+
+    const overlapSamples = Math.floor(Math.max(AUDIO_CHUNK_OVERLAP_SEC, 0) * sampleRate);
+    const overlapBufs = takeTailSampleBuffers(bufs, overlapSamples);
+    const overlapCount = overlapBufs.reduce((n, b) => n + b.length, 0);
+    const overlapDurationSec = sampleRate > 0 ? (overlapCount / sampleRate) : 0;
+    audioSampleBufs = overlapBufs;
+    audioChunkStartSec = Math.max(chunkEndSec - overlapDurationSec, 0);
+    audioChunkWarm = true;
 
     const wavBuf = encodeWAV(bufs, sampleRate);
     const audioChunk = arrayBufferToBase64(wavBuf);
@@ -866,6 +921,9 @@
       videoId, chunk_start_seconds: chunkStartSec, chunk_end_seconds: chunkEndSec,
     });
     console.log(AUDIO_AHEAD_LOG_PREFIX, 'sending chunk', {
+      videoId, start_seconds: chunkStartSec, end_seconds: chunkEndSec,
+    });
+    console.log(AUDIO_LOG_PREFIX, 'chunk sent', {
       videoId, start_seconds: chunkStartSec, end_seconds: chunkEndSec,
     });
     console.log(AUDIO_CAPTURE_LOG_PREFIX, 'chunk sent', {
@@ -898,7 +956,7 @@
         failure_reason: response.failure_reason || null,
       });
       if (response.status === 'ready' && Array.isArray(response.events) && response.events.length > 0) {
-        mergeAudioMarkers(response.events, videoId);
+        ingestAudioMarkers(response.events, videoId);
       }
       const normalizedAudioCaptions = buildAudioResponseCaptions(response, chunkStartSec, chunkEndSec);
       if (response.status === 'ready' && normalizedAudioCaptions.length > 0) {
@@ -921,7 +979,7 @@
     });
   }
 
-  function mergeAudioMarkers(newEvents, videoId) {
+  function ingestAudioMarkers(newEvents, videoId) {
     if (videoId !== activeVideoId) {
       console.log(AUDIO_AHEAD_LOG_PREFIX, 'failure_reason: stale_audio_response_ignored', {
         responseVideoId: videoId, activeVideoId,
@@ -937,9 +995,15 @@
     const firedBefore = new Set(firedMarkerIds);
     const merged = [...markerEvents];
     normalized.forEach((e) => {
-      if (!merged.some((m) => m.id === e.id)) merged.push(e);
+      const exact = merged.some((m) => m.id === e.id);
+      const overlapDup = merged.some((m) => shouldDedupAudioMarker(m, e));
+      if (!exact && !overlapDup) merged.push(e);
     });
-    merged.sort((a, b) => a.start_seconds - b.start_seconds);
+    merged.sort((a, b) => {
+      const delta = a.start_seconds - b.start_seconds;
+      if (Math.abs(delta) > 1e-6) return delta;
+      return markerSourcePriority(a.source) - markerSourcePriority(b.source);
+    });
     markerEvents = merged;
     markerModeActive = markerEvents.length > 0;
     markerFallbackReason = markerModeActive ? 'markers_loaded' : 'marker_list_empty';
@@ -956,6 +1020,11 @@
       })),
     });
     console.log(AUDIO_AHEAD_LOG_PREFIX, 'audio markers merged', {
+      videoId: activeVideoId,
+      addedCount: normalized.length,
+      totalCount: markerEvents.length,
+    });
+    console.log(AUDIO_LOG_PREFIX, 'markers received', {
       videoId: activeVideoId,
       addedCount: normalized.length,
       totalCount: markerEvents.length,
@@ -1110,7 +1179,8 @@
         if (!vid || vid.paused) return; // Skip silent/paused frames.
         audioSampleBufs.push(new Float32Array(e.data));
         const total = audioSampleBufs.reduce((n, b) => n + b.length, 0);
-        if (total >= sampleTarget) flushAudioChunk();
+        const required = (audioChunkWarm ? (AUDIO_CHUNK_SEC - AUDIO_CHUNK_OVERLAP_SEC) : AUDIO_CHUNK_SEC) * audioCtx.sampleRate;
+        if (total >= required) flushAudioChunk();
       };
 
       source.connect(workletNode);
@@ -1122,6 +1192,7 @@
       audioAheadVideoId = activeVideoId;
       audioChunkStartSec = video.currentTime || 0;
       audioSampleBufs = [];
+      audioChunkWarm = false;
       console.log(AUDIO_CAPTURE_LOG_PREFIX, 'started', {
         videoId: activeVideoId,
         chunkSec: AUDIO_CHUNK_SEC,
@@ -2466,6 +2537,8 @@
       hasNearbyAudioMuteMarker,
       getMarkerEarlyWindowSec,
       shouldFireMarker,
+      shouldDedupAudioMarker,
+      markerSourcePriority,
       constants: {
         CLEAN_CAPTION_STALE_MS,
         CLEAN_CAPTION_LOOKAHEAD_SEC,
@@ -2478,6 +2551,9 @@
         PLACEHOLDER_WORD_ESTIMATED_SEC,
         PROFANITY_MARKER_FIRE_EARLY_SEC,
         AUDIO_MARKER_FALLBACK_SKIP_WINDOW_SEC,
+        AUDIO_CHUNK_SEC,
+        AUDIO_CHUNK_OVERLAP_SEC,
+        AUDIO_PREROLL_MS,
       },
       setCachedPreferences: (prefs) => {
         cachedPreferences = prefs || null;

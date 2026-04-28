@@ -536,7 +536,7 @@ async function handleAudioAhead(videoId, audioChunk, mimeType, startSeconds, end
       mimeType,
       chunkBytes: audioChunk.length,
     });
-    res = await fetch(`${backendUrl}/audio/analyze`, {
+    res = await fetch(`${backendUrl}/audio/analyze_chunk`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -544,6 +544,9 @@ async function handleAudioAhead(videoId, audioChunk, mimeType, startSeconds, end
       },
       body: JSON.stringify({
         video_id: cleanVideoId,
+        audio_base64: audioChunk,
+        start_time: normalizedStart,
+        preferences: normalizePreferences((await chrome.storage.local.get([STORAGE_KEYS.PREFS]))[STORAGE_KEYS.PREFS] || {}),
         audio_chunk: audioChunk,
         mime_type: mimeType || 'audio/wav',
         chunk_start_seconds: normalizedStart,
@@ -590,9 +593,10 @@ async function handleAudioAhead(videoId, audioChunk, mimeType, startSeconds, end
     const normalizedCleanedCaptions = Array.isArray(payload.cleaned_captions)
       ? payload.cleaned_captions
       : (Array.isArray(payload.clean_captions) ? payload.clean_captions : []);
+    const normalizedStatus = payload.status || ((Array.isArray(payload.events) || typeof payload.cleaned_text === 'string') ? 'ready' : 'error');
     const result = {
-      status: payload.status || 'error',
-      source: payload.source || 'audio_chunk',
+      status: normalizedStatus,
+      source: payload.source || 'audio',
       start_seconds: normalizedStart,
       end_seconds: normalizedEnd,
       events: Array.isArray(payload.events) ? payload.events : [],

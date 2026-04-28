@@ -10,6 +10,7 @@
   const STORAGE_KEYS = {
     PREFS: 'isweepPreferences',
     CLEAN_CAPTION_SETTINGS: 'isweepCleanCaptionSettings',
+    AUDIO_FILTERING_ENABLED: 'audioFilteringEnabled',
   };
   // Track caption text and when it started so we can measure how long words are spoken.
   // Playback-only: ISweep never edits media or captions; it only controls live playback state (mute/unmute/seek/rate).
@@ -276,6 +277,7 @@
   let audioAheadActive = false;
   let audioAheadVideoId = null;
   let audioAheadFailed = false; // true after a terminal (non-retryable) capture failure
+  let audioFilteringEnabled = true;
 
   function getCurrentVideoId() {
     try {
@@ -1048,10 +1050,12 @@
       hasVideo: Boolean(video),
       audioAheadActive,
       audioAheadFailed,
+      audioFilteringEnabled,
       readyState: video?.readyState ?? null,
       paused: video?.paused ?? null,
       currentTime: video?.currentTime ?? null,
     });
+    if (!audioFilteringEnabled) return;
     if (!video || audioAheadActive || audioAheadFailed) return;
 
     const minReadyState = typeof HTMLMediaElement !== 'undefined'
@@ -1324,11 +1328,16 @@
 
   async function loadPreferencesFromStorage() {
     try {
-      const store = await chrome.storage.local.get([STORAGE_KEYS.PREFS]);
+      const store = await chrome.storage.local.get([
+        STORAGE_KEYS.PREFS,
+        STORAGE_KEYS.AUDIO_FILTERING_ENABLED,
+      ]);
       cachedPreferences = store[STORAGE_KEYS.PREFS] || null;
+      audioFilteringEnabled = store[STORAGE_KEYS.AUDIO_FILTERING_ENABLED] !== false;
     } catch (err) {
       console.warn('[ISWEEP][MATCH] failed to load prefs', err?.message || err);
       cachedPreferences = null;
+      audioFilteringEnabled = true;
     }
   }
 
@@ -1342,6 +1351,9 @@
         cleanCaptionSettings = normalizeCleanCaptionSettings(changes[STORAGE_KEYS.CLEAN_CAPTION_SETTINGS].newValue);
         applyCleanCaptionOverlayStyles();
         updateCleanOverlay(lastCaptionText, findVideo()?.currentTime || 0);
+      }
+      if (changes[STORAGE_KEYS.AUDIO_FILTERING_ENABLED]) {
+        audioFilteringEnabled = changes[STORAGE_KEYS.AUDIO_FILTERING_ENABLED].newValue !== false;
       }
     });
   }

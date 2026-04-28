@@ -18,6 +18,7 @@ const STORAGE_KEYS = {
   BACKEND_URL: 'isweepBackendUrl', // Backend base URL
   FRONTEND_URL: 'isweepFrontendUrl',// Frontend base URL override
   CLEAN_CAPTION_SETTINGS: 'isweepCleanCaptionSettings',
+  DEV_LOCAL_AUTH: 'devLocalAuthEnabled',
 };
 
 const CLEAN_CAPTION_DEFAULTS = {
@@ -54,6 +55,11 @@ function normalizeCleanCaptionSettings(raw) {
 const TOKEN_KEY = 'isweep_auth_token';
 
 const LOG_PREFIX = '[ISWEEP][POPUP]'; // Standard log prefix
+
+function isLocalBackendUrl(url) {
+  const value = String(url || '').trim().toLowerCase();
+  return value.startsWith('http://127.0.0.1') || value.startsWith('http://localhost');
+}
 
 async function getBackendUrl() {
   const store = await chrome.storage.local.get([STORAGE_KEYS.BACKEND_URL]); // Fetch stored backend URL
@@ -122,11 +128,15 @@ document.addEventListener('DOMContentLoaded', async () => {
       TOKEN_KEY,
       STORAGE_KEYS.USER_ID,
       STORAGE_KEYS.PREFS,
+      STORAGE_KEYS.DEV_LOCAL_AUTH,
+      STORAGE_KEYS.BACKEND_URL,
     ]);
     
     let authData = result[STORAGE_KEYS.AUTH]; // Pull cached auth data
     const hasToken = Boolean(result[TOKEN_KEY]); // Token presence
     const isEnabled = result[STORAGE_KEYS.ENABLED] !== false; // Default to true if not set
+    const devLocalAuthActive = result[STORAGE_KEYS.DEV_LOCAL_AUTH] === true
+      && isLocalBackendUrl(result[STORAGE_KEYS.BACKEND_URL] || 'http://127.0.0.1:5000');
     
     console.log(LOG_PREFIX, 'Auth data:', authData ? 'Present' : 'None', 'token:', hasToken);
     console.log(LOG_PREFIX, 'Enabled state:', isEnabled);
@@ -135,13 +145,30 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (!authData && hasToken) {
       authData = { email: '(signed in)', displayName: 'ISweep user', initials: '--', loggedInAt: new Date().toISOString() };
     }
+
+    if (!authData && !hasToken && devLocalAuthActive) {
+      console.log('[ISWEEP][AUTH] dev local auth enabled');
+      console.log('[ISWEEP][AUTH] using local preferences fallback');
+      authData = {
+        email: '(dev-local)',
+        displayName: 'ISweep local dev',
+        initials: 'DL',
+        loggedInAt: new Date().toISOString(),
+      };
+    }
     
     if (authData && (authData.email || hasToken)) {
       renderLoggedInState(authData, isEnabled); // Show logged-in UI
       // Reflect cached prefs status for clarity.
       if (signedInStatus) {
         const prefs = result[STORAGE_KEYS.PREFS];
-        signedInStatus.textContent = prefs ? 'Signed in. Preferences cached.' : 'Signed in. No preferences cached yet.';
+        if (devLocalAuthActive && !hasToken) {
+          signedInStatus.textContent = prefs
+            ? 'Dev local auth enabled. Using cached preferences.'
+            : 'Dev local auth enabled. No cached preferences yet.';
+        } else {
+          signedInStatus.textContent = prefs ? 'Signed in. Preferences cached.' : 'Signed in. No preferences cached yet.';
+        }
       }
     } else {
       renderLoggedOutState(); // Show logged-out UI
@@ -339,6 +366,15 @@ async function handleSyncPrefs(e) {
   if (e) e.preventDefault();
   console.log(LOG_PREFIX, 'prefs sync start');
   try {
+    const preStore = await chrome.storage.local.get([
+      TOKEN_KEY,
+      STORAGE_KEYS.DEV_LOCAL_AUTH,
+      STORAGE_KEYS.BACKEND_URL,
+      STORAGE_KEYS.PREFS,
+    ]);
+    const devLocalAuthActive = preStore[STORAGE_KEYS.DEV_LOCAL_AUTH] === true
+      && isLocalBackendUrl(preStore[STORAGE_KEYS.BACKEND_URL] || 'http://127.0.0.1:5000');
+
     // Ask the active tab (site) to push its token into extension storage.
     const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (activeTab?.id) {
@@ -354,6 +390,16 @@ async function handleSyncPrefs(e) {
     const token = store[TOKEN_KEY];
 
     if (!token) {
+      if (devLocalAuthActive) {
+        console.log('[ISWEEP][AUTH] dev local auth enabled');
+        console.log('[ISWEEP][AUTH] using local preferences fallback');
+        if (signedInStatus) {
+          signedInStatus.textContent = preStore[STORAGE_KEYS.PREFS]
+            ? 'Dev local auth enabled. Using cached preferences.'
+            : 'Dev local auth enabled. No cached preferences yet.';
+        }
+        return;
+      }
       console.warn(LOG_PREFIX, 'prefs sync failed', 'missing token');
       alert('Sync failed. Please sign in on the ISweep site, then try again.');
       return;

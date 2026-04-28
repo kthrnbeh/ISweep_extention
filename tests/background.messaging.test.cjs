@@ -57,6 +57,34 @@ test('missing token handling for /event returns structured none decision', async
   assert.equal(result.matched_category, null);
 });
 
+test('missing token in dev local auth mode falls back to cached local preferences', async () => {
+  const bg = loadBackgroundContext();
+  bg.getAuthToken = async () => null;
+  bg.getBackendUrl = async () => 'http://127.0.0.1:5000';
+  bg.getDevLocalAuthContext = async () => ({
+    enabled: true,
+    backendUrl: 'http://127.0.0.1:5000',
+    prefs: {
+      enabled: true,
+      categories: {
+        language: { enabled: true, action: 'mute', duration: 4 },
+      },
+      blocklist: {
+        enabled: true,
+        action: 'mute',
+        duration: 6,
+        items: ['jerk'],
+      },
+    },
+  });
+
+  const result = await bg.handleCaptionDecision('you are a jerk', 0.5);
+  assert.equal(result.action, 'mute');
+  assert.equal(result.matched_category, 'blocklist');
+  assert.equal(result.duration_seconds, 6);
+  assert.equal(/local prefs blocklist match/i.test(result.reason), true);
+});
+
 test('missing token handling for /audio/analyze returns unavailable + missing_token', async () => {
   const bg = loadBackgroundContext();
   bg.getAuthToken = async () => null;

@@ -9,11 +9,55 @@
   // Storage Keys
   const STORAGE_KEYS = {
     AUTH: 'isweepAuth',      // Stored auth info (email/token)
-    ENABLED: 'isweepEnabled' // Flag to toggle filtering on/off
+    ENABLED: 'isweepEnabled', // Flag to toggle filtering on/off
+    TOKEN: 'isweep_auth_token',
+    DEV_LOCAL_AUTH: 'devLocalAuthEnabled',
+    BACKEND_URL: 'isweepBackendUrl'
   };
+
+  const DEFAULT_BACKEND = 'http://127.0.0.1:5000';
   
   let isEnabled = true;        // Tracks whether filtering is enabled
   let isAuthenticated = false; // Tracks whether user is signed in
+
+  function isLocalBackendUrl(url) {
+    const value = String(url || '').trim().toLowerCase();
+    return value.startsWith('http://127.0.0.1') || value.startsWith('http://localhost');
+  }
+
+  function computeAuthState(store) {
+    const auth = store?.[STORAGE_KEYS.AUTH];
+    const hasAuthEmail = Boolean(auth && auth.email);
+    const hasToken = Boolean(store?.[STORAGE_KEYS.TOKEN]);
+    const backendUrl = store?.[STORAGE_KEYS.BACKEND_URL] || DEFAULT_BACKEND;
+    const devLocalAuthEnabled = store?.[STORAGE_KEYS.DEV_LOCAL_AUTH] === true && isLocalBackendUrl(backendUrl);
+
+    if (devLocalAuthEnabled) {
+      console.log('[ISWEEP][AUTH] dev local auth enabled');
+    }
+
+    const authenticated = hasAuthEmail || hasToken || devLocalAuthEnabled;
+    if (!hasAuthEmail && !hasToken && devLocalAuthEnabled) {
+      console.log('[ISWEEP][AUTH] using local preferences fallback');
+    }
+    return authenticated;
+  }
+
+  async function refreshAuthStateAndApply() {
+    const store = await chrome.storage.local.get([
+      STORAGE_KEYS.AUTH,
+      STORAGE_KEYS.TOKEN,
+      STORAGE_KEYS.DEV_LOCAL_AUTH,
+      STORAGE_KEYS.BACKEND_URL,
+    ]);
+    isAuthenticated = computeAuthState(store);
+    console.log('[ISweep Plumbing] Auth state changed, authenticated:', isAuthenticated);
+    if (isEnabled && isAuthenticated) {
+      startFiltering();
+    } else {
+      stopFiltering();
+    }
+  }
   
   /**
    * Initialize content script
@@ -21,10 +65,16 @@
   async function init() {
     try {
       // Load enabled state and auth from storage
-      const result = await chrome.storage.local.get([STORAGE_KEYS.ENABLED, STORAGE_KEYS.AUTH]);
+      const result = await chrome.storage.local.get([
+        STORAGE_KEYS.ENABLED,
+        STORAGE_KEYS.AUTH,
+        STORAGE_KEYS.TOKEN,
+        STORAGE_KEYS.DEV_LOCAL_AUTH,
+        STORAGE_KEYS.BACKEND_URL,
+      ]);
       
       isEnabled = result[STORAGE_KEYS.ENABLED] !== false; // Default to true if unset
-      isAuthenticated = !!(result[STORAGE_KEYS.AUTH] && result[STORAGE_KEYS.AUTH].email); // Require email to count as authed
+      isAuthenticated = computeAuthState(result);
       
       console.log('[ISweep Plumbing] Initialized - Enabled:', isEnabled, 'Authenticated:', isAuthenticated);
       
@@ -51,23 +101,20 @@
       isEnabled = changes[STORAGE_KEYS.ENABLED].newValue !== false; // Update enabled flag
       console.log('[ISweep Plumbing] Enabled state changed to:', isEnabled);
       
-      if (isEnabled && isAuthenticated) {
-        startFiltering();
-      } else {
-        stopFiltering();
-      }
+      refreshAuthStateAndApply().catch((error) => {
+        console.error('[ISweep Plumbing] Failed to refresh auth state:', error);
+      });
     }
-    
-    if (changes[STORAGE_KEYS.AUTH]) {
-      const newAuth = changes[STORAGE_KEYS.AUTH].newValue; // Pull new auth data
-      isAuthenticated = !!(newAuth && newAuth.email); // Authenticated if email present
-      console.log('[ISweep Plumbing] Auth state changed, authenticated:', isAuthenticated);
-      
-      if (!isAuthenticated) {
-        stopFiltering();
-      } else if (isEnabled) {
-        startFiltering();
-      }
+
+    if (
+      changes[STORAGE_KEYS.AUTH]
+      || changes[STORAGE_KEYS.TOKEN]
+      || changes[STORAGE_KEYS.DEV_LOCAL_AUTH]
+      || changes[STORAGE_KEYS.BACKEND_URL]
+    ) {
+      refreshAuthStateAndApply().catch((error) => {
+        console.error('[ISweep Plumbing] Failed to refresh auth state:', error);
+      });
     }
   }
   

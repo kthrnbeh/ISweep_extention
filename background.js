@@ -17,7 +17,8 @@ const STORAGE_KEYS = {
   TOKEN: 'isweep_auth_token',
   USER_ID: 'isweepUserId',
   PREFS: 'isweepPreferences',
-  BACKEND_URL: 'isweepBackendUrl'
+  BACKEND_URL: 'isweepBackendUrl',
+  DEV_LOCAL_AUTH: 'devLocalAuthEnabled'
 };
 
 const TOKEN_KEY = 'isweep_auth_token'; // Shared with site_token_bridge and frontend localStorage
@@ -109,6 +110,57 @@ async function logBackendHealthOnce() {
 async function getBackendUrl() {
   const store = await chrome.storage.local.get([STORAGE_KEYS.BACKEND_URL]);
   return store[STORAGE_KEYS.BACKEND_URL] || DEFAULT_BACKEND;
+}
+
+function isLocalBackendUrl(url) {
+  const value = String(url || '').trim().toLowerCase();
+  return value.startsWith('http://127.0.0.1') || value.startsWith('http://localhost');
+}
+
+async function getDevLocalAuthContext() {
+  const backendUrl = await getBackendUrl();
+  const store = await chrome.storage.local.get([STORAGE_KEYS.DEV_LOCAL_AUTH, STORAGE_KEYS.PREFS]);
+  const devFlag = store[STORAGE_KEYS.DEV_LOCAL_AUTH] === true;
+  const enabled = devFlag && isLocalBackendUrl(backendUrl);
+  if (enabled) {
+    console.log('[ISWEEP][AUTH] dev local auth enabled');
+  }
+  const prefs = normalizePreferences(store[STORAGE_KEYS.PREFS] || {});
+  return { enabled, backendUrl, prefs };
+}
+
+function escapeRegexWord(text) {
+  return String(text || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function makeLocalDecisionFromPreferences(text, prefs) {
+  const normalizedText = String(text || '').trim();
+  if (!normalizedText) {
+    return { action: 'none', reason: 'No text provided', duration_seconds: 0, matched_category: null };
+  }
+  if (!prefs || prefs.enabled === false) {
+    return { action: 'none', reason: 'No match', duration_seconds: 0, matched_category: null };
+  }
+
+  const blocklistEnabled = prefs?.blocklist?.enabled !== false;
+  const blocklistItems = Array.isArray(prefs?.blocklist?.items) ? prefs.blocklist.items : [];
+  if (blocklistEnabled && blocklistItems.length) {
+    for (const item of blocklistItems) {
+      const candidate = String(item || '').trim();
+      if (!candidate) continue;
+      const pattern = new RegExp(`\\b${escapeRegexWord(candidate).replace(/\s+/g, '\\s+')}\\b`, 'i');
+      if (pattern.test(normalizedText)) {
+        return {
+          action: prefs?.blocklist?.action || prefs?.categories?.language?.action || 'mute',
+          reason: `local prefs blocklist match: ${candidate}`,
+          duration_seconds: Number(prefs?.blocklist?.duration || prefs?.categories?.language?.duration || 4) || 4,
+          matched_category: 'blocklist',
+        };
+      }
+    }
+  }
+
+  return { action: 'none', reason: 'No match', duration_seconds: 0, matched_category: null };
 }
 
 async function getAuthToken() {
@@ -266,6 +318,11 @@ async function handleCaptionDecision(text, captionDurationSeconds) {
   const backendUrl = await getBackendUrl();
   const token = await getAuthToken();
   if (!token) {
+    const devLocal = await getDevLocalAuthContext();
+    if (devLocal.enabled) {
+      console.log('[ISWEEP][AUTH] using local preferences fallback');
+      return makeLocalDecisionFromPreferences(text, devLocal.prefs);
+    }
     console.warn('[ISWEEP][BG][AUTH] missing token affected /event', { backendUrl });
     return { action: 'none', reason: 'missing token', duration_seconds: 0, matched_category: null };
   }
@@ -296,6 +353,11 @@ async function handleCaptionDecision(text, captionDurationSeconds) {
     }
 
     if (!res.ok) {
+      const devLocal = await getDevLocalAuthContext();
+      if (devLocal.enabled) {
+        console.log('[ISWEEP][AUTH] using local preferences fallback');
+        return makeLocalDecisionFromPreferences(text, devLocal.prefs);
+      }
       const meta = {
         backendUrl,
         status: res.status,
@@ -323,6 +385,11 @@ async function handleCaptionDecision(text, captionDurationSeconds) {
     console.log('[ISWEEP][BG][/event] decision received', decision);
     return decision;
   } catch (err) {
+    const devLocal = await getDevLocalAuthContext();
+    if (devLocal.enabled) {
+      console.log('[ISWEEP][AUTH] using local preferences fallback');
+      return makeLocalDecisionFromPreferences(text, devLocal.prefs);
+    }
     const meta = {
       backendUrl,
       status: res?.status,
@@ -610,6 +677,11 @@ async function handleSyncPrefs() {
   const backendUrl = await getBackendUrl();
   const token = await getAuthToken();
   if (!token) {
+    const devLocal = await getDevLocalAuthContext();
+    if (devLocal.enabled) {
+      console.log('[ISWEEP][AUTH] using local preferences fallback');
+      return { ok: true, status: 'local_prefs_fallback' };
+    }
     console.warn(LOG_PREFIX, 'sync prefs missing token');
     return { ok: false, error: 'missing token' };
   }

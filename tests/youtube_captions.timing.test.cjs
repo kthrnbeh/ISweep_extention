@@ -512,6 +512,39 @@ test('overlay receives audio_stt text when backend returns cleaned_captions', ()
   assert.equal(best.text, 'You are ___');
 });
 
+test('overlay receives audio_stt text when backend returns empty cleaned_captions but top-level cleaned_text', () => {
+  const hooks = loadYoutubeTimingHooks();
+  const entries = hooks.buildAudioResponseCaptions(
+    {
+      status: 'ready',
+      source: 'audio',
+      cleaned_captions: [],
+      clean_captions: [],
+      cleaned_text: 'What the ____ is going on',
+      words: [{ word: 'What', start: 123.5, end: 123.6 }],
+    },
+    123.0,
+    125.0,
+  );
+
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].cleaned_text, 'What the ____ is going on');
+  assert.equal(entries[0].start_seconds, 123.0);
+  assert.equal(entries[0].end_seconds, 125.0);
+
+  const best = hooks.getBestCleanCaptionText('', 123.5, {
+    preCachedAudioCaptions: [],
+    liveAudioCaptions: entries,
+    preAnalyzedCaptions: [],
+    markerEntries: [],
+    liveCaptionObservedAtMs: Date.now(),
+    nowMs: Date.now(),
+  });
+
+  assert.equal(best.source, 'audio_stt_live');
+  assert.equal(best.text, 'What the ____ is going on');
+});
+
 test('audio_stt caption replaces waiting placeholder', () => {
   const hooks = loadYoutubeTimingHooks();
   const waiting = hooks.resolveOverlayDisplayState(

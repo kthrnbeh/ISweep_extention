@@ -419,10 +419,10 @@
       ? Math.max(Number(payload.end_seconds), normalizedStart)
       : (Number.isFinite(Number(fallbackEndSec)) ? Math.max(Number(fallbackEndSec), normalizedStart) : normalizedStart);
 
-    if (Array.isArray(payload.cleaned_captions)) {
+    if (Array.isArray(payload.cleaned_captions) && payload.cleaned_captions.length > 0) {
       return normalizePreAnalyzedCaptions(payload.cleaned_captions);
     }
-    if (Array.isArray(payload.clean_captions)) {
+    if (Array.isArray(payload.clean_captions) && payload.clean_captions.length > 0) {
       return normalizePreAnalyzedCaptions(payload.clean_captions);
     }
 
@@ -1776,6 +1776,9 @@
         console.log(CLEAN_CC_LOG_PREFIX, 'overlay source', {
           source: resolved.source || 'live_masked',
         });
+        if (resolved.source !== 'waiting_audio_text') {
+          console.log('[ISWEEP][CAPTION_UI] showing:', resolved.text);
+        }
       }
       requestAnimationFrame(() => {
         if (cleanCaptionTextEl) cleanCaptionTextEl.style.opacity = '1';

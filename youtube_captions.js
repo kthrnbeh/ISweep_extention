@@ -1590,10 +1590,11 @@
       };
     }
 
+    // No real text available — hide the overlay instead of showing a placeholder.
     return {
-      text: placeholderText,
+      text: '',
       source: 'waiting_audio_text',
-      visible: true,
+      visible: false,
       stale: false,
       bridged: false,
       waiting: true,

@@ -300,7 +300,7 @@ test('overlay bridges small timing gaps', () => {
   assert.equal(resolved.source, 'pre_analyzed');
 });
 
-test('overlay shows placeholder when enabled and no caption text exists', () => {
+test('overlay hides instead of showing placeholder when no caption text exists', () => {
   const hooks = loadYoutubeTimingHooks();
   const resolved = hooks.resolveOverlayDisplayState(
     { text: '', source: null, stale: false },
@@ -310,9 +310,10 @@ test('overlay shows placeholder when enabled and no caption text exists', () => 
     { cleanCaptionsEnabled: true, placeholderText: 'ISweep captions listening...' },
   );
 
-  assert.equal(resolved.visible, true);
+  assert.equal(resolved.visible, false);
   assert.equal(resolved.source, 'waiting_audio_text');
-  assert.equal(resolved.text, 'ISweep captions listening...');
+  assert.equal(resolved.text, '');
+  assert.equal(resolved.waiting, true);
 });
 
 test('overlay can be disabled without requiring caption text state', () => {

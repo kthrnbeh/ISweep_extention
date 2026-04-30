@@ -125,7 +125,7 @@ test('clean caption text masks blocked words', () => {
   assert.equal(cleaned.includes('This'), true, 'clean words should remain visible');
 });
 
-test('clean caption text follows precedence order: pre-analyzed, audio, marker, then live', () => {
+test('clean caption text follows precedence order: pre-analyzed, marker, audio, then live', () => {
   const hooks = loadYoutubeTimingHooks();
   hooks.setCachedPreferences({
     enabled: true,
@@ -168,8 +168,8 @@ test('clean caption text follows precedence order: pre-analyzed, audio, marker, 
     nowMs,
   });
 
-  assert.equal(audioLiveResult.text, 'audio live line');
-  assert.equal(audioLiveResult.source, 'audio_stt_live');
+  assert.equal(audioLiveResult.text, 'marker line');
+  assert.equal(audioLiveResult.source, 'marker_text');
   assert.equal(audioLiveResult.stale, false);
 
   const preAnalyzedResult = hooks.getBestCleanCaptionText('live fallback', 10.2, {

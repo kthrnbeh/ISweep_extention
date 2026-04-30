@@ -410,6 +410,29 @@
       .sort((a, b) => a.start_seconds - b.start_seconds);
   }
 
+  function buildFromWords(words) {
+    if (!Array.isArray(words)) return null;
+    const text = words
+      .map((entry) => {
+        if (!entry || typeof entry !== 'object') return '';
+        return String(entry.word || entry.text || '').trim();
+      })
+      .filter(Boolean)
+      .join(' ')
+      .trim();
+    return text || null;
+  }
+
+  function extractDisplayText(payload) {
+    if (!payload || typeof payload !== 'object') return null;
+    return payload.clean_text
+      || payload.cleaned_text
+      || payload.caption_text
+      || payload.text
+      || buildFromWords(payload.words)
+      || null;
+  }
+
   function buildAudioResponseCaptions(response, fallbackStartSec, fallbackEndSec) {
     const payload = response && typeof response === 'object' ? response : {};
     const normalizedStart = Number.isFinite(Number(payload.start_seconds))
@@ -426,13 +449,10 @@
       return normalizePreAnalyzedCaptions(payload.clean_captions);
     }
 
-    const topLevelText = [payload.clean_text, payload.cleaned_text, payload.caption_text, payload.text]
-      .find((value) => typeof value === 'string' && value.trim());
+    const topLevelText = extractDisplayText(payload);
     const normalizedWords = normalizeTimedWords(payload.words);
-    const wordsFallbackText = !topLevelText && normalizedWords.length
-      ? normalizedWords.map((wordEntry) => wordEntry.word).join(' ')
-      : '';
-    const displayText = topLevelText || wordsFallbackText;
+    const wordsFallbackText = !topLevelText ? buildFromWords(normalizedWords) : null;
+    const displayText = topLevelText || wordsFallbackText || '';
     if (!displayText) return [];
 
     return normalizePreAnalyzedCaptions([
@@ -468,7 +488,7 @@
   }
 
   function getBestCleanCaptionText(liveText, nowSec, options = {}) {
-    // Priority order: pre-analyzed transcript -> audio STT -> marker text -> live caption fallback.
+    // Priority order: pre-analyzed transcript -> marker text -> audio STT -> live caption fallback.
     const preCachedAudioCaptions = Array.isArray(options.preCachedAudioCaptions)
       ? options.preCachedAudioCaptions
       : preCachedAudioCleanCaptions;
@@ -496,6 +516,18 @@
       };
     }
 
+    const markerTextEntry = findTimedCleanCaptionEntry(markers, nowSec, lookaheadSec);
+    if (markerTextEntry) {
+      return {
+        text: getCleanCaptionDisplayText(markerTextEntry),
+        source: 'marker_text',
+        stale: false,
+        cleanResumeTime: Number.isFinite(Number(markerTextEntry.clean_resume_time))
+          ? Number(markerTextEntry.clean_resume_time)
+          : null,
+      };
+    }
+
     const preCachedAudioEntry = findTimedCleanCaptionEntry(preCachedAudioCaptions, nowSec, lookaheadSec);
     if (preCachedAudioEntry) {
       return {
@@ -516,18 +548,6 @@
         stale: false,
         cleanResumeTime: Number.isFinite(Number(liveAudioEntry.clean_resume_time))
           ? Number(liveAudioEntry.clean_resume_time)
-          : null,
-      };
-    }
-
-    const markerTextEntry = findTimedCleanCaptionEntry(markers, nowSec, lookaheadSec);
-    if (markerTextEntry) {
-      return {
-        text: getCleanCaptionDisplayText(markerTextEntry),
-        source: 'marker_text',
-        stale: false,
-        cleanResumeTime: Number.isFinite(Number(markerTextEntry.clean_resume_time))
-          ? Number(markerTextEntry.clean_resume_time)
           : null,
       };
     }

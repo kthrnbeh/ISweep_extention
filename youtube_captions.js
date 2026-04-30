@@ -1793,6 +1793,7 @@
       if (lastRenderedCleanCaptionKey !== nextKey) {
         const sourceLabel = String(resolved.source || 'live_masked');
         const canonicalSource = sourceLabel.startsWith('audio_stt') ? 'audio_stt' : sourceLabel;
+        console.log(CLEAN_CC_LOG_PREFIX, 'text updated');
         console.log(CLEAN_CC_LOG_PREFIX, 'overlay text rendered');
         if (canonicalSource === 'pre_analyzed') {
           console.log(CLEAN_CC_LOG_PREFIX, 'source pre_analyzed');

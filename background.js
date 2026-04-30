@@ -536,7 +536,7 @@ async function handleAudioAhead(videoId, audioChunk, mimeType, startSeconds, end
       mimeType,
       chunkBytes: audioChunk.length,
     });
-    res = await fetch(`${backendUrl}/audio/analyze_chunk`, {
+    res = await fetch(`${backendUrl}/audio/analyze`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -593,7 +593,15 @@ async function handleAudioAhead(videoId, audioChunk, mimeType, startSeconds, end
     const normalizedCleanedCaptions = Array.isArray(payload.cleaned_captions)
       ? payload.cleaned_captions
       : (Array.isArray(payload.clean_captions) ? payload.clean_captions : []);
-    const normalizedStatus = payload.status || ((Array.isArray(payload.events) || typeof payload.cleaned_text === 'string') ? 'ready' : 'error');
+    const hasDisplayPayload = Boolean(
+      (Array.isArray(normalizedCleanedCaptions) && normalizedCleanedCaptions.length)
+      || typeof payload.clean_text === 'string'
+      || typeof payload.cleaned_text === 'string'
+      || typeof payload.caption_text === 'string'
+      || typeof payload.text === 'string'
+      || (Array.isArray(payload.words) && payload.words.length)
+    );
+    const normalizedStatus = payload.status || ((Array.isArray(payload.events) || hasDisplayPayload) ? 'ready' : 'error');
     const result = {
       status: normalizedStatus,
       source: payload.source || 'audio',

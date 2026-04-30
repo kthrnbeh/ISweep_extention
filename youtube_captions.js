@@ -428,17 +428,22 @@
 
     const topLevelText = [payload.clean_text, payload.cleaned_text, payload.caption_text, payload.text]
       .find((value) => typeof value === 'string' && value.trim());
-    if (!topLevelText) return [];
+    const normalizedWords = normalizeTimedWords(payload.words);
+    const wordsFallbackText = !topLevelText && normalizedWords.length
+      ? normalizedWords.map((wordEntry) => wordEntry.word).join(' ')
+      : '';
+    const displayText = topLevelText || wordsFallbackText;
+    if (!displayText) return [];
 
     return normalizePreAnalyzedCaptions([
       {
         start_seconds: normalizedStart,
         end_seconds: normalizedEnd,
-        text: typeof payload.text === 'string' ? payload.text : topLevelText,
+        text: typeof payload.text === 'string' ? payload.text : displayText,
         clean_text: typeof payload.clean_text === 'string' ? payload.clean_text : null,
         cleaned_text: typeof payload.cleaned_text === 'string' ? payload.cleaned_text : null,
         caption_text: typeof payload.caption_text === 'string' ? payload.caption_text : null,
-        words: Array.isArray(payload.words) ? payload.words : [],
+        words: normalizedWords,
       },
     ]);
   }
@@ -463,7 +468,7 @@
   }
 
   function getBestCleanCaptionText(liveText, nowSec, options = {}) {
-    // Priority order: pre-cached audio STT -> live audio STT -> pre-analyzed transcript -> marker text -> live caption fallback.
+    // Priority order: pre-analyzed transcript -> audio STT -> marker text -> live caption fallback.
     const preCachedAudioCaptions = Array.isArray(options.preCachedAudioCaptions)
       ? options.preCachedAudioCaptions
       : preCachedAudioCleanCaptions;
@@ -478,6 +483,18 @@
     const nowMs = Number.isFinite(Number(options.nowMs)) ? Number(options.nowMs) : Date.now();
     const lookaheadSec = Number.isFinite(Number(options.lookaheadSec)) ? Number(options.lookaheadSec) : CLEAN_CAPTION_LOOKAHEAD_SEC;
     const staleMs = Number.isFinite(Number(options.staleMs)) ? Number(options.staleMs) : CLEAN_CAPTION_STALE_MS;
+
+    const preAnalyzedEntry = findTimedCleanCaptionEntry(preAnalyzedCaptions, nowSec, lookaheadSec);
+    if (preAnalyzedEntry) {
+      return {
+        text: getCleanCaptionDisplayText(preAnalyzedEntry),
+        source: 'pre_analyzed',
+        stale: false,
+        cleanResumeTime: Number.isFinite(Number(preAnalyzedEntry.clean_resume_time))
+          ? Number(preAnalyzedEntry.clean_resume_time)
+          : null,
+      };
+    }
 
     const preCachedAudioEntry = findTimedCleanCaptionEntry(preCachedAudioCaptions, nowSec, lookaheadSec);
     if (preCachedAudioEntry) {
@@ -499,18 +516,6 @@
         stale: false,
         cleanResumeTime: Number.isFinite(Number(liveAudioEntry.clean_resume_time))
           ? Number(liveAudioEntry.clean_resume_time)
-          : null,
-      };
-    }
-
-    const preAnalyzedEntry = findTimedCleanCaptionEntry(preAnalyzedCaptions, nowSec, lookaheadSec);
-    if (preAnalyzedEntry) {
-      return {
-        text: getCleanCaptionDisplayText(preAnalyzedEntry),
-        source: 'pre_analyzed',
-        stale: false,
-        cleanResumeTime: Number.isFinite(Number(preAnalyzedEntry.clean_resume_time))
-          ? Number(preAnalyzedEntry.clean_resume_time)
           : null,
       };
     }
@@ -1747,7 +1752,7 @@
 
       if (resolved.source === 'waiting_audio_text') {
         if (!cleanCaptionWaitingLogged) {
-          console.log(CLEAN_CC_LOG_PREFIX, 'waiting for audio text');
+          console.log(CLEAN_CC_LOG_PREFIX, 'placeholder shown');
           cleanCaptionWaitingLogged = true;
         }
       } else {
@@ -1768,7 +1773,16 @@
       if (lastRenderedCleanCaptionKey !== nextKey) {
         const sourceLabel = String(resolved.source || 'live_masked');
         const canonicalSource = sourceLabel.startsWith('audio_stt') ? 'audio_stt' : sourceLabel;
-        console.log(CLEAN_CC_LOG_PREFIX, 'text updated', { source: canonicalSource });
+        console.log(CLEAN_CC_LOG_PREFIX, 'overlay text rendered');
+        if (canonicalSource === 'pre_analyzed') {
+          console.log(CLEAN_CC_LOG_PREFIX, 'source pre_analyzed');
+        } else if (canonicalSource === 'marker_text') {
+          console.log(CLEAN_CC_LOG_PREFIX, 'source marker_text');
+        } else if (canonicalSource === 'audio_stt') {
+          console.log(CLEAN_CC_LOG_PREFIX, 'source audio_stt');
+        } else if (canonicalSource === 'live_masked') {
+          console.log(CLEAN_CC_LOG_PREFIX, 'source live_masked');
+        }
         console.log(CLEAN_CC_LOG_PREFIX, 'fade update', {
           source: resolved.source || 'live_masked',
           fade_ms: CLEAN_CC_FADE_MS,

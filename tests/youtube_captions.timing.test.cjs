@@ -125,7 +125,7 @@ test('clean caption text masks blocked words', () => {
   assert.equal(cleaned.includes('This'), true, 'clean words should remain visible');
 });
 
-test('clean caption text follows precedence order: audio cached, audio live, pre-analyzed, marker, then live', () => {
+test('clean caption text follows precedence order: pre-analyzed, audio, marker, then live', () => {
   const hooks = loadYoutubeTimingHooks();
   hooks.setCachedPreferences({
     enabled: true,
@@ -151,8 +151,8 @@ test('clean caption text follows precedence order: audio cached, audio live, pre
     nowMs,
   });
 
-  assert.equal(audioCachedResult.text, 'audio cached line');
-  assert.equal(audioCachedResult.source, 'audio_stt_cached');
+  assert.equal(audioCachedResult.text, 'pre analyzed line');
+  assert.equal(audioCachedResult.source, 'pre_analyzed');
   assert.equal(audioCachedResult.stale, false);
 
   const audioLiveResult = hooks.getBestCleanCaptionText('live fallback', 11.2, {
@@ -160,9 +160,7 @@ test('clean caption text follows precedence order: audio cached, audio live, pre
     liveAudioCaptions: [
       { start_seconds: 11, end_seconds: 11.5, clean_text: 'audio live line' },
     ],
-    preAnalyzedCaptions: [
-      { start_seconds: 11, end_seconds: 11.5, clean_text: 'pre analyzed line' },
-    ],
+    preAnalyzedCaptions: [],
     markerEntries: [
       { start_seconds: 11, end_seconds: 11.5, cleaned_text: 'marker line' },
     ],
@@ -478,6 +476,46 @@ test('audio caption response with top-level clean_text becomes timed overlay ent
   assert.equal(entries[0].clean_text, 'You are a ___');
   assert.equal(entries[0].start_seconds, 50.0);
   assert.equal(entries[0].end_seconds, 50.8);
+});
+
+test('audio caption response with only words builds masked timed overlay entry', () => {
+  const hooks = loadYoutubeTimingHooks();
+  hooks.setCachedPreferences({
+    enabled: true,
+    blocklist: { enabled: true, items: ['jerk'] },
+    categories: { language: { enabled: true, items: ['jerk'] } },
+  });
+
+  const entries = hooks.buildAudioResponseCaptions(
+    {
+      status: 'ready',
+      source: 'audio',
+      cleaned_captions: [],
+      clean_captions: [],
+      words: [
+        { word: 'You', start: 80.0, end: 80.1 },
+        { word: 'are', start: 80.1, end: 80.2 },
+        { word: 'a', start: 80.2, end: 80.25 },
+        { word: 'jerk', start: 80.25, end: 80.45 },
+      ],
+    },
+    80.0,
+    80.6,
+  );
+
+  assert.equal(entries.length, 1);
+  const best = hooks.getBestCleanCaptionText('', 80.3, {
+    preCachedAudioCaptions: [],
+    liveAudioCaptions: entries,
+    preAnalyzedCaptions: [],
+    markerEntries: [],
+    liveCaptionObservedAtMs: Date.now(),
+    nowMs: Date.now(),
+  });
+
+  assert.equal(best.source, 'audio_stt_live');
+  assert.equal(/jerk/i.test(best.text), false);
+  assert.equal(best.text.includes('____') || best.text.includes('___'), true);
 });
 
 test('overlay receives audio_stt text when backend returns cleaned_captions', () => {

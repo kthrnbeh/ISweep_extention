@@ -498,7 +498,7 @@ async function handleMarkerAnalyze(videoId, forceRefresh = false) {
   }
 }
 
-// Receives a real-time audio chunk from youtube_captions.js, forwards to /audio/analyze,
+// Receives a real-time audio chunk from youtube_captions.js, forwards to /captions/transcribe,
 // and returns { status, source, events, cleaned_captions, failure_reason, cached }.
 async function handleAudioAhead(videoId, audioChunk, mimeType, startSeconds, endSeconds) {
   const AUDIO_LOG = '[ISWEEP][AUDIO_AHEAD]';
@@ -519,7 +519,7 @@ async function handleAudioAhead(videoId, audioChunk, mimeType, startSeconds, end
   const backendUrl = await getBackendUrl();
   const token = await getAuthToken();
   if (!token) {
-    console.warn('[ISWEEP][BG][AUTH] missing token affected /audio/analyze', {
+    console.warn('[ISWEEP][BG][AUTH] missing token affected /captions/transcribe', {
       backendUrl,
       videoId: cleanVideoId,
     });
@@ -536,7 +536,7 @@ async function handleAudioAhead(videoId, audioChunk, mimeType, startSeconds, end
       mimeType,
       chunkBytes: audioChunk.length,
     });
-    res = await fetch(`${backendUrl}/audio/analyze`, {
+    res = await fetch(`${backendUrl}/captions/transcribe`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -615,7 +615,7 @@ async function handleAudioAhead(videoId, audioChunk, mimeType, startSeconds, end
       cleaned_text: typeof payload.cleaned_text === 'string' ? payload.cleaned_text : null,
       caption_text: typeof payload.caption_text === 'string' ? payload.caption_text : null,
       words: Array.isArray(payload.words) ? payload.words : [],
-      failure_reason: payload.failure_reason || null,
+      failure_reason: payload.failure_reason || payload.reason || null,
       cached: payload.cached === true,
     };
     console.log(AUDIO_LOG, 'chunk result', {

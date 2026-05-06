@@ -125,6 +125,13 @@ test('clean caption text masks blocked words', () => {
   assert.equal(cleaned.includes('This'), true, 'clean words should remain visible');
 });
 
+test('clean caption text keeps blocked words silent in display text', () => {
+  const hooks = loadYoutubeTimingHooks();
+  const stripped = hooks.stripCategoryLabelsFromCaption('That was profanity___');
+  assert.equal(/profanity|language|sexual|violence/i.test(stripped), false);
+  assert.equal(stripped, 'That was ___');
+});
+
 test('clean caption text follows precedence order: pre-analyzed, marker, audio, then live', () => {
   const hooks = loadYoutubeTimingHooks();
   hooks.setCachedPreferences({
@@ -218,7 +225,7 @@ test('clean caption text follows precedence order: pre-analyzed, marker, audio, 
   assert.equal(liveResult.source, 'live_masked');
   assert.equal(liveResult.stale, false);
   assert.equal(/shit/i.test(liveResult.text), false);
-  assert.equal(liveResult.text.includes('____'), true);
+  assert.equal(liveResult.text.includes('___'), true);
 });
 
 test('mute window uses blocked word start and clean resume time', () => {
@@ -257,7 +264,7 @@ test('live masked text is used when no pre-analyzed caption exists', () => {
   assert.equal(result.source, 'live_masked');
   assert.equal(result.stale, false);
   assert.equal(/shit/i.test(result.text), false);
-  assert.equal(result.text.includes('____'), true);
+    assert.equal(result.text.includes('___'), true);
 });
 
 test('stale live caption text is not displayed', () => {
@@ -327,6 +334,26 @@ test('overlay shows waiting placeholder when no caption text exists', () => {
   assert.equal(resolved.source, 'waiting_audio_text');
   assert.equal(resolved.text, 'ISweep captions listening...');
   assert.equal(resolved.waiting, true);
+});
+
+test('overlay shows explicit STT-disabled message when audio caption pipeline is unavailable', () => {
+  const hooks = loadYoutubeTimingHooks();
+  const resolved = hooks.resolveOverlayDisplayState(
+    { text: '', source: null, stale: false },
+    { text: '', source: 'none', visible: false, updatedAtMs: 0 },
+    1000,
+    hooks.constants.CLEAN_CC_BRIDGE_GAP_MS,
+    {
+      cleanCaptionsEnabled: true,
+      placeholderText: 'ISweep captions listening...',
+      sttDisabledText: hooks.constants.CLEAN_CC_STT_DISABLED_TEXT,
+      audioCaptionMode: 'stt_disabled',
+    },
+  );
+
+  assert.equal(resolved.visible, true);
+  assert.equal(resolved.source, 'audio_stt_disabled');
+  assert.equal(resolved.text, 'ISweep Captions need speech-to-text enabled.');
 });
 
 test('overlay can be disabled without requiring caption text state', () => {
@@ -438,7 +465,7 @@ test('audio caption fallback masks blocked words when clean_text is missing', ()
 
   assert.equal(normalized.length, 1);
   assert.equal(/shit/i.test(normalized[0].clean_text), false);
-  assert.equal(normalized[0].clean_text.includes('___'), true);
+    assert.equal(normalized[0].clean_text.includes('___'), true);
 });
 
 test('overlay state remains display-only metadata', () => {
@@ -558,7 +585,7 @@ test('overlay receives audio_stt text when backend returns empty cleaned_caption
       source: 'audio',
       cleaned_captions: [],
       clean_captions: [],
-      cleaned_text: 'What the ____ is going on',
+      cleaned_text: 'What the ___ is going on',
       words: [{ word: 'What', start: 123.5, end: 123.6 }],
     },
     123.0,
@@ -566,7 +593,7 @@ test('overlay receives audio_stt text when backend returns empty cleaned_caption
   );
 
   assert.equal(entries.length, 1);
-  assert.equal(entries[0].cleaned_text, 'What the ____ is going on');
+  assert.equal(entries[0].cleaned_text, 'What the ___ is going on');
   assert.equal(entries[0].start_seconds, 123.0);
   assert.equal(entries[0].end_seconds, 125.0);
 
@@ -580,7 +607,7 @@ test('overlay receives audio_stt text when backend returns empty cleaned_caption
   });
 
   assert.equal(best.source, 'audio_stt_live');
-  assert.equal(best.text, 'What the ____ is going on');
+  assert.equal(best.text, 'What the ___ is going on');
 });
 
 test('audio_stt caption replaces waiting placeholder', () => {

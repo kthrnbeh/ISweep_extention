@@ -181,7 +181,7 @@ test('audio result forwards chunk aliases and preserves cleaned captions/cache f
         status: 'ready',
         source: 'audio_stt',
         events: [{ id: 'm1', action: 'mute', start_seconds: 10.2, end_seconds: 10.5 }],
-        cleaned_captions: [{ start_seconds: 10, end_seconds: 11, clean_text: 'hello ____' }],
+        cleaned_captions: [{ start_seconds: 10, end_seconds: 11, clean_text: 'hello ___' }],
         failure_reason: null,
         cached: true,
       }),

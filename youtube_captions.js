@@ -215,6 +215,7 @@
   const CLEAN_CC_FADE_MS = 120;
   const CLEAN_CC_LOG_PREFIX = '[ISWEEP][CAPTIONS]';
   const CLEAN_CC_PLACEHOLDER_TEXT = 'ISweep captions listening...';
+  const CLEAN_CC_STT_DISABLED_TEXT = 'ISweep Captions need speech-to-text enabled.';
 
   // Audio watch-ahead constants.
   const AUDIO_AHEAD_LOG_PREFIX = '[ISWEEP][AUDIO_AHEAD]';
@@ -267,6 +268,8 @@
   let cleanCaptionNativeWarningLogged = false;
   let lastAppliedCleanCaptionStyle = null;
   let lastAppliedCleanCaptionSize = null;
+  let lastAudioCaptionSource = null;
+  let lastAudioCaptionFailureReason = null;
 
   // Audio watch-ahead state.
   let audioCtx = null;
@@ -278,6 +281,18 @@
   let audioAheadVideoId = null;
   let audioAheadFailed = false; // true after a terminal (non-retryable) capture failure
   let audioFilteringEnabled = true;
+
+  function getAudioCaptionMode() {
+    const disabledReasons = new Set([
+      'stt_disabled',
+      'stt_unavailable',
+      'transcription_unavailable',
+      'audio_pipeline_disabled',
+    ]);
+    if (lastAudioCaptionSource === 'audio_stt_disabled') return 'stt_disabled';
+    if (disabledReasons.has(String(lastAudioCaptionFailureReason || '').trim())) return 'stt_disabled';
+    return 'listening';
+  }
 
   function getCurrentVideoId() {
     try {
@@ -904,6 +919,10 @@
     }
     audioSampleBufs = [];
     audioAheadVideoId = null;
+    if (reason === 'captions_disabled') {
+      lastAudioCaptionSource = null;
+      lastAudioCaptionFailureReason = null;
+    }
     console.log(AUDIO_AHEAD_LOG_PREFIX, 'audio capture stopped', { reason });
   }
 
@@ -976,6 +995,8 @@
         chunk_end_seconds: chunkEndSec,
         status: response.status || 'unknown',
       });
+      lastAudioCaptionSource = response.source || null;
+      lastAudioCaptionFailureReason = response.failure_reason || null;
       console.log(AUDIO_AHEAD_LOG_PREFIX, 'chunk result', {
         videoId, start_seconds: chunkStartSec, end_seconds: chunkEndSec,
         status: response.status,
@@ -996,13 +1017,16 @@
           source: response.cached === true ? 'audio_stt_cached' : 'audio_stt_live',
           count: normalizedAudioCaptions.length,
         });
-        updateCleanOverlay(lastCaptionText, findVideo()?.currentTime || 0);
       }
+      updateCleanOverlay(lastCaptionText, findVideo()?.currentTime || 0);
     }).catch((err) => {
       console.warn(AUDIO_AHEAD_LOG_PREFIX, 'failure_reason: analyze_exception', {
         videoId, start_seconds: chunkStartSec, end_seconds: chunkEndSec,
         error: err?.message || String(err),
       });
+      lastAudioCaptionSource = 'audio_stt';
+      lastAudioCaptionFailureReason = 'analyze_exception';
+      updateCleanOverlay(lastCaptionText, findVideo()?.currentTime || 0);
     });
   }
 
@@ -1080,7 +1104,7 @@
       paused: video?.paused ?? null,
       currentTime: video?.currentTime ?? null,
     });
-    if (!audioFilteringEnabled) return;
+    if (!cleanCaptionSettings.cleanCaptionsEnabled) return;
     if (!video || audioAheadActive || audioAheadFailed) return;
 
     const minReadyState = typeof HTMLMediaElement !== 'undefined'
@@ -1276,11 +1300,15 @@
     preAnalyzedCleanCaptions = [];
     preCachedAudioCleanCaptions = [];
     liveAudioCleanCaptions = [];
+    lastAudioCaptionSource = null;
+    lastAudioCaptionFailureReason = null;
     audioAheadFailed = false;           // Allow a fresh capture attempt for the new video
     stopAudioCapture('video_changed');
     resetMarkerEngine('video changed');
     analyzeCurrentVideoMarkers(false);
-    setTimeout(startAudioCapture, 1500); // Give the player 1.5 s to start before capturing
+    if (cleanCaptionSettings.cleanCaptionsEnabled) {
+      setTimeout(startAudioCapture, 1500); // Give the player 1.5 s to start before capturing
+    }
   }
 
   function startVideoWatchLoop() {
@@ -1290,7 +1318,7 @@
     markerVideoWatchInterval = setInterval(() => {
       handleVideoIdChange(getCurrentVideoId());
       // Retry audio capture each tick if tracks weren't available on the first attempt.
-      if (activeVideoId && !audioAheadActive && !audioAheadFailed) startAudioCapture();
+      if (activeVideoId && cleanCaptionSettings.cleanCaptionsEnabled && !audioAheadActive && !audioAheadFailed) startAudioCapture();
     }, 1000);
   }
 
@@ -1374,6 +1402,11 @@
       }
       if (changes[STORAGE_KEYS.CLEAN_CAPTION_SETTINGS]) {
         cleanCaptionSettings = normalizeCleanCaptionSettings(changes[STORAGE_KEYS.CLEAN_CAPTION_SETTINGS].newValue);
+        if (!cleanCaptionSettings.cleanCaptionsEnabled) {
+          stopAudioCapture('captions_disabled');
+        } else if (activeVideoId && !audioAheadActive && !audioAheadFailed) {
+          startAudioCapture();
+        }
         applyCleanCaptionOverlayStyles();
         updateCleanOverlay(lastCaptionText, findVideo()?.currentTime || 0);
       }
@@ -1387,6 +1420,11 @@
     chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       if (!message || message.type !== 'isweep_clean_caption_settings_changed') return;
       cleanCaptionSettings = normalizeCleanCaptionSettings(message.settings);
+      if (!cleanCaptionSettings.cleanCaptionsEnabled) {
+        stopAudioCapture('captions_disabled');
+      } else if (activeVideoId && !audioAheadActive && !audioAheadFailed) {
+        startAudioCapture();
+      }
       applyCleanCaptionOverlayStyles();
       updateCleanOverlay(lastCaptionText, findVideo()?.currentTime || 0);
       sendResponse({ ok: true });
@@ -1509,26 +1547,25 @@
         'category.?name', 'reason:',
       ];
     
-      // Remove any category label patterns followed by optional content.
+      // Remove category label patterns without stripping the visible placeholder.
       // Handles cases like "[profanity]", "(language)", "sexual___", etc.
       categoryLabels.forEach((label) => {
-        // Match category name with surrounding brackets, parens, or directly
+        // Match category name with surrounding brackets, parens, or directly.
         const pattern = new RegExp(
-          `\\[?\\(?\`?${label}\`?\\)?\\]?\\s*_*`,
+          `(?:\\[|\\()??${label}(?:\\]|\\))?(?=\\s*___|\\b)`,
           'gi'
         );
-        cleaned = cleaned.replace(pattern, '___');
+        cleaned = cleaned.replace(pattern, '');
       });
-    
-      // Clean up multiple consecutive placeholders to single placeholder
+
+      // Normalize any leftover placeholder width without removing it.
       cleaned = cleaned.replace(/_+/g, '___');
-    
-      // Clean up orphaned underscores (isolated from words)
-      cleaned = cleaned.replace(/\s___\s/g, ' ');
-      cleaned = cleaned.replace(/^___\s+/, '');
-      cleaned = cleaned.replace(/\s+___$/, '');
-    
-      return cleaned.trim();
+
+      // Tidy spacing left behind after removing metadata labels.
+      cleaned = cleaned.replace(/\s{2,}/g, ' ').trim();
+      cleaned = cleaned.replace(/\(\s*\)/g, '').replace(/\[\s*\]/g, '').trim();
+
+      return cleaned;
     }
 
   function maskCaptionWord(word) {
@@ -1699,6 +1736,8 @@
   function resolveOverlayDisplayState(overlayState, previousState, nowMs, bridgeGapMs = CLEAN_CC_BRIDGE_GAP_MS, options = {}) {
     const cleanCaptionsEnabled = options.cleanCaptionsEnabled !== false;
     const placeholderText = typeof options.placeholderText === 'string' ? options.placeholderText : CLEAN_CC_PLACEHOLDER_TEXT;
+    const sttDisabledText = typeof options.sttDisabledText === 'string' ? options.sttDisabledText : CLEAN_CC_STT_DISABLED_TEXT;
+    const audioCaptionMode = typeof options.audioCaptionMode === 'string' ? options.audioCaptionMode : 'listening';
     const prior = previousState && typeof previousState === 'object'
       ? previousState
       : { text: '', source: 'none', visible: false, updatedAtMs: 0 };
@@ -1729,6 +1768,17 @@
         visible: true,
         stale: false,
         bridged: true,
+      };
+    }
+
+    if (audioCaptionMode === 'stt_disabled') {
+      return {
+        text: sttDisabledText,
+        source: 'audio_stt_disabled',
+        visible: true,
+        stale: false,
+        bridged: false,
+        waiting: false,
       };
     }
 
@@ -1771,6 +1821,8 @@
       {
         cleanCaptionsEnabled: cleanCaptionSettings.cleanCaptionsEnabled,
         placeholderText: CLEAN_CC_PLACEHOLDER_TEXT,
+        sttDisabledText: CLEAN_CC_STT_DISABLED_TEXT,
+        audioCaptionMode: getAudioCaptionMode(),
       },
     );
     const nextKey = `${resolved.source || 'none'}:${resolved.text}`;
@@ -2622,6 +2674,8 @@
       getNormalizedCaptionPosition,
       normalizeCleanCaptionSettings,
       toCleanCaptionText,
+      stripCategoryLabelsFromCaption,
+      getAudioCaptionMode,
       hasNearbyAudioMuteMarker,
       getMarkerEarlyWindowSec,
       shouldFireMarker,
@@ -2632,6 +2686,7 @@
         CLEAN_CAPTION_LOOKAHEAD_SEC,
         CLEAN_CC_BRIDGE_GAP_MS,
         CLEAN_CC_FADE_MS,
+        CLEAN_CC_STT_DISABLED_TEXT,
         PLACEHOLDER_WORD_PREROLL_SEC,
         PLACEHOLDER_BLEED_SEC,
         MIN_PLACEHOLDER_MUTE_SEC,

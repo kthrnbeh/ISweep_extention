@@ -336,11 +336,11 @@
     if (!entry || typeof entry !== 'object') return '';
     const cleanCandidates = [entry.clean_text, entry.cleaned_text];
     const cleanMatch = cleanCandidates.find((value) => typeof value === 'string' && value.trim());
-    if (cleanMatch) return cleanMatch.trim();
+      if (cleanMatch) return stripCategoryLabelsFromCaption(cleanMatch.trim());
     const rawCandidates = [entry.caption_text, entry.text];
     const rawMatch = rawCandidates.find((value) => typeof value === 'string' && value.trim());
     if (!rawMatch) return '';
-    return toCleanCaptionText(rawMatch.trim());
+      return stripCategoryLabelsFromCaption(toCleanCaptionText(rawMatch.trim()));
   }
 
   function normalizeTimedWords(words) {
@@ -1493,6 +1493,44 @@
     };
   }
 
+    // Remove category labels and filter metadata from caption text.
+    // Ensures the overlay never displays internal ISweep labels like:
+    // - profanity, language, sexual, violence, crude, custom, blocked
+    // - filter reason, matched_category, or similar metadata strings
+    // Replaces category-labeled words with simple underscores only.
+    function stripCategoryLabelsFromCaption(text) {
+      if (!text || typeof text !== 'string') return text;
+      let cleaned = String(text);
+    
+      // List of category/metadata labels to remove (case-insensitive).
+      const categoryLabels = [
+        'profanity', 'language', 'sexual', 'violence', 'crude',
+        'custom', 'blocked', 'filter.?reason', 'matched.?category',
+        'category.?name', 'reason:',
+      ];
+    
+      // Remove any category label patterns followed by optional content.
+      // Handles cases like "[profanity]", "(language)", "sexual___", etc.
+      categoryLabels.forEach((label) => {
+        // Match category name with surrounding brackets, parens, or directly
+        const pattern = new RegExp(
+          `\\[?\\(?\`?${label}\`?\\)?\\]?\\s*_*`,
+          'gi'
+        );
+        cleaned = cleaned.replace(pattern, '___');
+      });
+    
+      // Clean up multiple consecutive placeholders to single placeholder
+      cleaned = cleaned.replace(/_+/g, '___');
+    
+      // Clean up orphaned underscores (isolated from words)
+      cleaned = cleaned.replace(/\s___\s/g, ' ');
+      cleaned = cleaned.replace(/^___\s+/, '');
+      cleaned = cleaned.replace(/\s+___$/, '');
+    
+      return cleaned.trim();
+    }
+
   function maskCaptionWord(word) {
     const length = Math.max(String(word || '').replace(/[^A-Za-z0-9']/g, '').length, 3);
     return '_'.repeat(length);
@@ -1518,7 +1556,7 @@
           });
           return regexes.some((regex) => regex.test(normalizedWord));
         });
-        return blocked ? maskCaptionWord(word) : word;
+          return blocked ? '___' : word;
       });
   }
 

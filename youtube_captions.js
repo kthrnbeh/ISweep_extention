@@ -213,7 +213,7 @@
   const CLEAN_CAPTION_LOOKAHEAD_SEC = 0.15;
   const CLEAN_CC_BRIDGE_GAP_MS = 250;
   const CLEAN_CC_FADE_MS = 120;
-  const CLEAN_CC_LOG_PREFIX = '[ISWEEP][CLEAN_CC]';
+  const CLEAN_CC_LOG_PREFIX = '[ISWEEP][CAPTIONS]';
   const CLEAN_CC_PLACEHOLDER_TEXT = 'ISweep captions listening...';
 
   // Audio watch-ahead constants.

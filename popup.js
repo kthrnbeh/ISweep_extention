@@ -106,11 +106,31 @@ const signedInStatus = document.getElementById('signedInStatus'); // Status line
 const btnCleanCaptionsToggle = document.getElementById('btnCleanCaptionsToggle');
 const btnCaptionAppearance = document.getElementById('btnCaptionAppearance');
 const captionSettingsPanel = document.getElementById('captionSettingsPanel');
+const captionRuntimeStatus = document.getElementById('captionRuntimeStatus');
 const cleanCaptionStyleSelect = document.getElementById('cleanCaptionStyle');
 const cleanCaptionTextSizeSelect = document.getElementById('cleanCaptionTextSize');
 const btnResetCaptionPosition = document.getElementById('btnResetCaptionPosition');
 
 let cleanCaptionSettingsCache = { ...CLEAN_CAPTION_DEFAULTS };
+
+function renderCaptionRuntimeStatus(status) {
+  if (!captionRuntimeStatus) return;
+  const state = typeof status?.state === 'string' ? status.state : 'stt_disabled';
+  const label = typeof status?.label === 'string' ? status.label : 'Audio captions: STT disabled';
+  captionRuntimeStatus.textContent = label;
+  captionRuntimeStatus.dataset.state = state;
+}
+
+async function refreshCaptionRuntimeStatus() {
+  try {
+    const status = await chrome.runtime.sendMessage({ type: 'isweep_get_caption_runtime_status' });
+    renderCaptionRuntimeStatus(status);
+    console.log('[ISWEEP][CAPTIONS]', 'popup status refreshed', status);
+  } catch (error) {
+    renderCaptionRuntimeStatus({ state: 'backend_offline', label: 'Audio captions: Backend offline' });
+    console.log('[ISWEEP][CAPTIONS]', 'popup status refresh failed', error?.message || error);
+  }
+}
 
 /**
  * Initialize popup on load
@@ -177,6 +197,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Set up event listeners
     setupEventListeners();
     await initCleanCaptionControls();
+    await refreshCaptionRuntimeStatus();
     
   } catch (error) {
     console.error(LOG_PREFIX, 'Error initializing:', error);
@@ -345,6 +366,7 @@ async function saveCleanCaptionSettings(nextSettings) {
   });
   await notifyActiveYouTubeTabCleanCaptionSettings(cleanCaptionSettingsCache);
   renderCleanCaptionControls();
+  await refreshCaptionRuntimeStatus();
   console.log(LOG_PREFIX, 'clean caption settings saved', cleanCaptionSettingsCache);
 }
 

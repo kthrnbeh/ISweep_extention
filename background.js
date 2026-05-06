@@ -24,6 +24,7 @@ const STORAGE_KEYS = {
 const TOKEN_KEY = 'isweep_auth_token'; // Shared with site_token_bridge and frontend localStorage
 
 const LOG_PREFIX = '[ISWEEP][BG]';
+const CAPTION_LOG_PREFIX = '[ISWEEP][CAPTIONS]';
 const MARKER_LOG_PREFIX = '[ISWEEP][MARKERS]';
 
 const DEFAULT_BACKEND = 'http://127.0.0.1:5000';
@@ -105,6 +106,62 @@ async function logBackendHealthOnce() {
   } catch (err) {
     console.log('[ISWEEP][BG][AUTH] Backend unreachable', { backendUrl, error: err?.message || String(err) });
   }
+}
+
+async function getCaptionBackendStatus() {
+  const backendUrl = await getBackendUrl();
+  try {
+    const res = await fetch(`${backendUrl}/health`);
+    if (!res.ok) {
+      return { state: 'backend_offline', ok: false };
+    }
+    const body = await res.json().catch(() => ({}));
+    const sttEnabled = body?.stt_enabled === true;
+    return {
+      state: sttEnabled ? 'ready' : 'stt_disabled',
+      ok: true,
+      sttEnabled,
+    };
+  } catch (err) {
+    return { state: 'backend_offline', ok: false, error: err?.message || String(err) };
+  }
+}
+
+async function getActiveTabCaptionRuntimeStatus() {
+  if (!chrome.tabs?.query) return null;
+  const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!activeTab?.id) return null;
+  try {
+    return await chrome.tabs.sendMessage(activeTab.id, { type: 'isweep_get_caption_runtime_status' });
+  } catch (_) {
+    return null;
+  }
+}
+
+async function handleCaptionRuntimeStatus() {
+  const backend = await getCaptionBackendStatus();
+  const tabStatus = await getActiveTabCaptionRuntimeStatus();
+
+  let state = backend.state || 'backend_offline';
+  let label = 'Audio captions: Backend offline';
+
+  if (tabStatus?.usingAudioStt) {
+    state = 'ready';
+    label = 'Audio captions: Ready';
+  } else if (tabStatus?.usingYoutubeFallback) {
+    state = 'youtube_fallback';
+    label = 'Captions: YouTube fallback';
+  } else if (backend.state === 'ready') {
+    state = 'ready';
+    label = 'Audio captions: Ready';
+  } else if (backend.state === 'stt_disabled') {
+    state = 'stt_disabled';
+    label = 'Audio captions: STT disabled';
+  }
+
+  const response = { state, label, backend, tabStatus };
+  console.log(CAPTION_LOG_PREFIX, 'popup runtime status', response);
+  return response;
 }
 
 async function getBackendUrl() {
@@ -297,6 +354,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       message.start_seconds,
       message.end_seconds
     ).then(sendResponse);
+    return true; // async
+  } else if (message.type === 'isweep_get_caption_runtime_status') {
+    handleCaptionRuntimeStatus().then(sendResponse);
     return true; // async
   }
 

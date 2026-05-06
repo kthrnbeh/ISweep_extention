@@ -14,6 +14,10 @@ function loadBackgroundContext() {
       onMessage: { addListener() {} },
       sendMessage: async () => ({}),
     },
+    tabs: {
+      query: async () => [],
+      sendMessage: async () => ({}),
+    },
     storage: {
       onChanged: { addListener() {} },
       local: {
@@ -44,6 +48,27 @@ function loadBackgroundContext() {
   vm.runInContext(source, context, { filename: 'background.js' });
   return context;
 }
+
+test('caption runtime status prefers YouTube fallback when active tab reports live masked captions', async () => {
+  const bg = loadBackgroundContext();
+  bg.fetch = async () => ({ ok: true, status: 200, json: async () => ({ status: 'ok', stt_enabled: true }) });
+  bg.chrome.tabs.query = async () => ([{ id: 7 }]);
+  bg.chrome.tabs.sendMessage = async () => ({ usingYoutubeFallback: true, usingAudioStt: false });
+
+  const result = await bg.handleCaptionRuntimeStatus();
+  assert.equal(result.state, 'youtube_fallback');
+  assert.equal(result.label, 'Captions: YouTube fallback');
+});
+
+test('caption runtime status reports backend offline when health probe fails', async () => {
+  const bg = loadBackgroundContext();
+  bg.fetch = async () => { throw new Error('Failed to fetch'); };
+  bg.chrome.tabs.query = async () => ([]);
+
+  const result = await bg.handleCaptionRuntimeStatus();
+  assert.equal(result.state, 'backend_offline');
+  assert.equal(result.label, 'Audio captions: Backend offline');
+});
 
 test('missing token handling for /event returns structured none decision', async () => {
   const bg = loadBackgroundContext();

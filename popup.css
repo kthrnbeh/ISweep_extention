@@ -169,6 +169,29 @@ body {
   gap: 8px;
 }
 
+.caption-runtime-status {
+  margin-top: 8px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--color-text-secondary);
+}
+
+.caption-runtime-status[data-state="ready"] {
+  color: #0f766e;
+}
+
+.caption-runtime-status[data-state="youtube_fallback"] {
+  color: #1d4ed8;
+}
+
+.caption-runtime-status[data-state="stt_disabled"] {
+  color: #92400e;
+}
+
+.caption-runtime-status[data-state="backend_offline"] {
+  color: #b91c1c;
+}
+
 .btn-cc {
   min-width: 56px;
   padding: 8px 12px;
@@ -263,6 +286,10 @@ body {
 
 .btn-secondary:hover {
   background: var(--color-border);
+}
+
+.btn-sync-prefs {
+  margin-top: 8px;
 }
 
 .btn-link {

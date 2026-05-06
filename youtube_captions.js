@@ -1418,6 +1418,20 @@
 
   if (typeof chrome !== 'undefined' && chrome?.runtime?.onMessage?.addListener) {
     chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+      if (message?.type === 'isweep_get_caption_runtime_status') {
+        const overlaySource = String(lastRenderedOverlaySource || 'none');
+        const status = {
+          ok: true,
+          cleanCaptionsEnabled: cleanCaptionSettings.cleanCaptionsEnabled !== false,
+          overlaySource,
+          audioCaptionMode: getAudioCaptionMode(),
+          usingAudioStt: overlaySource.startsWith('audio_stt'),
+          usingYoutubeFallback: overlaySource === 'live_masked',
+        };
+        console.log(CLEAN_CC_LOG_PREFIX, 'runtime status reported', status);
+        sendResponse(status);
+        return true;
+      }
       if (!message || message.type !== 'isweep_clean_caption_settings_changed') return;
       cleanCaptionSettings = normalizeCleanCaptionSettings(message.settings);
       if (!cleanCaptionSettings.cleanCaptionsEnabled) {

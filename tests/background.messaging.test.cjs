@@ -213,17 +213,39 @@ test('audio result forwards chunk aliases and preserves cleaned captions/cache f
     };
   };
 
-  const result = await bg.handleAudioAhead('video1', 'ZmFrZQ==', 'audio/wav', 10, 11);
+  const result = await bg.handleAudioAhead('video1', 'ZmFrZQ==', 'audio/wav', 10, 11, [0.1, -0.1], 16000, 1);
   assert.equal(requestBody.chunk_start_seconds, 10);
   assert.equal(requestBody.chunk_end_seconds, 11);
   assert.equal(requestBody.start_seconds, 10);
   assert.equal(requestBody.end_seconds, 11);
+  assert.equal(Array.isArray(requestBody.audio), true);
+  assert.equal(requestBody.audio.length, 2);
+  assert.equal(requestBody.sampleRate, 16000);
+  assert.equal(requestBody.channels, 1);
 
   assert.equal(result.status, 'ready');
   assert.equal(result.source, 'audio_stt');
   assert.equal(result.cached, true);
   assert.equal(Array.isArray(result.cleaned_captions), true);
   assert.equal(result.cleaned_captions.length, 1);
+});
+
+test('caption decision suppresses near-simultaneous duplicate text across youtube and audio sources', async () => {
+  const bg = loadBackgroundContext();
+  bg.getAuthToken = async () => 'token';
+  bg.getBackendUrl = async () => 'http://127.0.0.1:5000';
+  bg.fetch = async () => ({
+    ok: true,
+    status: 200,
+    text: async () => JSON.stringify({ action: 'mute', reason: 'matched', duration_seconds: 4, matched_category: 'language' }),
+  });
+
+  const first = await bg.handleCaptionDecision('same phrase', 0.8, { source: 'youtube_dom' });
+  assert.equal(first.action, 'mute');
+
+  const second = await bg.handleCaptionDecision('same phrase', 0.8, { source: 'audio_stt' });
+  assert.equal(second.action, 'none');
+  assert.equal(second.reason, 'duplicate caption suppressed');
 });
 
 test('audio result accepts clean_captions alias from backend payload', async () => {

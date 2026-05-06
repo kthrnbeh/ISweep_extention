@@ -220,7 +220,7 @@
   // Audio watch-ahead constants.
   const AUDIO_AHEAD_LOG_PREFIX = '[ISWEEP][AUDIO_AHEAD]';
   const AUDIO_LOG_PREFIX = '[ISWEEP][AUDIO]';
-  const AUDIO_CAPTURE_LOG_PREFIX = '[ISWEEP][AUDIO_CAPTURE]';
+  const AUDIO_CAPTURE_LOG_PREFIX = '[ISWEEP][AUDIO_CAPTIONS]';
   const WORD_MUTE_LOG_PREFIX = '[ISWEEP][WORD_MUTE]';
   const FALLBACK_LOG_PREFIX = '[ISWEEP][FALLBACK]';
   const AUDIO_CHUNK_SEC = 2.0;
@@ -906,6 +906,18 @@
     return btoa(parts.join(''));
   }
 
+  function flattenSampleBuffers(sampleBufs) {
+    const total = (sampleBufs || []).reduce((sum, buf) => sum + (buf?.length || 0), 0);
+    const merged = new Float32Array(total);
+    let offset = 0;
+    (sampleBufs || []).forEach((buf) => {
+      if (!(buf instanceof Float32Array) || !buf.length) return;
+      merged.set(buf, offset);
+      offset += buf.length;
+    });
+    return Array.from(merged);
+  }
+
   function stopAudioCapture(reason) {
     if (!audioAheadActive && !audioCtx) return;
     audioAheadActive = false;
@@ -958,6 +970,7 @@
 
     const wavBuf = encodeWAV(bufs, sampleRate);
     const audioChunk = arrayBufferToBase64(wavBuf);
+    const audioSamples = flattenSampleBuffers(bufs);
     console.log(AUDIO_AHEAD_LOG_PREFIX, 'chunk ready', {
       videoId, start_seconds: chunkStartSec, end_seconds: chunkEndSec,
       samplesCollected: sampleCount,
@@ -979,6 +992,9 @@
       type: 'isweep_audio_chunk',
       video_id: videoId,
       audio_chunk: audioChunk,
+      audio: audioSamples,
+      sampleRate,
+      channels: 1,
       mime_type: 'audio/wav',
       start_seconds: chunkStartSec,
       end_seconds: chunkEndSec,
@@ -997,6 +1013,21 @@
       });
       lastAudioCaptionSource = response.source || null;
       lastAudioCaptionFailureReason = response.failure_reason || null;
+      if (response.source === 'audio_stt_disabled' || response.failure_reason === 'stt_disabled') {
+        console.warn(AUDIO_CAPTURE_LOG_PREFIX, 'STT disabled', {
+          videoId,
+          failure_reason: response.failure_reason || null,
+        });
+      }
+      if (response.failure_reason === 'backend_not_running') {
+        console.warn(AUDIO_CAPTURE_LOG_PREFIX, 'backend offline', { videoId });
+      }
+      if (typeof response.text === 'string' && response.text.trim()) {
+        console.log(AUDIO_CAPTURE_LOG_PREFIX, 'transcript received', {
+          videoId,
+          textPreview: response.text.slice(0, 80),
+        });
+      }
       console.log(AUDIO_AHEAD_LOG_PREFIX, 'chunk result', {
         videoId, start_seconds: chunkStartSec, end_seconds: chunkEndSec,
         status: response.status,
@@ -1246,7 +1277,7 @@
       audioChunkStartSec = video.currentTime || 0;
       audioSampleBufs = [];
       audioChunkWarm = false;
-      console.log(AUDIO_CAPTURE_LOG_PREFIX, 'started', {
+      console.log(AUDIO_CAPTURE_LOG_PREFIX, 'capture started', {
         videoId: activeVideoId,
         chunkSec: AUDIO_CHUNK_SEC,
       });

@@ -30,6 +30,25 @@ const MARKER_LOG_PREFIX = '[ISWEEP][MARKERS]';
 const DEFAULT_BACKEND = 'http://127.0.0.1:5000';
 
 const markerCacheByVideoId = new Map();
+const AUDIO_CAPTION_DEDUPE_WINDOW_MS = 1600;
+const recentCaptionByText = new Map();
+
+function normalizeCaptionTextForDedupe(text) {
+  return String(text || '').toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+function shouldSuppressDuplicateCaption(text, source, windowMs = AUDIO_CAPTION_DEDUPE_WINDOW_MS) {
+  const normalized = normalizeCaptionTextForDedupe(text);
+  if (!normalized) return false;
+
+  const now = Date.now();
+  const existing = recentCaptionByText.get(normalized);
+  recentCaptionByText.set(normalized, { source, seenAt: now });
+
+  if (!existing) return false;
+  if (existing.source === source) return false;
+  return (now - existing.seenAt) <= windowMs;
+}
 
 // Normalize preferences into a stable shape with blocklist.items always present.
 function normalizePreferences(raw) {
@@ -352,7 +371,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       message.audio_chunk,
       message.mime_type,
       message.start_seconds,
-      message.end_seconds
+      message.end_seconds,
+      message.audio,
+      message.sampleRate,
+      message.channels
     ).then(sendResponse);
     return true; // async
   } else if (message.type === 'isweep_get_caption_runtime_status') {
@@ -374,7 +396,14 @@ chrome.storage.local.get([STORAGE_KEYS.ENABLED]).then((result) => {
 });
 
 // Receives caption text from content script, forwards to backend /event, and returns decision.
-async function handleCaptionDecision(text, captionDurationSeconds) {
+async function handleCaptionDecision(text, captionDurationSeconds, options = {}) {
+  const source = typeof options.source === 'string' ? options.source : 'youtube_dom';
+  const dedupeWindowMs = Number.isFinite(Number(options.dedupeWindowMs)) ? Number(options.dedupeWindowMs) : AUDIO_CAPTION_DEDUPE_WINDOW_MS;
+  if (shouldSuppressDuplicateCaption(text, source, dedupeWindowMs)) {
+    console.log('[ISWEEP][AUDIO_CAPTIONS] duplicate caption suppressed', { source });
+    return { action: 'none', reason: 'duplicate caption suppressed', duration_seconds: 0, matched_category: null };
+  }
+
   const backendUrl = await getBackendUrl();
   const token = await getAuthToken();
   if (!token) {
@@ -560,14 +589,16 @@ async function handleMarkerAnalyze(videoId, forceRefresh = false) {
 
 // Receives a real-time audio chunk from youtube_captions.js, forwards to /captions/transcribe,
 // and returns { status, source, events, cleaned_captions, failure_reason, cached }.
-async function handleAudioAhead(videoId, audioChunk, mimeType, startSeconds, endSeconds) {
+async function handleAudioAhead(videoId, audioChunk, mimeType, startSeconds, endSeconds, audioSamples = null, sampleRate = null, channels = null) {
   const AUDIO_LOG = '[ISWEEP][AUDIO_AHEAD]';
+  const AUDIO_CAPTIONS_LOG = '[ISWEEP][AUDIO_CAPTIONS]';
   const cleanVideoId = (videoId || '').trim();
 
   if (!cleanVideoId) {
     return { status: 'error', events: [], failure_reason: 'missing_video_id' };
   }
-  if (!audioChunk) {
+  const hasSampleArray = Array.isArray(audioSamples) && audioSamples.length > 0;
+  if (!audioChunk && !hasSampleArray) {
     return { status: 'error', events: [], failure_reason: 'analyze_exception' };
   }
 
@@ -594,7 +625,13 @@ async function handleAudioAhead(videoId, audioChunk, mimeType, startSeconds, end
       startSeconds: normalizedStart,
       endSeconds: normalizedEnd,
       mimeType,
-      chunkBytes: audioChunk.length,
+      chunkBytes: audioChunk ? audioChunk.length : 0,
+      sampleCount: hasSampleArray ? audioSamples.length : 0,
+    });
+    console.log(AUDIO_CAPTIONS_LOG, 'chunk sent', {
+      videoId: cleanVideoId,
+      startSeconds: normalizedStart,
+      endSeconds: normalizedEnd,
     });
     res = await fetch(`${backendUrl}/captions/transcribe`, {
       method: 'POST',
@@ -613,6 +650,9 @@ async function handleAudioAhead(videoId, audioChunk, mimeType, startSeconds, end
         chunk_end_seconds: normalizedEnd,
         start_seconds: normalizedStart,
         end_seconds: normalizedEnd,
+        audio: hasSampleArray ? audioSamples : undefined,
+        sampleRate: Number.isFinite(Number(sampleRate)) ? Number(sampleRate) : undefined,
+        channels: Number.isFinite(Number(channels)) ? Number(channels) : undefined,
       }),
     });
 
@@ -678,6 +718,38 @@ async function handleAudioAhead(videoId, audioChunk, mimeType, startSeconds, end
       failure_reason: payload.failure_reason || payload.reason || null,
       cached: payload.cached === true,
     };
+    if (result.source === 'audio_stt_disabled' || result.failure_reason === 'stt_disabled') {
+      console.warn(AUDIO_CAPTIONS_LOG, 'STT disabled', {
+        videoId: cleanVideoId,
+        failure_reason: result.failure_reason,
+      });
+    }
+    if (result.status === 'ready' && typeof result.text === 'string' && result.text.trim()) {
+      console.log(AUDIO_CAPTIONS_LOG, 'transcript received', {
+        videoId: cleanVideoId,
+        textPreview: result.text.slice(0, 80),
+      });
+    }
+
+    if (result.status === 'ready' && result.events.length === 0 && typeof result.text === 'string' && result.text.trim()) {
+      const captionDurationSeconds = Math.max(normalizedEnd - normalizedStart, 0);
+      const decision = await handleCaptionDecision(result.text, captionDurationSeconds, {
+        source: 'audio_stt',
+        dedupeWindowMs: AUDIO_CAPTION_DEDUPE_WINDOW_MS,
+      });
+      if (decision && decision.action && decision.action !== 'none') {
+        result.events = [{
+          id: `audio-stt-${cleanVideoId}-${normalizedStart}-${decision.action}`,
+          action: decision.action,
+          start_seconds: normalizedStart,
+          end_seconds: normalizedEnd,
+          duration_seconds: captionDurationSeconds,
+          matched_category: decision.matched_category || null,
+          reason: decision.reason || 'audio stt /event decision',
+          source: 'audio_stt',
+        }];
+      }
+    }
     console.log(AUDIO_LOG, 'chunk result', {
       videoId: cleanVideoId,
       startSeconds: normalizedStart,
@@ -701,6 +773,9 @@ async function handleAudioAhead(videoId, audioChunk, mimeType, startSeconds, end
     const failureReason = /Failed to fetch|NetworkError|fetch/i.test(errorText)
       ? 'backend_not_running'
       : 'analyze_exception';
+    if (failureReason === 'backend_not_running') {
+      console.warn(AUDIO_CAPTIONS_LOG, 'backend offline', { videoId: cleanVideoId });
+    }
     console.error(AUDIO_LOG, 'chunk exception', {
       videoId: cleanVideoId,
       failureReason,

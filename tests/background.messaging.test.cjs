@@ -294,3 +294,28 @@ test('audio result preserves top-level text fields for single-entry overlay fall
   assert.equal(result.text, 'You are a jerk');
   assert.equal(result.clean_text, 'You are a ___');
 });
+
+test('audio_stt results without markers do not synthesize coarse full-chunk mute events', async () => {
+  const bg = loadBackgroundContext();
+  bg.getAuthToken = async () => 'token';
+  bg.getBackendUrl = async () => 'http://127.0.0.1:5000';
+  bg.fetch = async () => ({
+    ok: true,
+    status: 200,
+    text: async () => JSON.stringify({
+      status: 'ready',
+      source: 'audio_stt',
+      events: [],
+      text: 'bad word here',
+      clean_text: '___ word here',
+      failure_reason: null,
+      cached: false,
+    }),
+  });
+
+  const result = await bg.handleAudioAhead('video1', 'ZmFrZQ==', 'audio/wav', 1, 2);
+  assert.equal(result.status, 'ready');
+  assert.equal(result.source, 'audio_stt');
+  assert.equal(Array.isArray(result.events), true);
+  assert.equal(result.events.length, 0);
+});

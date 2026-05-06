@@ -228,7 +228,7 @@ test('clean caption text follows precedence order: pre-analyzed, marker, audio, 
   assert.equal(liveResult.text.includes('___'), true);
 });
 
-test('mute window uses blocked word start and clean resume time', () => {
+test('mute window preserves backend preroll and clean resume time', () => {
   const hooks = loadYoutubeTimingHooks();
   const window = hooks.getMuteWindowFromMarker({
     start_seconds: 5.0,
@@ -237,7 +237,7 @@ test('mute window uses blocked word start and clean resume time', () => {
     clean_resume_time: 5.7,
   });
 
-  assert.equal(window.start_seconds, 5.25);
+  assert.equal(window.start_seconds, 5.0);
   assert.equal(window.end_seconds, 5.7);
 });
 
@@ -245,6 +245,13 @@ test('manual mute remains muted after restore logic', () => {
   const hooks = loadYoutubeTimingHooks();
   assert.equal(hooks.shouldISweepUnmute(true), false);
   assert.equal(hooks.shouldISweepUnmute(false), true);
+});
+
+test('user-muted video skips new ISweep mute windows', () => {
+  const hooks = loadYoutubeTimingHooks();
+  assert.equal(hooks.shouldSkipMuteBecauseUserMuted(true, false), true);
+  assert.equal(hooks.shouldSkipMuteBecauseUserMuted(true, true), false);
+  assert.equal(hooks.shouldSkipMuteBecauseUserMuted(false, false), false);
 });
 
 test('live masked text is used when no pre-analyzed caption exists', () => {
@@ -466,6 +473,34 @@ test('audio caption fallback masks blocked words when clean_text is missing', ()
   assert.equal(normalized.length, 1);
   assert.equal(/shit/i.test(normalized[0].clean_text), false);
     assert.equal(normalized[0].clean_text.includes('___'), true);
+});
+
+test('fallback detects nearby audio_stt markers and skips redundant placeholder mute', () => {
+  const hooks = loadYoutubeTimingHooks();
+  const estimated = hooks.estimatePlaceholderWordWindow(
+    'just know that a perfect circle is a croc of [ __ ] man.',
+    100,
+    1.6,
+    101,
+    'backend'
+  );
+
+  const hasNearby = hooks.hasNearbyAudioMuteMarker(
+    [
+      {
+        id: 'audio-stt-1',
+        action: 'mute',
+        source: 'audio_stt',
+        start_seconds: estimated.estimatedPlaceholderStartSec - 0.05,
+        end_seconds: estimated.estimatedPlaceholderStartSec + 0.25,
+      },
+    ],
+    estimated.adjustedStart,
+    estimated.muteEndSec,
+    estimated.estimatedPlaceholderStartSec
+  );
+
+  assert.equal(hasNearby, true);
 });
 
 test('overlay state remains display-only metadata', () => {

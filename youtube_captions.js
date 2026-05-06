@@ -92,6 +92,9 @@
   let lastCaptionWords = [];
   let lastWordTimings = [];
   let previousMuteState = null;
+  let isweepMuteActive = false;
+  let userWasMutedBeforeIsweepMute = false;
+  let lastMuteOwner = 'none';
   let muteEnforceInterval = null;
   let previousRate = null;
   let muteUntilNextCaption = false;
@@ -107,6 +110,9 @@
     muteUntilNextCaption = false;
     muteLockUntilSec = 0;
     previousMuteState = null;
+    isweepMuteActive = false;
+    userWasMutedBeforeIsweepMute = false;
+    lastMuteOwner = 'none';
     muteWindowStartSec = null;
     console.log('[ISweep Timing] mute state reset', { reason });
   }
@@ -179,9 +185,13 @@
     return previousMutedState === false;
   }
 
+  function shouldSkipMuteBecauseUserMuted(videoMuted, activeMuteOwnedByISweep) {
+    return Boolean(videoMuted) && !Boolean(activeMuteOwnedByISweep);
+  }
+
   function restoreMuteState(reason) {
     const video = findVideo();
-    if (video && previousMuteState !== null) {
+    if (video && previousMuteState !== null && isweepMuteActive && lastMuteOwner === 'isweep') {
       const targetMuted = shouldISweepUnmute(previousMuteState) ? false : true;
       setMutedState(targetMuted, `restore:${reason}`);
       console.log('[ISweep Timing] mute restored', { reason });
@@ -197,7 +207,7 @@
       const nowSec = video.currentTime || 0;
       if (muteLockUntilSec <= nowSec) return;
       // Re-apply mute via player control if site logic flips it back.
-      if (!video.muted) setMutedState(true, 'enforcement');
+      if (isweepMuteActive && !video.muted) setMutedState(true, 'enforcement');
     }, 120);
   }
 
@@ -279,7 +289,9 @@
   let audioChunkStartSec = 0; // video.currentTime when the current chunk began
   let audioAheadActive = false;
   let audioAheadVideoId = null;
-  let audioAheadFailed = false; // true after a terminal (non-retryable) capture failure
+  let audioCapturePermissionDenied = false; // true after explicit permission denial until user resets capture
+  let audioInputStream = null;
+  let audioCaptureSource = null;
   let audioFilteringEnabled = true;
 
   function getAudioCaptionMode() {
@@ -335,6 +347,9 @@
       caption_text: typeof raw.caption_text === 'string' ? raw.caption_text : null,
       clean_resume_time: Number.isFinite(Number(raw.clean_resume_time))
         ? Number(raw.clean_resume_time)
+        : null,
+      blocked_word_end: Number.isFinite(Number(raw.blocked_word_end))
+        ? Number(raw.blocked_word_end)
         : null,
       blocked_word_start: Number.isFinite(Number(raw.blocked_word_start))
         ? Number(raw.blocked_word_start)
@@ -734,9 +749,7 @@
   }
 
   function getMuteWindowFromMarker(marker) {
-    const markerStartSec = Number.isFinite(Number(marker && marker.blocked_word_start))
-      ? Math.max(Number(marker.blocked_word_start), Number(marker && marker.start_seconds) || 0)
-      : Number(marker && marker.start_seconds) || 0;
+    const markerStartSec = Math.max(Number(marker && marker.start_seconds) || 0, 0);
     let markerEndSec = Number(marker && marker.end_seconds) || markerStartSec;
     if (Number.isFinite(Number(marker && marker.clean_resume_time))) {
       const resumeSec = Number(marker.clean_resume_time);
@@ -919,7 +932,7 @@
   }
 
   function stopAudioCapture(reason) {
-    if (!audioAheadActive && !audioCtx) return;
+    if (!audioAheadActive && !audioCtx && !audioInputStream) return;
     audioAheadActive = false;
     if (audioProcessor) {
       try { audioProcessor.disconnect(); } catch (_) {}
@@ -929,13 +942,214 @@
       try { audioCtx.close(); } catch (_) {}
       audioCtx = null;
     }
+    if (audioInputStream && typeof audioInputStream.getTracks === 'function') {
+      audioInputStream.getTracks().forEach((track) => {
+        try { track.stop(); } catch (_) {}
+      });
+    }
+    try {
+      chrome.runtime.sendMessage({ type: 'isweep_release_tab_capture_stream', reason }).catch(() => {});
+    } catch (_) {}
+    audioInputStream = null;
+    audioCaptureSource = null;
     audioSampleBufs = [];
     audioAheadVideoId = null;
     if (reason === 'captions_disabled') {
       lastAudioCaptionSource = null;
       lastAudioCaptionFailureReason = null;
+      audioCapturePermissionDenied = false;
     }
     console.log(AUDIO_AHEAD_LOG_PREFIX, 'audio capture stopped', { reason });
+  }
+
+  function classifyCaptureFailure(errorOrMessage) {
+    const text = String(errorOrMessage?.message || errorOrMessage || '').trim();
+    if (/notallowederror|permission|denied|not allowed/i.test(text)) {
+      return 'audio_capture_permission_denied';
+    }
+    return 'audio_capture_unavailable';
+  }
+
+  async function requestTabCaptureAudioStream() {
+    console.log('[ISWEEP][AUDIO_CAPTIONS] tab capture start requested', { videoId: activeVideoId });
+    let response;
+    try {
+      response = await chrome.runtime.sendMessage({
+        type: 'isweep_request_tab_capture_stream',
+        video_id: activeVideoId,
+      });
+    } catch (err) {
+      return {
+        stream: null,
+        failureReason: classifyCaptureFailure(err),
+      };
+    }
+
+    if (!response?.ok || !response?.streamId) {
+      return {
+        stream: null,
+        failureReason: response?.failure_reason || 'audio_capture_unavailable',
+      };
+    }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          mandatory: {
+            chromeMediaSource: 'tab',
+            chromeMediaSourceId: response.streamId,
+          },
+        },
+        video: false,
+      });
+      const tracks = typeof stream?.getAudioTracks === 'function' ? stream.getAudioTracks() : [];
+      if (!tracks.length) {
+        return { stream: null, failureReason: 'audio_capture_unavailable' };
+      }
+      console.log('[ISWEEP][AUDIO_CAPTIONS] tab capture stream ready', {
+        videoId: activeVideoId,
+        tracks: tracks.length,
+      });
+      return { stream, failureReason: null };
+    } catch (err) {
+      return {
+        stream: null,
+        failureReason: classifyCaptureFailure(err),
+      };
+    }
+  }
+
+  function requestVideoCaptureStream(video) {
+    const captureMethod = typeof video.captureStream === 'function'
+      ? 'captureStream'
+      : (typeof video.mozCaptureStream === 'function' ? 'mozCaptureStream' : null);
+    if (!captureMethod) {
+      return { stream: null, failureReason: 'audio_capture_unavailable', captureMethod: null };
+    }
+
+    let stream;
+    try {
+      stream = video[captureMethod]();
+    } catch (err) {
+      return {
+        stream: null,
+        failureReason: classifyCaptureFailure(err),
+        captureMethod,
+      };
+    }
+
+    const audioTracks = typeof stream?.getAudioTracks === 'function' ? stream.getAudioTracks() : [];
+    if (!audioTracks.length) {
+      return {
+        stream: null,
+        failureReason: 'audio_capture_unavailable',
+        captureMethod,
+      };
+    }
+
+    console.log('[ISWEEP][AUDIO_CAPTIONS] using video.captureStream fallback', {
+      videoId: activeVideoId,
+      method: captureMethod,
+    });
+    return {
+      stream: new MediaStream(audioTracks),
+      failureReason: null,
+      captureMethod,
+    };
+  }
+
+  async function startAudioPipeline(audioStream, sourceLabel, video, captureMethod = null) {
+    try {
+      audioCtx = new AudioContext({ sampleRate: AUDIO_SAMPLE_RATE });
+      console.log(AUDIO_AHEAD_LOG_PREFIX, 'audio context state before resume', {
+        state: audioCtx.state,
+      });
+      if (audioCtx.state === 'suspended') {
+        try {
+          await audioCtx.resume();
+          console.log(AUDIO_AHEAD_LOG_PREFIX, 'audio context resumed', {
+            state: audioCtx.state,
+          });
+        } catch (err) {
+          const reason = classifyCaptureFailure(err);
+          stopAudioCapture('resume_failed');
+          if (reason === 'audio_capture_permission_denied') {
+            audioCapturePermissionDenied = true;
+          }
+          throw err;
+        }
+      }
+      if (audioCtx.state === 'suspended') {
+        stopAudioCapture('context_still_suspended');
+        return false;
+      }
+
+      const workletUrl = chrome.runtime.getURL('audio_chunk_processor.js');
+      console.log(AUDIO_AHEAD_LOG_PREFIX, 'audio worklet load start', { workletUrl });
+      await audioCtx.audioWorklet.addModule(workletUrl);
+      console.log(AUDIO_AHEAD_LOG_PREFIX, 'audio worklet loaded successfully', { workletUrl });
+
+      const source = audioCtx.createMediaStreamSource(audioStream);
+      const workletNode = new AudioWorkletNode(audioCtx, 'audio-chunk-processor');
+      const silentGain = audioCtx.createGain();
+      silentGain.gain.value = 0;
+
+      workletNode.port.onmessage = (e) => {
+        if (!audioAheadActive) return;
+        const vid = findVideo();
+        if (!vid || vid.paused) return;
+        audioSampleBufs.push(new Float32Array(e.data));
+        const total = audioSampleBufs.reduce((n, b) => n + b.length, 0);
+        const required = (audioChunkWarm ? (AUDIO_CHUNK_SEC - AUDIO_CHUNK_OVERLAP_SEC) : AUDIO_CHUNK_SEC) * audioCtx.sampleRate;
+        if (total >= required) flushAudioChunk();
+      };
+
+      source.connect(workletNode);
+      workletNode.connect(silentGain);
+      silentGain.connect(audioCtx.destination);
+
+      audioProcessor = workletNode;
+      audioInputStream = audioStream;
+      audioCaptureSource = sourceLabel;
+      audioAheadActive = true;
+      audioAheadVideoId = activeVideoId;
+      audioChunkStartSec = video.currentTime || 0;
+      audioSampleBufs = [];
+      audioChunkWarm = false;
+      console.log(AUDIO_CAPTURE_LOG_PREFIX, 'capture started', {
+        videoId: activeVideoId,
+        chunkSec: AUDIO_CHUNK_SEC,
+      });
+      console.log(AUDIO_CAPTURE_LOG_PREFIX, 'captions_required=false', {
+        videoId: activeVideoId,
+      });
+      console.log(AUDIO_CAPTURE_LOG_PREFIX, `source=${sourceLabel}`, {
+        videoId: activeVideoId,
+      });
+      console.log(AUDIO_CAPTURE_LOG_PREFIX, 'microphone_used=false', {
+        videoId: activeVideoId,
+      });
+      console.log(AUDIO_AHEAD_LOG_PREFIX, 'audio capture started', {
+        videoId: activeVideoId,
+        source: sourceLabel,
+        method: captureMethod,
+        readyState: video.readyState || 0,
+        sampleRate: audioCtx.sampleRate,
+        chunkSec: AUDIO_CHUNK_SEC,
+        processor: 'AudioWorkletNode',
+      });
+      return true;
+    } catch (err) {
+      const reason = classifyCaptureFailure(err);
+      console.warn(AUDIO_AHEAD_LOG_PREFIX, `failure_reason: ${reason}`, {
+        error: err?.message || String(err),
+      });
+      stopAudioCapture('init_failed');
+      if (reason === 'audio_capture_permission_denied') {
+        audioCapturePermissionDenied = true;
+      }
+      return false;
+    }
   }
 
   function flushAudioChunk() {
@@ -1129,14 +1343,14 @@
       videoId: activeVideoId,
       hasVideo: Boolean(video),
       audioAheadActive,
-      audioAheadFailed,
+      audioCapturePermissionDenied,
       audioFilteringEnabled,
       readyState: video?.readyState ?? null,
       paused: video?.paused ?? null,
       currentTime: video?.currentTime ?? null,
     });
     if (!cleanCaptionSettings.cleanCaptionsEnabled) return;
-    if (!video || audioAheadActive || audioAheadFailed) return;
+    if (!video || audioAheadActive || audioCapturePermissionDenied) return;
 
     const minReadyState = typeof HTMLMediaElement !== 'undefined'
       ? HTMLMediaElement.HAVE_CURRENT_DATA
@@ -1150,165 +1364,33 @@
       return;
     }
 
-    const captureMethod = typeof video.captureStream === 'function'
-      ? 'captureStream'
-      : (typeof video.mozCaptureStream === 'function' ? 'mozCaptureStream' : null);
-    if (!captureMethod) {
-      console.warn(AUDIO_AHEAD_LOG_PREFIX, 'captureStream unavailable', {
-        failure_reason: 'audio_capture_unavailable',
-        reason: 'captureStream API missing',
-      });
-      audioAheadFailed = true;
+    const tabCapture = await requestTabCaptureAudioStream();
+    if (tabCapture.stream) {
+      await startAudioPipeline(tabCapture.stream, 'tab_capture', video, 'tabCapture');
       return;
     }
 
-    let stream;
-    try {
-      stream = video[captureMethod]();
-    } catch (err) {
-      const reason = err?.name === 'NotAllowedError'
-        ? 'audio_capture_permission_denied'
-        : 'audio_capture_unavailable';
-      const retryable = reason !== 'audio_capture_permission_denied';
-      console.warn(AUDIO_AHEAD_LOG_PREFIX, retryable ? 'waiting for video/audio tracks' : 'captureStream unavailable', {
-        failure_reason: reason,
-        method: captureMethod,
-        retrying: retryable,
-        readyState: video.readyState || 0,
-        paused: video.paused,
-        reason: 'captureStream threw',
-        error: err?.message || String(err),
-      });
-      if (!retryable) audioAheadFailed = true;
+    const videoCapture = requestVideoCaptureStream(video);
+    if (videoCapture.stream) {
+      await startAudioPipeline(videoCapture.stream, 'video_capture_stream', video, videoCapture.captureMethod);
       return;
     }
 
-    const audioTracks = typeof stream?.getAudioTracks === 'function' ? stream.getAudioTracks() : [];
-    if (!audioTracks.length) {
-      console.log(AUDIO_AHEAD_LOG_PREFIX, 'audio tracks missing; retrying', {
-        videoId: activeVideoId,
-        readyState: video.readyState || 0,
-        paused: video.paused,
-      });
-      return;
+    const reasons = [tabCapture.failureReason, videoCapture.failureReason].filter(Boolean);
+    const finalReason = reasons.includes('audio_capture_permission_denied')
+      ? 'audio_capture_permission_denied'
+      : 'audio_capture_unavailable';
+    if (finalReason === 'audio_capture_permission_denied') {
+      audioCapturePermissionDenied = true;
     }
-
-    try {
-      const audioStream = new MediaStream(audioTracks);
-      audioCtx = new AudioContext({ sampleRate: AUDIO_SAMPLE_RATE });
-      console.log(AUDIO_AHEAD_LOG_PREFIX, 'audio context state before resume', {
-        state: audioCtx.state,
-      });
-      if (audioCtx.state === 'suspended') {
-        try {
-          await audioCtx.resume();
-          console.log(AUDIO_AHEAD_LOG_PREFIX, 'audio context resumed', {
-            state: audioCtx.state,
-          });
-        } catch (err) {
-          const reason = err?.name === 'NotAllowedError'
-            ? 'audio_capture_permission_denied'
-            : 'audio_capture_unavailable';
-          console.warn(AUDIO_AHEAD_LOG_PREFIX, reason === 'audio_capture_permission_denied'
-            ? 'captureStream unavailable'
-            : 'waiting for video/audio tracks', {
-            failure_reason: reason,
-            retrying: reason !== 'audio_capture_permission_denied',
-            error: err?.message || String(err),
-          });
-          stopAudioCapture('resume_failed');
-          if (reason === 'audio_capture_permission_denied') audioAheadFailed = true;
-          return;
-        }
-      }
-      if (audioCtx.state === 'suspended') {
-        console.log(AUDIO_AHEAD_LOG_PREFIX, 'waiting for video/audio tracks', {
-          videoId: activeVideoId,
-          reason: 'audio_context_still_suspended',
-          state: audioCtx.state,
-        });
-        stopAudioCapture('context_still_suspended');
-        return;
-      }
-
-      // Load the AudioWorklet processor from the extension bundle.
-      // web_accessible_resources in manifest.json exposes this file to the page context.
-      const workletUrl = chrome.runtime.getURL('audio_chunk_processor.js');
-      console.log(AUDIO_AHEAD_LOG_PREFIX, 'audio worklet load start', { workletUrl });
-      try {
-        await audioCtx.audioWorklet.addModule(workletUrl);
-        console.log(AUDIO_AHEAD_LOG_PREFIX, 'audio worklet loaded successfully', { workletUrl });
-      } catch (loadErr) {
-        console.warn(AUDIO_AHEAD_LOG_PREFIX, 'audio worklet load failed', {
-          failure_reason: 'audio_capture_unavailable',
-          workletUrl,
-          error: loadErr?.message || String(loadErr),
-        });
-        stopAudioCapture('worklet_load_failed');
-        audioAheadFailed = true;
-        return;
-      }
-
-      const source = audioCtx.createMediaStreamSource(audioStream);
-      const workletNode = new AudioWorkletNode(audioCtx, 'audio-chunk-processor');
-      // Route through a gain-0 destination so the Web Audio graph stays active
-      // without leaking captured audio to the speaker output.
-      const silentGain = audioCtx.createGain();
-      silentGain.gain.value = 0;
-
-      const sampleTarget = AUDIO_CHUNK_SEC * audioCtx.sampleRate;
-      workletNode.port.onmessage = (e) => {
-        if (!audioAheadActive) return;
-        const vid = findVideo();
-        if (!vid || vid.paused) return; // Skip silent/paused frames.
-        audioSampleBufs.push(new Float32Array(e.data));
-        const total = audioSampleBufs.reduce((n, b) => n + b.length, 0);
-        const required = (audioChunkWarm ? (AUDIO_CHUNK_SEC - AUDIO_CHUNK_OVERLAP_SEC) : AUDIO_CHUNK_SEC) * audioCtx.sampleRate;
-        if (total >= required) flushAudioChunk();
-      };
-
-      source.connect(workletNode);
-      workletNode.connect(silentGain);
-      silentGain.connect(audioCtx.destination);
-
-      audioProcessor = workletNode; // stopAudioCapture() calls .disconnect() on this.
-      audioAheadActive = true;
-      audioAheadVideoId = activeVideoId;
-      audioChunkStartSec = video.currentTime || 0;
-      audioSampleBufs = [];
-      audioChunkWarm = false;
-      console.log(AUDIO_CAPTURE_LOG_PREFIX, 'capture started', {
-        videoId: activeVideoId,
-        chunkSec: AUDIO_CHUNK_SEC,
-      });
-      console.log(AUDIO_CAPTURE_LOG_PREFIX, 'captions_required=false', {
-        videoId: activeVideoId,
-      });
-      console.log(AUDIO_CAPTURE_LOG_PREFIX, 'source=video_element', {
-        videoId: activeVideoId,
-      });
-      console.log(AUDIO_CAPTURE_LOG_PREFIX, 'microphone_used=false', {
-        videoId: activeVideoId,
-      });
-      console.log(AUDIO_AHEAD_LOG_PREFIX, 'audio capture started', {
-        videoId: activeVideoId,
-        method: captureMethod,
-        audioTracks: audioTracks.length,
-        readyState: video.readyState || 0,
-        sampleRate: audioCtx.sampleRate,
-        chunkSec: AUDIO_CHUNK_SEC,
-        processor: 'AudioWorkletNode',
-      });
-    } catch (err) {
-      const reason = err?.name === 'NotAllowedError'
-        ? 'audio_capture_permission_denied'
-        : 'audio_capture_unavailable';
-      console.warn(AUDIO_AHEAD_LOG_PREFIX, `failure_reason: ${reason}`, {
-        error: err?.message || String(err),
-      });
-      stopAudioCapture('init_failed');
-      if (reason === 'audio_capture_permission_denied') audioAheadFailed = true;
-    }
+    lastAudioCaptionSource = 'audio_stt';
+    lastAudioCaptionFailureReason = finalReason;
+    console.warn('[ISWEEP][AUDIO_CAPTIONS] audio_capture_unavailable', {
+      videoId: activeVideoId,
+      failure_reason: finalReason,
+      tab_failure_reason: tabCapture.failureReason || null,
+      video_failure_reason: videoCapture.failureReason || null,
+    });
   }
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -1333,7 +1415,7 @@
     liveAudioCleanCaptions = [];
     lastAudioCaptionSource = null;
     lastAudioCaptionFailureReason = null;
-    audioAheadFailed = false;           // Allow a fresh capture attempt for the new video
+    audioCapturePermissionDenied = false; // Reset capture state for navigation changes
     stopAudioCapture('video_changed');
     resetMarkerEngine('video changed');
     analyzeCurrentVideoMarkers(false);
@@ -1349,7 +1431,7 @@
     markerVideoWatchInterval = setInterval(() => {
       handleVideoIdChange(getCurrentVideoId());
       // Retry audio capture each tick if tracks weren't available on the first attempt.
-      if (activeVideoId && cleanCaptionSettings.cleanCaptionsEnabled && !audioAheadActive && !audioAheadFailed) startAudioCapture();
+      if (activeVideoId && cleanCaptionSettings.cleanCaptionsEnabled && !audioAheadActive && !audioCapturePermissionDenied) startAudioCapture();
     }, 1000);
   }
 
@@ -1432,11 +1514,17 @@
         cachedPreferences = changes[STORAGE_KEYS.PREFS].newValue || null;
       }
       if (changes[STORAGE_KEYS.CLEAN_CAPTION_SETTINGS]) {
+        const previousSettings = normalizeCleanCaptionSettings(changes[STORAGE_KEYS.CLEAN_CAPTION_SETTINGS].oldValue);
         cleanCaptionSettings = normalizeCleanCaptionSettings(changes[STORAGE_KEYS.CLEAN_CAPTION_SETTINGS].newValue);
         if (!cleanCaptionSettings.cleanCaptionsEnabled) {
           stopAudioCapture('captions_disabled');
-        } else if (activeVideoId && !audioAheadActive && !audioAheadFailed) {
-          startAudioCapture();
+        } else {
+          if (previousSettings.cleanCaptionsEnabled === false) {
+            audioCapturePermissionDenied = false;
+          }
+          if (activeVideoId && !audioAheadActive && !audioCapturePermissionDenied) {
+            startAudioCapture();
+          }
         }
         applyCleanCaptionOverlayStyles();
         updateCleanOverlay(lastCaptionText, findVideo()?.currentTime || 0);
@@ -1463,11 +1551,28 @@
         sendResponse(status);
         return true;
       }
+      if (message?.type === 'isweep_caption_capture_start') {
+        audioCapturePermissionDenied = false;
+        if (activeVideoId && cleanCaptionSettings.cleanCaptionsEnabled && !audioAheadActive) {
+          startAudioCapture();
+        }
+        sendResponse({ ok: true });
+        return true;
+      }
+      if (message?.type === 'isweep_caption_capture_stop') {
+        stopAudioCapture('captions_disabled');
+        sendResponse({ ok: true });
+        return true;
+      }
       if (!message || message.type !== 'isweep_clean_caption_settings_changed') return;
       cleanCaptionSettings = normalizeCleanCaptionSettings(message.settings);
       if (!cleanCaptionSettings.cleanCaptionsEnabled) {
         stopAudioCapture('captions_disabled');
-      } else if (activeVideoId && !audioAheadActive && !audioAheadFailed) {
+        audioCapturePermissionDenied = false;
+      } else {
+        audioCapturePermissionDenied = false;
+      }
+      if (cleanCaptionSettings.cleanCaptionsEnabled && activeVideoId && !audioAheadActive && !audioCapturePermissionDenied) {
         startAudioCapture();
       }
       applyCleanCaptionOverlayStyles();
@@ -1930,6 +2035,12 @@
         const canonicalSource = sourceLabel.startsWith('audio_stt') ? 'audio_stt' : sourceLabel;
         console.log(CLEAN_CC_LOG_PREFIX, 'text updated');
         console.log(CLEAN_CC_LOG_PREFIX, 'overlay text rendered');
+        if (resolved.text.includes('___')) {
+          console.log('[ISWEEP][CLEAN_CC]', 'masked word rendered', {
+            source: resolved.source || 'unknown',
+            clean_resume_time: resolved.cleanResumeTime || null,
+          });
+        }
         if (canonicalSource === 'pre_analyzed') {
           console.log(CLEAN_CC_LOG_PREFIX, 'source pre_analyzed');
         } else if (canonicalSource === 'marker_text') {
@@ -2102,7 +2213,7 @@
 
   function hasNearbyAudioMuteMarker(markers, adjustedStart, muteEndSec, estimatedPlaceholderStartSec) {
     return (Array.isArray(markers) ? markers : []).some((marker) => {
-      if (!marker || marker.action !== 'mute' || marker.source !== 'audio_chunk') return false;
+      if (!marker || marker.action !== 'mute' || !String(marker.source || '').toLowerCase().startsWith('audio')) return false;
       const overlapsWindow = marker.start_seconds <= muteEndSec && marker.end_seconds >= adjustedStart;
       const nearStart = Math.abs(marker.start_seconds - estimatedPlaceholderStartSec) <= AUDIO_MARKER_FALLBACK_SKIP_WINDOW_SEC;
       return overlapsWindow || nearStart;
@@ -2149,6 +2260,17 @@
       return;
     }
 
+    if (muteLockUntilSec <= nowSec && shouldSkipMuteBecauseUserMuted(video.muted, isweepMuteActive)) {
+      userWasMutedBeforeIsweepMute = true;
+      lastMuteOwner = 'user';
+      console.log(WORD_MUTE_LOG_PREFIX, 'skipped because user muted', {
+        start_seconds: startSec,
+        end_seconds: endSec,
+        reason,
+      });
+      return;
+    }
+
     // If already muted into a window, ignore fully contained windows; extend only when later
     const durationMs = Math.max((endSec - startSec) * 1000, 0);
 
@@ -2179,7 +2301,11 @@
       if (previousMuteState === null) {
         previousMuteState = video.muted; // Preserve prior mute state only once
       }
-      setMutedState(true, `start:${reason}`);
+      const muteApplied = setMutedState(true, `start:${reason}`);
+      if (!muteApplied) return;
+      isweepMuteActive = true;
+      userWasMutedBeforeIsweepMute = Boolean(previousMuteState);
+      lastMuteOwner = 'isweep';
       muteUntilNextCaption = true;
       muteWindowStartSec = startSec;
       console.log('[ISweep Timing] mute start', {
@@ -2608,11 +2734,16 @@
     }
     clearHardRestore();
     if (video && previousMuteState !== null) {
-      const targetMuted = shouldISweepUnmute(previousMuteState) ? false : true;
-      setMutedState(targetMuted, 'caption_change_restore');
-      log('Restored mute state on caption change');
+      if (isweepMuteActive && lastMuteOwner === 'isweep') {
+        const targetMuted = shouldISweepUnmute(previousMuteState) ? false : true;
+        setMutedState(targetMuted, 'caption_change_restore');
+        log('Restored mute state on caption change');
+      }
     }
     previousMuteState = null;
+    isweepMuteActive = false;
+    userWasMutedBeforeIsweepMute = false;
+    lastMuteOwner = 'none';
     muteUntilNextCaption = false;
     muteLockUntilSec = 0;
     if (muteEnforceInterval) {
@@ -2713,6 +2844,7 @@
       getBestCleanCaptionText,
       getMuteWindowFromMarker,
       shouldISweepUnmute,
+      shouldSkipMuteBecauseUserMuted,
       resolveOverlayDisplayState,
       normalizePreAnalyzedCaptions,
       buildAudioResponseCaptions,
@@ -2745,6 +2877,11 @@
       },
       setCachedPreferences: (prefs) => {
         cachedPreferences = prefs || null;
+      },
+      setMuteOwnershipState: (state = {}) => {
+        isweepMuteActive = Boolean(state.isweepMuteActive);
+        userWasMutedBeforeIsweepMute = Boolean(state.userWasMutedBeforeIsweepMute);
+        lastMuteOwner = state.lastMuteOwner || 'none';
       },
     };
     return;

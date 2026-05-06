@@ -364,6 +364,14 @@ async function saveCleanCaptionSettings(nextSettings) {
   await chrome.storage.local.set({
     [STORAGE_KEYS.CLEAN_CAPTION_SETTINGS]: cleanCaptionSettingsCache,
   });
+  try {
+    await chrome.runtime.sendMessage({
+      type: 'isweep_caption_capture_control',
+      enabled: cleanCaptionSettingsCache.cleanCaptionsEnabled === true,
+    });
+  } catch (_) {
+    // Best effort: content script also reacts to storage changes.
+  }
   await notifyActiveYouTubeTabCleanCaptionSettings(cleanCaptionSettingsCache);
   renderCleanCaptionControls();
   await refreshCaptionRuntimeStatus();

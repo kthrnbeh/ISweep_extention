@@ -219,6 +219,7 @@ async function ensureOffscreenDocument() {
     reasons: ['USER_MEDIA'],
     justification: 'Capture active tab audio for ISweep clean captions',
   });
+  console.log('[ISWEEP][AUDIO_CAPTIONS] offscreen document created');
   return true;
 }
 
@@ -270,6 +271,7 @@ async function requestTabCaptureStreamId(tabId) {
 }
 
 async function startTabAudioCapture(tabId, videoId) {
+  console.log('[ISWEEP][AUDIO_CAPTIONS] start requested', { tabId, videoId });
   console.log('[ISWEEP][AUDIO_CAPTIONS] tab capture start requested', { tabId, videoId });
   const stream = await requestTabCaptureStreamId(tabId);
   if (!stream?.ok || !stream.streamId) {
@@ -307,6 +309,7 @@ async function stopTabAudioCapture(reason = 'captions_disabled') {
   const active = activeTabAudioCapture;
   activeTabAudioCapture = null;
   if (!active) {
+    console.log('[ISWEEP][AUDIO_CAPTIONS] stopped', { reason, active: false });
     console.log('[ISWEEP][AUDIO_CAPTIONS] tab capture stopped', { reason, active: false });
     return { ok: true };
   }
@@ -321,6 +324,7 @@ async function stopTabAudioCapture(reason = 'captions_disabled') {
   }
   releaseTabCaptureSession(active.tabId, reason);
   await postTabCaptureStatusToTab(active.tabId, 'stopped', null);
+  console.log('[ISWEEP][AUDIO_CAPTIONS] stopped', { reason, tabId: active.tabId, videoId: active.videoId });
   console.log('[ISWEEP][AUDIO_CAPTIONS] tab capture stopped', { reason, tabId: active.tabId, videoId: active.videoId });
   return { ok: true };
 }
@@ -594,10 +598,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   } else if (message.type === 'isweep_get_caption_runtime_status') {
     handleCaptionRuntimeStatus().then(sendResponse);
     return true; // async
-  } else if (message.type === 'isweep_start_tab_audio_captions') {
+  } else if (message.type === 'isweep_start_audio_captions') {
     handleStartTabAudioCaptions().then(sendResponse);
     return true; // async
-  } else if (message.type === 'isweep_stop_tab_audio_captions') {
+  } else if (message.type === 'isweep_stop_audio_captions') {
     handleStopTabAudioCaptions().then(sendResponse);
     return true; // async
   } else if (message.type === 'isweep_caption_capture_control') {
@@ -740,6 +744,25 @@ async function handleCaptionDecision(text, captionDurationSeconds, options = {})
     console.error(`${LOG_PREFIX} /event failed ${JSON.stringify(meta)}`, meta);
     return { action: 'none', reason: 'Backend unavailable', duration_seconds: 0, matched_category: null };
   }
+}
+
+function shouldAnalyzeTranscriptForFiltering(text, source) {
+  const clean = String(text || '').trim();
+  if (!clean) return false;
+  const normalizedText = clean.toLowerCase();
+  if (normalizedText === 'isweep captions listening...' || normalizedText === 'listening') return false;
+  if (normalizedText.includes('speech-to-text is not enabled')) return false;
+  if (normalizedText.includes('backend running')) return false;
+  const blockedSources = new Set([
+    'placeholder',
+    'audio_stt_disabled',
+    'backend_offline',
+    'silence',
+    'error',
+  ]);
+  const normalizedSource = String(source || '').trim().toLowerCase();
+  if (blockedSources.has(normalizedSource)) return false;
+  return true;
 }
 
 async function handleMarkerAnalyze(videoId, forceRefresh = false) {
@@ -981,15 +1004,19 @@ async function handleAudioAhead(videoId, audioChunk, mimeType, startSeconds, end
         videoId: cleanVideoId,
         textPreview: result.text.slice(0, 80),
       });
+    } else {
+      console.log(AUDIO_CAPTIONS_LOG, 'silence/no transcript', {
+        videoId: cleanVideoId,
+        source: result.source || null,
+        failure_reason: result.failure_reason || null,
+      });
     }
 
-    if (
-      result.status === 'ready'
-      && result.source !== 'audio_stt'
-      && result.events.length === 0
-      && typeof result.text === 'string'
-      && result.text.trim()
-    ) {
+    if (result.failure_reason === 'backend_not_running') {
+      console.warn(AUDIO_CAPTIONS_LOG, 'backend offline', { videoId: cleanVideoId });
+    }
+
+    if (result.status === 'ready' && result.events.length === 0 && shouldAnalyzeTranscriptForFiltering(result.text, result.source)) {
       const captionDurationSeconds = Math.max(normalizedEnd - normalizedStart, 0);
       const decision = await handleCaptionDecision(result.text, captionDurationSeconds, {
         source: 'audio_stt',

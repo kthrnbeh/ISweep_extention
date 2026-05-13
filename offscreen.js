@@ -171,6 +171,7 @@ async function startCapture(streamId, videoId) {
 
   const workletUrl = chrome.runtime.getURL('audio_chunk_processor.js');
   await audioCtx.audioWorklet.addModule(workletUrl);
+  console.log(LOG_PREFIX, 'audio worklet loaded');
 
   const source = audioCtx.createMediaStreamSource(stream);
   const workletNode = new AudioWorkletNode(audioCtx, 'audio-chunk-processor');

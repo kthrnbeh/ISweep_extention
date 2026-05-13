@@ -375,9 +375,16 @@ test('audio caption chunk posts to transcribe and relays transcript to content s
   bg.getAuthToken = async () => 'token';
   bg.getBackendUrl = async () => 'http://127.0.0.1:5000';
 
-  let postedUrl = null;
+  const postedUrls = [];
   bg.fetch = async (url) => {
-    postedUrl = url;
+    postedUrls.push(url);
+    if (String(url).endsWith('/event')) {
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ action: 'none' }),
+      };
+    }
     return {
       ok: true,
       status: 200,
@@ -405,10 +412,118 @@ test('audio caption chunk posts to transcribe and relays transcript to content s
   await bg.handleStartTabAudioCaptions();
 
   const result = await bg.handleAudioAhead('chunkvid', 'ZmFrZQ==', 'audio/wav', 0, 2);
-  assert.equal(postedUrl.endsWith('/captions/transcribe'), true);
+  assert.equal(postedUrls.some((url) => String(url).endsWith('/captions/transcribe')), true);
   assert.equal(result.status, 'ready');
 
   await bg.relayAudioCaptionResultToTab(result);
 
   assert.equal(sent.some((entry) => entry.payload.type === 'isweep_audio_caption_text'), true);
+});
+
+test('start audio captions creates offscreen document', async () => {
+  const bg = loadBackgroundContext();
+  let created = 0;
+  bg.chrome.tabs.query = async () => ([{ id: 88, url: 'https://www.youtube.com/watch?v=offscreen1' }]);
+  bg.chrome.offscreen.createDocument = async () => {
+    created += 1;
+  };
+  bg.chrome.runtime.sendMessage = async (payload) => {
+    if (payload.type === 'isweep_offscreen_start_tab_capture') return { ok: true };
+    return { ok: true };
+  };
+
+  const result = await bg.handleStartTabAudioCaptions();
+  assert.equal(result.ok, true);
+  assert.equal(created, 1);
+});
+
+test('empty transcript does not call /event', async () => {
+  const bg = loadBackgroundContext();
+  bg.getAuthToken = async () => 'token';
+  bg.getBackendUrl = async () => 'http://127.0.0.1:5000';
+
+  const urls = [];
+  bg.fetch = async (url) => {
+    urls.push(url);
+    if (String(url).endsWith('/captions/transcribe')) {
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ status: 'ready', source: 'audio_stt', events: [], text: '' }),
+      };
+    }
+    return {
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ action: 'none' }),
+    };
+  };
+
+  await bg.handleAudioAhead('video1', 'ZmFrZQ==', 'audio/wav', 1, 2);
+  assert.equal(urls.filter((url) => String(url).endsWith('/event')).length, 0);
+});
+
+test('placeholder or status source does not call /event', async () => {
+  const bg = loadBackgroundContext();
+  bg.getAuthToken = async () => 'token';
+  bg.getBackendUrl = async () => 'http://127.0.0.1:5000';
+
+  const urls = [];
+  bg.fetch = async (url) => {
+    urls.push(url);
+    if (String(url).endsWith('/captions/transcribe')) {
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({
+          status: 'ready',
+          source: 'audio_stt_disabled',
+          events: [],
+          text: 'ISweep Captions listening...',
+          failure_reason: 'stt_disabled',
+        }),
+      };
+    }
+    return {
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ action: 'none' }),
+    };
+  };
+
+  await bg.handleAudioAhead('video1', 'ZmFrZQ==', 'audio/wav', 1, 2);
+  assert.equal(urls.filter((url) => String(url).endsWith('/event')).length, 0);
+});
+
+test('real transcript calls /event once when no events are returned', async () => {
+  const bg = loadBackgroundContext();
+  bg.getAuthToken = async () => 'token';
+  bg.getBackendUrl = async () => 'http://127.0.0.1:5000';
+
+  const urls = [];
+  bg.fetch = async (url) => {
+    urls.push(url);
+    if (String(url).endsWith('/captions/transcribe')) {
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ status: 'ready', source: 'audio_stt', events: [], text: 'hello world' }),
+      };
+    }
+    if (String(url).endsWith('/event')) {
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ action: 'none', duration_seconds: 0, matched_category: null }),
+      };
+    }
+    return {
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({}),
+    };
+  };
+
+  await bg.handleAudioAhead('video1', 'ZmFrZQ==', 'audio/wav', 1, 2);
+  assert.equal(urls.filter((url) => String(url).endsWith('/event')).length, 1);
 });

@@ -367,8 +367,8 @@ async function saveCleanCaptionSettings(nextSettings) {
   try {
     await chrome.runtime.sendMessage({
       type: cleanCaptionSettingsCache.cleanCaptionsEnabled === true
-        ? 'isweep_start_tab_audio_captions'
-        : 'isweep_stop_tab_audio_captions',
+        ? 'isweep_start_audio_captions'
+        : 'isweep_stop_audio_captions',
     });
   } catch (_) {
     // Best effort: content script also reacts to storage changes.

@@ -29,13 +29,6 @@
   "background": {
     "service_worker": "background.js"
   },
-  "offscreen_documents": [
-    {
-      "url": "offscreen.html",
-      "reasons": ["USER_MEDIA"],
-      "justification": "Capture active tab audio for ISweep clean captions"
-    }
-  ],
   "content_scripts": [
     {
       "matches": ["<all_urls>"],

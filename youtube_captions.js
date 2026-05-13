@@ -100,6 +100,7 @@
   let muteUntilNextCaption = false;
   let muteLockUntilSec = 0; // Active mute window end (seconds, video time)
   let hardRestoreTimeout = null; // Final fail-safe unmute
+  let extensionContextInvalidated = false;
   function clearMuteState(reason) {
     if (restoreMuteTimeout) clearTimeout(restoreMuteTimeout);
     if (hardRestoreTimeout) clearTimeout(hardRestoreTimeout);
@@ -115,6 +116,69 @@
     lastMuteOwner = 'none';
     muteWindowStartSec = null;
     console.log('[ISweep Timing] mute state reset', { reason });
+  }
+
+  function isExtensionContextInvalidatedError(error) {
+    const text = String(error?.message || error || '').trim().toLowerCase();
+    return text.includes('extension context invalidated') || text.includes('receiving end does not exist');
+  }
+
+  function stopLocalCaptionTimers(reason) {
+    if (restoreMuteTimeout) clearTimeout(restoreMuteTimeout);
+    if (hardRestoreTimeout) clearTimeout(hardRestoreTimeout);
+    if (muteEnforceInterval) clearInterval(muteEnforceInterval);
+    if (markerSchedulerInterval) clearInterval(markerSchedulerInterval);
+    if (markerVideoWatchInterval) clearInterval(markerVideoWatchInterval);
+    if (bufferTimer) clearTimeout(bufferTimer);
+    restoreMuteTimeout = null;
+    hardRestoreTimeout = null;
+    muteEnforceInterval = null;
+    markerSchedulerInterval = null;
+    markerVideoWatchInterval = null;
+    bufferTimer = null;
+    console.log('[ISWEEP][AUDIO_CAPTIONS]', 'local timers stopped', { reason });
+  }
+
+  function freezeAudioCaptionOverlay() {
+    if (cleanCaptionTextEl) {
+      cleanCaptionTextEl.textContent = '';
+      cleanCaptionTextEl.style.opacity = '0';
+    }
+    if (cleanCaptionOverlayEl) {
+      cleanCaptionOverlayEl.style.visibility = 'hidden';
+      cleanCaptionOverlayEl.style.display = 'none';
+      cleanCaptionOverlayEl.dataset.source = 'invalidated';
+    }
+    lastRenderedCleanCaptionKey = 'invalidated';
+    lastRenderedOverlayText = '';
+    lastRenderedOverlaySource = 'invalidated';
+  }
+
+  function handleExtensionContextInvalidated() {
+    if (extensionContextInvalidated) return null;
+    extensionContextInvalidated = true;
+    console.warn('[ISWEEP][AUDIO_CAPTIONS] extension context invalidated; refresh page required');
+    stopLocalCaptionTimers('extension_context_invalidated');
+    clearMuteState('extension_context_invalidated');
+    try {
+      stopAudioCapture('extension_context_invalidated');
+    } catch (_) {}
+    freezeAudioCaptionOverlay();
+    return null;
+  }
+
+  async function safeRuntimeSendMessage(message) {
+    if (extensionContextInvalidated || !chrome?.runtime?.id || typeof chrome.runtime.sendMessage !== 'function') {
+      return handleExtensionContextInvalidated();
+    }
+    try {
+      return await chrome.runtime.sendMessage(message);
+    } catch (error) {
+      if (isExtensionContextInvalidatedError(error)) {
+        return handleExtensionContextInvalidated();
+      }
+      throw error;
+    }
   }
 
   function findMuteButton() {
@@ -788,6 +852,7 @@
   }
 
   function tickMarkerScheduler() {
+    if (extensionContextInvalidated) return;
     const video = findVideo();
     if (!video) return;
     const nowSec = video.currentTime || 0;
@@ -849,7 +914,7 @@
 
     try {
       console.log(MARKER_LOG_PREFIX, 'analyze request start', { videoId, forceRefresh });
-      const response = await chrome.runtime.sendMessage({
+      const response = await safeRuntimeSendMessage({
         type: 'isweep_markers_analyze',
         video_id: videoId,
         force_refresh: forceRefresh,
@@ -972,7 +1037,7 @@
       });
     }
     try {
-      chrome.runtime.sendMessage({ type: 'isweep_release_tab_capture_stream', reason }).catch(() => {});
+      void safeRuntimeSendMessage({ type: 'isweep_release_tab_capture_stream', reason });
     } catch (_) {}
     audioInputStream = null;
     audioCaptureSource = null;
@@ -1001,7 +1066,7 @@
     console.log('[ISWEEP][AUDIO_CAPTIONS] tab capture start requested', { videoId: activeVideoId });
     let response;
     try {
-      response = await chrome.runtime.sendMessage({
+      response = await safeRuntimeSendMessage({
         type: 'isweep_request_tab_capture_stream',
         video_id: activeVideoId,
       });
@@ -1229,7 +1294,7 @@
     console.log(AUDIO_CAPTURE_LOG_PREFIX, 'chunk sent', {
       videoId, chunk_start_seconds: chunkStartSec, chunk_end_seconds: chunkEndSec,
     });
-    chrome.runtime.sendMessage({
+    safeRuntimeSendMessage({
       type: 'isweep_audio_chunk',
       video_id: videoId,
       audio_chunk: audioChunk,
@@ -1669,7 +1734,7 @@
 
   async function requestPrefSync() {
     try {
-      await chrome.runtime.sendMessage({ type: 'isweep_sync_prefs' }); // Pull latest prefs into storage
+      await safeRuntimeSendMessage({ type: 'isweep_sync_prefs' }); // Pull latest prefs into storage
     } catch (err) {
       console.warn('[ISWEEP][MATCH] pref sync request failed', err?.message || err);
     }
@@ -2038,6 +2103,7 @@
   }
 
   function updateCleanOverlay(liveText, nowSec) {
+    if (extensionContextInvalidated) return;
     ensureCleanCaptionOverlay();
     if (!cleanCaptionOverlayEl || !cleanCaptionTextEl) return;
 
@@ -2149,6 +2215,7 @@
         }
       }
       requestAnimationFrame(() => {
+        if (extensionContextInvalidated) return;
         if (cleanCaptionTextEl) cleanCaptionTextEl.style.opacity = '1';
       });
       lastRenderedCleanCaptionKey = nextKey;
@@ -2794,8 +2861,7 @@
     }
 
     try {
-      const response = await chrome.runtime
-        .sendMessage({ type: 'caption', text: payload.text, caption_duration_seconds: payload.caption_duration_seconds })
+      const response = await safeRuntimeSendMessage({ type: 'caption', text: payload.text, caption_duration_seconds: payload.caption_duration_seconds })
         .catch((err) => {
           log('Runtime message failed:', err);
           return null;

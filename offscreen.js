@@ -13,6 +13,29 @@ const AUDIO_CHUNK_OVERLAP_SEC = 0.5;
 
 console.log(LOG_PREFIX, 'loaded');
 
+function isExtensionContextInvalidatedError(error) {
+  const text = String(error?.message || error || '').trim().toLowerCase();
+  return text.includes('extension context invalidated') || text.includes('receiving end does not exist');
+}
+
+async function safeRuntimeSendMessage(message) {
+  if (!chrome?.runtime?.id || typeof chrome.runtime.sendMessage !== 'function') {
+    console.warn('[ISWEEP][AUDIO_CAPTIONS] extension context invalidated; refresh page required');
+    await stopCapture('extension_context_invalidated');
+    return null;
+  }
+  try {
+    return await chrome.runtime.sendMessage(message);
+  } catch (error) {
+    if (isExtensionContextInvalidatedError(error)) {
+      console.warn('[ISWEEP][AUDIO_CAPTIONS] extension context invalidated; refresh page required');
+      await stopCapture('extension_context_invalidated');
+      return null;
+    }
+    throw error;
+  }
+}
+
 let audioCtx = null;
 let audioProcessor = null;
 let audioInputStream = null;
@@ -111,7 +134,7 @@ async function flushAudioChunk() {
     start_seconds: startSec,
     end_seconds: endSec,
   });
-  await chrome.runtime.sendMessage({
+  await safeRuntimeSendMessage({
     type: 'isweep_audio_caption_chunk',
     video_id: activeVideoId,
     sampleRate,

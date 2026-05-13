@@ -529,6 +529,37 @@ test('live masked source does not call /event', async () => {
   assert.equal(urls.filter((url) => String(url).endsWith('/event')).length, 0);
 });
 
+test('silence source does not call /event', async () => {
+  const bg = loadBackgroundContext();
+  bg.getAuthToken = async () => 'token';
+  bg.getBackendUrl = async () => 'http://127.0.0.1:5000';
+
+  const urls = [];
+  bg.fetch = async (url) => {
+    urls.push(url);
+    if (String(url).endsWith('/captions/transcribe')) {
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({
+          status: 'ready',
+          source: 'silence',
+          events: [],
+          text: '',
+        }),
+      };
+    }
+    return {
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ action: 'none' }),
+    };
+  };
+
+  await bg.handleAudioAhead('video1', 'ZmFrZQ==', 'audio/wav', 1, 2);
+  assert.equal(urls.filter((url) => String(url).endsWith('/event')).length, 0);
+});
+
 test('real transcript calls /event once when no events are returned', async () => {
   const bg = loadBackgroundContext();
   bg.getAuthToken = async () => 'token';

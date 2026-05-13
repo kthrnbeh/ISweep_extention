@@ -689,6 +689,25 @@ test('audio_stt caption replaces waiting placeholder', () => {
   assert.equal(spoken.source, 'audio_stt_live');
 });
 
+test('fresh audio STT outranks live masked text', () => {
+  const hooks = loadYoutubeTimingHooks();
+  const nowMs = Date.now();
+  const best = hooks.getBestCleanCaptionText('native youtube caption text', 42.0, {
+    preCachedAudioCaptions: [],
+    liveAudioCaptions: [],
+    preAnalyzedCaptions: [],
+    markerEntries: [],
+    liveCaptionObservedAtMs: nowMs,
+    audioCaptionText: 'fresh audio text',
+    audioCaptionSource: 'audio_stt_live',
+    audioCaptionObservedAtMs: nowMs,
+    nowMs,
+  });
+
+  assert.equal(best.source, 'audio_stt_live');
+  assert.equal(best.text, 'fresh audio text');
+});
+
 test('masking follows stored preferences as source of truth', () => {
   const hooks = loadYoutubeTimingHooks();
   hooks.setCachedPreferences({

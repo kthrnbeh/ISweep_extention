@@ -292,6 +292,7 @@
   let audioCapturePermissionDenied = false; // true after explicit permission denial until user resets capture
   let audioInputStream = null;
   let audioCaptureSource = null;
+  let tabAudioCaptureState = 'idle'; // idle|starting|ready|unavailable|stopped
   let audioFilteringEnabled = true;
 
   function getAudioCaptionMode() {
@@ -958,6 +959,7 @@
       lastAudioCaptionSource = null;
       lastAudioCaptionFailureReason = null;
       audioCapturePermissionDenied = false;
+      tabAudioCaptureState = 'idle';
     }
     console.log(AUDIO_AHEAD_LOG_PREFIX, 'audio capture stopped', { reason });
   }
@@ -1350,6 +1352,7 @@
       currentTime: video?.currentTime ?? null,
     });
     if (!cleanCaptionSettings.cleanCaptionsEnabled) return;
+    if (tabAudioCaptureState === 'starting' || tabAudioCaptureState === 'ready') return;
     if (!video || audioAheadActive || audioCapturePermissionDenied) return;
 
     const minReadyState = typeof HTMLMediaElement !== 'undefined'
@@ -1416,6 +1419,7 @@
     lastAudioCaptionSource = null;
     lastAudioCaptionFailureReason = null;
     audioCapturePermissionDenied = false; // Reset capture state for navigation changes
+    tabAudioCaptureState = 'idle';
     stopAudioCapture('video_changed');
     resetMarkerEngine('video changed');
     analyzeCurrentVideoMarkers(false);
@@ -1431,7 +1435,7 @@
     markerVideoWatchInterval = setInterval(() => {
       handleVideoIdChange(getCurrentVideoId());
       // Retry audio capture each tick if tracks weren't available on the first attempt.
-      if (activeVideoId && cleanCaptionSettings.cleanCaptionsEnabled && !audioAheadActive && !audioCapturePermissionDenied) startAudioCapture();
+      if (tabAudioCaptureState !== 'ready' && tabAudioCaptureState !== 'starting' && activeVideoId && cleanCaptionSettings.cleanCaptionsEnabled && !audioAheadActive && !audioCapturePermissionDenied) startAudioCapture();
     }, 1000);
   }
 
@@ -1522,7 +1526,7 @@
           if (previousSettings.cleanCaptionsEnabled === false) {
             audioCapturePermissionDenied = false;
           }
-          if (activeVideoId && !audioAheadActive && !audioCapturePermissionDenied) {
+          if (tabAudioCaptureState !== 'ready' && tabAudioCaptureState !== 'starting' && activeVideoId && !audioAheadActive && !audioCapturePermissionDenied) {
             startAudioCapture();
           }
         }
@@ -1553,14 +1557,60 @@
       }
       if (message?.type === 'isweep_caption_capture_start') {
         audioCapturePermissionDenied = false;
-        if (activeVideoId && cleanCaptionSettings.cleanCaptionsEnabled && !audioAheadActive) {
-          startAudioCapture();
-        }
+        tabAudioCaptureState = 'starting';
         sendResponse({ ok: true });
         return true;
       }
       if (message?.type === 'isweep_caption_capture_stop') {
+        tabAudioCaptureState = 'stopped';
         stopAudioCapture('captions_disabled');
+        sendResponse({ ok: true });
+        return true;
+      }
+      if (message?.type === 'isweep_tab_audio_capture_status') {
+        const state = String(message.state || 'idle');
+        tabAudioCaptureState = state;
+        if (state === 'ready') {
+          stopAudioCapture('tab_capture_external_ready');
+          lastAudioCaptionFailureReason = null;
+        } else if (state === 'unavailable') {
+          lastAudioCaptionFailureReason = message.failure_reason || 'audio_capture_unavailable';
+          if (activeVideoId && cleanCaptionSettings.cleanCaptionsEnabled && !audioAheadActive && !audioCapturePermissionDenied) {
+            startAudioCapture();
+          }
+        } else if (state === 'stopped') {
+          stopAudioCapture('captions_disabled');
+        }
+        sendResponse({ ok: true });
+        return true;
+      }
+      if (message?.type === 'isweep_audio_caption_text') {
+        lastAudioCaptionSource = message.source || 'audio_stt';
+        lastAudioCaptionFailureReason = message.failure_reason || null;
+        const startSec = Number.isFinite(Number(message.start_seconds)) ? Number(message.start_seconds) : (findVideo()?.currentTime || 0);
+        const endSec = Number.isFinite(Number(message.end_seconds)) ? Number(message.end_seconds) : startSec + 2;
+        if (Array.isArray(message.events) && message.events.length > 0) {
+          ingestAudioMarkers(message.events, activeVideoId || getCurrentVideoId());
+        }
+        const normalizedAudioCaptions = buildAudioResponseCaptions({
+          status: message.status || 'ready',
+          source: message.source || 'audio_stt',
+          cleaned_captions: message.cleaned_captions,
+          clean_captions: message.clean_captions,
+          text: message.text,
+          clean_text: message.clean_text,
+          cleaned_text: message.cleaned_text,
+          words: message.words,
+          cached: message.cached === true,
+        }, startSec, endSec);
+        if (normalizedAudioCaptions.length > 0) {
+          if (message.cached === true) {
+            preCachedAudioCleanCaptions = normalizedAudioCaptions;
+          } else {
+            liveAudioCleanCaptions = normalizedAudioCaptions;
+          }
+          updateCleanOverlay(lastCaptionText, findVideo()?.currentTime || 0);
+        }
         sendResponse({ ok: true });
         return true;
       }
@@ -1572,7 +1622,7 @@
       } else {
         audioCapturePermissionDenied = false;
       }
-      if (cleanCaptionSettings.cleanCaptionsEnabled && activeVideoId && !audioAheadActive && !audioCapturePermissionDenied) {
+      if (cleanCaptionSettings.cleanCaptionsEnabled && tabAudioCaptureState !== 'ready' && tabAudioCaptureState !== 'starting' && activeVideoId && !audioAheadActive && !audioCapturePermissionDenied) {
         startAudioCapture();
       }
       applyCleanCaptionOverlayStyles();

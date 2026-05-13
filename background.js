@@ -28,11 +28,13 @@ const CAPTION_LOG_PREFIX = '[ISWEEP][CAPTIONS]';
 const MARKER_LOG_PREFIX = '[ISWEEP][MARKERS]';
 
 const DEFAULT_BACKEND = 'http://127.0.0.1:5000';
+const OFFSCREEN_DOCUMENT_PATH = 'offscreen.html';
 
 const markerCacheByVideoId = new Map();
 const AUDIO_CAPTION_DEDUPE_WINDOW_MS = 1600;
 const recentCaptionByText = new Map();
 const tabCaptureSessionByTabId = new Map();
+let activeTabAudioCapture = null;
 
 function normalizeCaptionTextForDedupe(text) {
   return String(text || '').toLowerCase().replace(/\s+/g, ' ').trim();
@@ -193,6 +195,46 @@ async function getActiveYouTubeTab() {
   return activeTab;
 }
 
+function getYouTubeVideoIdFromUrl(url) {
+  try {
+    const value = new URL(String(url || ''));
+    return String(value.searchParams.get('v') || '').trim();
+  } catch (_) {
+    return '';
+  }
+}
+
+async function ensureOffscreenDocument() {
+  if (!chrome.offscreen?.createDocument) return false;
+  const documentUrl = chrome.runtime.getURL(OFFSCREEN_DOCUMENT_PATH);
+  if (chrome.runtime.getContexts) {
+    const existing = await chrome.runtime.getContexts({
+      contextTypes: ['OFFSCREEN_DOCUMENT'],
+      documentUrls: [documentUrl],
+    });
+    if (Array.isArray(existing) && existing.length > 0) return true;
+  }
+  await chrome.offscreen.createDocument({
+    url: OFFSCREEN_DOCUMENT_PATH,
+    reasons: ['USER_MEDIA'],
+    justification: 'Capture active tab audio for ISweep clean captions',
+  });
+  return true;
+}
+
+async function postTabCaptureStatusToTab(tabId, state, failureReason = null) {
+  if (!Number.isFinite(Number(tabId))) return;
+  try {
+    await chrome.tabs.sendMessage(Number(tabId), {
+      type: 'isweep_tab_audio_capture_status',
+      state,
+      failure_reason: failureReason,
+    });
+  } catch (_) {
+    // Best effort status fanout.
+  }
+}
+
 function classifyTabCaptureError(error) {
   const name = String(error?.name || '').trim();
   const message = String(error?.message || error || '').trim();
@@ -227,6 +269,89 @@ async function requestTabCaptureStreamId(tabId) {
   }
 }
 
+async function startTabAudioCapture(tabId, videoId) {
+  console.log('[ISWEEP][AUDIO_CAPTIONS] tab capture start requested', { tabId, videoId });
+  const stream = await requestTabCaptureStreamId(tabId);
+  if (!stream?.ok || !stream.streamId) {
+    return { ok: false, failure_reason: stream?.failure_reason || 'audio_capture_unavailable' };
+  }
+
+  const offscreenReady = await ensureOffscreenDocument();
+  if (!offscreenReady) {
+    return { ok: false, failure_reason: 'audio_capture_unavailable' };
+  }
+
+  const response = await chrome.runtime.sendMessage({
+    type: 'isweep_offscreen_start_tab_capture',
+    tab_id: tabId,
+    video_id: videoId,
+    stream_id: stream.streamId,
+  });
+
+  if (!response?.ok) {
+    const failureReason = response?.failure_reason || 'audio_capture_unavailable';
+    releaseTabCaptureSession(tabId, 'offscreen_start_failed');
+    return { ok: false, failure_reason: failureReason };
+  }
+
+  activeTabAudioCapture = {
+    tabId,
+    videoId,
+    startedAt: Date.now(),
+  };
+  console.log('[ISWEEP][AUDIO_CAPTIONS] tab capture stream ready', { tabId, videoId });
+  return { ok: true, tabId, videoId };
+}
+
+async function stopTabAudioCapture(reason = 'captions_disabled') {
+  const active = activeTabAudioCapture;
+  activeTabAudioCapture = null;
+  if (!active) {
+    console.log('[ISWEEP][AUDIO_CAPTIONS] tab capture stopped', { reason, active: false });
+    return { ok: true };
+  }
+  try {
+    await chrome.runtime.sendMessage({
+      type: 'isweep_offscreen_stop_tab_capture',
+      reason,
+      tab_id: active.tabId,
+    });
+  } catch (_) {
+    // Best effort stop signal.
+  }
+  releaseTabCaptureSession(active.tabId, reason);
+  await postTabCaptureStatusToTab(active.tabId, 'stopped', null);
+  console.log('[ISWEEP][AUDIO_CAPTIONS] tab capture stopped', { reason, tabId: active.tabId, videoId: active.videoId });
+  return { ok: true };
+}
+
+async function relayAudioCaptionResultToTab(result) {
+  const tabId = Number(activeTabAudioCapture?.tabId);
+  if (!Number.isFinite(tabId)) return false;
+  try {
+    await chrome.tabs.sendMessage(tabId, {
+      type: 'isweep_audio_caption_text',
+      text: result?.text || result?.clean_text || result?.cleaned_text || '',
+      source: result?.source || 'audio_stt',
+      confidence: Number.isFinite(Number(result?.confidence)) ? Number(result.confidence) : 0,
+      status: result?.status || 'error',
+      failure_reason: result?.failure_reason || null,
+      start_seconds: result?.start_seconds,
+      end_seconds: result?.end_seconds,
+      events: Array.isArray(result?.events) ? result.events : [],
+      cleaned_captions: Array.isArray(result?.cleaned_captions) ? result.cleaned_captions : [],
+      clean_captions: Array.isArray(result?.clean_captions) ? result.clean_captions : [],
+      clean_text: result?.clean_text || null,
+      cleaned_text: result?.cleaned_text || null,
+      words: Array.isArray(result?.words) ? result.words : [],
+      cached: result?.cached === true,
+    });
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
 function releaseTabCaptureSession(tabId, reason = 'released') {
   if (!Number.isFinite(Number(tabId))) return;
   if (tabCaptureSessionByTabId.has(tabId)) {
@@ -236,28 +361,31 @@ function releaseTabCaptureSession(tabId, reason = 'released') {
 }
 
 async function handleCaptionCaptureControl(enabled) {
+  if (enabled) return handleStartTabAudioCaptions();
+  return handleStopTabAudioCaptions();
+}
+
+async function handleStartTabAudioCaptions() {
   const activeTab = await getActiveYouTubeTab();
   if (!activeTab?.id) {
     return { ok: false, failure_reason: 'youtube_tab_not_found' };
   }
+  const tabId = Number(activeTab.id);
+  const videoId = getYouTubeVideoIdFromUrl(activeTab.url);
+  await postTabCaptureStatusToTab(tabId, 'starting', null);
 
-  const tabId = activeTab.id;
-  if (enabled) {
-    try {
-      await chrome.tabs.sendMessage(tabId, { type: 'isweep_caption_capture_start' });
-      return { ok: true, tabId };
-    } catch (error) {
-      return { ok: false, failure_reason: 'content_script_not_ready', error: error?.message || String(error) };
-    }
+  const start = await startTabAudioCapture(tabId, videoId);
+  if (!start.ok) {
+    await postTabCaptureStatusToTab(tabId, 'unavailable', start.failure_reason || 'audio_capture_unavailable');
+    return start;
   }
+  await postTabCaptureStatusToTab(tabId, 'ready', null);
+  return { ok: true, tabId, video_id: videoId, source: 'tab_capture' };
+}
 
-  try {
-    await chrome.tabs.sendMessage(tabId, { type: 'isweep_caption_capture_stop' });
-  } catch (_) {
-    // Best effort stop.
-  }
-  releaseTabCaptureSession(tabId, 'captions_disabled');
-  return { ok: true, tabId };
+async function handleStopTabAudioCaptions() {
+  await stopTabAudioCapture('captions_disabled');
+  return { ok: true };
 }
 
 async function getBackendUrl() {
@@ -392,6 +520,9 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
 if (chrome.tabs?.onRemoved?.addListener) {
   chrome.tabs.onRemoved.addListener((tabId) => {
     releaseTabCaptureSession(tabId, 'tab_removed');
+    if (activeTabAudioCapture && Number(activeTabAudioCapture.tabId) === Number(tabId)) {
+      stopTabAudioCapture('tab_removed').catch(() => {});
+    }
   });
 }
 
@@ -463,6 +594,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   } else if (message.type === 'isweep_get_caption_runtime_status') {
     handleCaptionRuntimeStatus().then(sendResponse);
     return true; // async
+  } else if (message.type === 'isweep_start_tab_audio_captions') {
+    handleStartTabAudioCaptions().then(sendResponse);
+    return true; // async
+  } else if (message.type === 'isweep_stop_tab_audio_captions') {
+    handleStopTabAudioCaptions().then(sendResponse);
+    return true; // async
   } else if (message.type === 'isweep_caption_capture_control') {
     handleCaptionCaptureControl(message.enabled === true).then(sendResponse);
     return true; // async
@@ -479,6 +616,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     releaseTabCaptureSession(Number(senderTabId), message.reason || 'content_release');
     sendResponse({ ok: true });
     return;
+  } else if (message.type === 'isweep_audio_caption_chunk') {
+    const targetVideoId = String(message.video_id || activeTabAudioCapture?.videoId || '').trim();
+    handleAudioAhead(
+      targetVideoId,
+      message.audio_chunk,
+      message.mime_type,
+      message.start_seconds,
+      message.end_seconds,
+      message.audio,
+      message.sampleRate,
+      message.channels
+    ).then(async (result) => {
+      await relayAudioCaptionResultToTab(result);
+      sendResponse(result);
+    });
+    return true; // async
   }
 
   sendResponse({ ok: false, error: 'unknown message' });

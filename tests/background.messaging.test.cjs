@@ -13,10 +13,18 @@ function loadBackgroundContext() {
       onInstalled: { addListener() {} },
       onMessage: { addListener() {} },
       sendMessage: async () => ({}),
+      getURL: (p) => `chrome-extension://unit-test/${p}`,
+      getContexts: async () => ([]),
     },
     tabs: {
       query: async () => [],
       sendMessage: async () => ({}),
+    },
+    tabCapture: {
+      getMediaStreamId: async () => 'stream-id-1',
+    },
+    offscreen: {
+      createDocument: async () => ({}),
     },
     storage: {
       onChanged: { addListener() {} },
@@ -318,4 +326,89 @@ test('audio_stt results without markers do not synthesize coarse full-chunk mute
   assert.equal(result.source, 'audio_stt');
   assert.equal(Array.isArray(result.events), true);
   assert.equal(result.events.length, 0);
+});
+
+test('start tab audio captions requests tab capture and marks ready without checking YouTube CC state', async () => {
+  const bg = loadBackgroundContext();
+  const sent = [];
+  bg.chrome.tabs.query = async () => ([{ id: 11, url: 'https://www.youtube.com/watch?v=abc123' }]);
+  bg.chrome.tabs.sendMessage = async (tabId, payload) => {
+    sent.push({ tabId, payload });
+    return { ok: true };
+  };
+  bg.chrome.runtime.sendMessage = async (payload) => {
+    if (payload.type === 'isweep_offscreen_start_tab_capture') {
+      return { ok: true };
+    }
+    return { ok: true };
+  };
+
+  const result = await bg.handleStartTabAudioCaptions();
+  assert.equal(result.ok, true);
+  assert.equal(result.source, 'tab_capture');
+  assert.equal(sent.some((entry) => entry.payload.type === 'isweep_tab_audio_capture_status' && entry.payload.state === 'ready'), true);
+});
+
+test('stop tab audio captions notifies tab and stops capture', async () => {
+  const bg = loadBackgroundContext();
+  const sent = [];
+  bg.chrome.tabs.query = async () => ([{ id: 22, url: 'https://www.youtube.com/watch?v=xyz' }]);
+  bg.chrome.tabs.sendMessage = async (tabId, payload) => {
+    sent.push({ tabId, payload });
+    return { ok: true };
+  };
+  bg.chrome.runtime.sendMessage = async (payload) => {
+    if (payload.type === 'isweep_offscreen_start_tab_capture') return { ok: true };
+    if (payload.type === 'isweep_offscreen_stop_tab_capture') return { ok: true };
+    return { ok: true };
+  };
+
+  await bg.handleStartTabAudioCaptions();
+
+  const result = await bg.handleStopTabAudioCaptions();
+  assert.equal(result.ok, true);
+  assert.equal(sent.some((entry) => entry.payload.type === 'isweep_tab_audio_capture_status' && entry.payload.state === 'stopped'), true);
+});
+
+test('audio caption chunk posts to transcribe and relays transcript to content script', async () => {
+  const bg = loadBackgroundContext();
+  bg.getAuthToken = async () => 'token';
+  bg.getBackendUrl = async () => 'http://127.0.0.1:5000';
+
+  let postedUrl = null;
+  bg.fetch = async (url) => {
+    postedUrl = url;
+    return {
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({
+        status: 'ready',
+        source: 'audio_stt',
+        events: [],
+        text: 'hello world',
+        clean_text: 'hello world',
+      }),
+    };
+  };
+
+  const sent = [];
+  bg.chrome.tabs.query = async () => ([{ id: 33, url: 'https://www.youtube.com/watch?v=chunkvid' }]);
+  bg.chrome.tabs.sendMessage = async (tabId, payload) => {
+    sent.push({ tabId, payload });
+    return { ok: true };
+  };
+  bg.chrome.runtime.sendMessage = async (payload) => {
+    if (payload.type === 'isweep_offscreen_start_tab_capture') return { ok: true };
+    return { ok: true };
+  };
+
+  await bg.handleStartTabAudioCaptions();
+
+  const result = await bg.handleAudioAhead('chunkvid', 'ZmFrZQ==', 'audio/wav', 0, 2);
+  assert.equal(postedUrl.endsWith('/captions/transcribe'), true);
+  assert.equal(result.status, 'ready');
+
+  await bg.relayAudioCaptionResultToTab(result);
+
+  assert.equal(sent.some((entry) => entry.payload.type === 'isweep_audio_caption_text'), true);
 });

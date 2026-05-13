@@ -274,6 +274,25 @@ test('live masked text is used when no pre-analyzed caption exists', () => {
     assert.equal(result.text.includes('___'), true);
 });
 
+test('fresh audio STT outranks native caption fallback', () => {
+  const hooks = loadYoutubeTimingHooks();
+  const nowMs = Date.now();
+  const result = hooks.getBestCleanCaptionText('native caption text', 20, {
+    preAnalyzedCaptions: [],
+    markerEntries: [],
+    liveAudioCaptions: [],
+    preCachedAudioCaptions: [],
+    audioCaptionText: 'audio stt caption text',
+    audioCaptionSource: 'audio_stt_live',
+    audioCaptionObservedAtMs: nowMs,
+    liveCaptionObservedAtMs: nowMs,
+    nowMs,
+  });
+
+  assert.equal(result.source, 'audio_stt_live');
+  assert.equal(result.text, 'audio stt caption text');
+});
+
 test('stale live caption text is not displayed', () => {
   const hooks = loadYoutubeTimingHooks();
   const nowMs = 5000;

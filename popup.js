@@ -115,9 +115,10 @@ let cleanCaptionSettingsCache = { ...CLEAN_CAPTION_DEFAULTS };
 
 function renderCaptionRuntimeStatus(status) {
   if (!captionRuntimeStatus) return;
-  const state = typeof status?.state === 'string' ? status.state : 'stt_disabled';
+  const state = typeof status?.state === 'string' ? status.state : 'backend_offline';
   const label = typeof status?.label === 'string' ? status.label : 'Audio captions: STT disabled';
-  captionRuntimeStatus.textContent = label;
+  const sourceLabel = typeof status?.sourceLabel === 'string' ? status.sourceLabel : '';
+  captionRuntimeStatus.textContent = sourceLabel ? `Caption source: ${sourceLabel}` : label;
   captionRuntimeStatus.dataset.state = state;
 }
 

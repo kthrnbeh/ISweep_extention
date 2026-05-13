@@ -26,6 +26,7 @@ const TOKEN_KEY = 'isweep_auth_token'; // Shared with site_token_bridge and fron
 const LOG_PREFIX = '[ISWEEP][BG]';
 const CAPTION_LOG_PREFIX = '[ISWEEP][CAPTIONS]';
 const MARKER_LOG_PREFIX = '[ISWEEP][MARKERS]';
+const AUDIO_CAPTIONS_BG_LOG = '[ISWEEP][AUDIO_CAPTIONS][BG]';
 
 const DEFAULT_BACKEND = 'http://127.0.0.1:5000';
 const OFFSCREEN_DOCUMENT_PATH = 'offscreen.html';
@@ -166,22 +167,27 @@ async function handleCaptionRuntimeStatus() {
 
   let state = backend.state || 'backend_offline';
   let label = 'Audio captions: Backend offline';
+  let sourceLabel = 'Backend Offline';
 
   if (tabStatus?.usingAudioStt) {
     state = 'ready';
     label = 'Audio captions: Ready';
+    sourceLabel = tabStatus?.overlaySource === 'audio_stt_cached' ? 'Audio STT Cached' : 'Audio STT Live';
   } else if (tabStatus?.usingYoutubeFallback) {
     state = 'youtube_fallback';
     label = 'Captions: YouTube fallback';
+    sourceLabel = 'YouTube Fallback';
   } else if (backend.state === 'ready') {
     state = 'ready';
     label = 'Audio captions: Ready';
+    sourceLabel = 'Listening';
   } else if (backend.state === 'stt_disabled') {
     state = 'stt_disabled';
     label = 'Audio captions: STT disabled';
+    sourceLabel = 'STT Disabled';
   }
 
-  const response = { state, label, backend, tabStatus };
+  const response = { state, label, sourceLabel, backend, tabStatus };
   console.log(CAPTION_LOG_PREFIX, 'popup runtime status', response);
   return response;
 }
@@ -333,10 +339,15 @@ async function relayAudioCaptionResultToTab(result) {
   const tabId = Number(activeTabAudioCapture?.tabId);
   if (!Number.isFinite(tabId)) return false;
   try {
+    const relaySource = result?.source === 'audio_stt_disabled'
+      ? 'audio_stt_disabled'
+      : (result?.source === 'silence'
+        ? 'silence'
+        : (result?.cached === true ? 'audio_stt_cached' : 'audio_stt_live'));
     await chrome.tabs.sendMessage(tabId, {
       type: 'isweep_audio_caption_text',
       text: result?.text || result?.clean_text || result?.cleaned_text || '',
-      source: result?.source || 'audio_stt',
+      source: relaySource,
       confidence: Number.isFinite(Number(result?.confidence)) ? Number(result.confidence) : 0,
       status: result?.status || 'error',
       failure_reason: result?.failure_reason || null,
@@ -621,6 +632,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     sendResponse({ ok: true });
     return;
   } else if (message.type === 'isweep_audio_caption_chunk') {
+    console.log(AUDIO_CAPTIONS_BG_LOG, 'chunk received from offscreen', {
+      videoId: String(message.video_id || activeTabAudioCapture?.videoId || '').trim(),
+      startSeconds: message.start_seconds,
+      endSeconds: message.end_seconds,
+    });
     const targetVideoId = String(message.video_id || activeTabAudioCapture?.videoId || '').trim();
     handleAudioAhead(
       targetVideoId,
@@ -755,6 +771,8 @@ function shouldAnalyzeTranscriptForFiltering(text, source) {
   if (normalizedText.includes('backend running')) return false;
   const blockedSources = new Set([
     'placeholder',
+    'waiting_audio_text',
+    'live_masked',
     'audio_stt_disabled',
     'backend_offline',
     'silence',
@@ -895,6 +913,12 @@ async function handleAudioAhead(videoId, audioChunk, mimeType, startSeconds, end
   let res;
   let responseBody = '';
   try {
+    console.log(AUDIO_CAPTIONS_BG_LOG, 'posting /captions/transcribe', {
+      videoId: cleanVideoId,
+      startSeconds: normalizedStart,
+      endSeconds: normalizedEnd,
+      mimeType: mimeType || 'audio/wav',
+    });
     console.log(AUDIO_LOG, 'sending chunk', {
       videoId: cleanVideoId,
       startSeconds: normalizedStart,
@@ -993,13 +1017,22 @@ async function handleAudioAhead(videoId, audioChunk, mimeType, startSeconds, end
       failure_reason: payload.failure_reason || payload.reason || null,
       cached: payload.cached === true,
     };
+    console.log(AUDIO_CAPTIONS_BG_LOG, 'transcribe response', {
+      videoId: cleanVideoId,
+      status: result.status,
+      source: result.source,
+      textPreview: typeof result.text === 'string' ? result.text.slice(0, 80) : '',
+      failure_reason: result.failure_reason || null,
+      cached: result.cached,
+    });
     if (result.source === 'audio_stt_disabled' || result.failure_reason === 'stt_disabled') {
       console.warn(AUDIO_CAPTIONS_LOG, 'STT disabled', {
         videoId: cleanVideoId,
         failure_reason: result.failure_reason,
       });
     }
-    if (result.status === 'ready' && typeof result.text === 'string' && result.text.trim()) {
+    const transcriptEligible = shouldAnalyzeTranscriptForFiltering(result.text, result.source);
+    if (result.status === 'ready' && typeof result.text === 'string' && result.text.trim() && transcriptEligible) {
       console.log(AUDIO_CAPTIONS_LOG, 'transcript received', {
         videoId: cleanVideoId,
         textPreview: result.text.slice(0, 80),
@@ -1016,7 +1049,7 @@ async function handleAudioAhead(videoId, audioChunk, mimeType, startSeconds, end
       console.warn(AUDIO_CAPTIONS_LOG, 'backend offline', { videoId: cleanVideoId });
     }
 
-    if (result.status === 'ready' && result.events.length === 0 && shouldAnalyzeTranscriptForFiltering(result.text, result.source)) {
+    if (result.status === 'ready' && result.events.length === 0 && transcriptEligible) {
       const captionDurationSeconds = Math.max(normalizedEnd - normalizedStart, 0);
       const decision = await handleCaptionDecision(result.text, captionDurationSeconds, {
         source: 'audio_stt',

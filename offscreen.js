@@ -6,10 +6,12 @@ Receives start/stop commands from background.js, captures tab audio, chunks PCM,
 and relays WAV chunks back to background for /captions/transcribe.
 */
 
-const LOG_PREFIX = '[ISWEEP][AUDIO_CAPTIONS]';
+const LOG_PREFIX = '[ISWEEP][AUDIO_CAPTIONS][OFFSCREEN]';
 const AUDIO_SAMPLE_RATE = 16000;
 const AUDIO_CHUNK_SEC = 2.0;
 const AUDIO_CHUNK_OVERLAP_SEC = 0.5;
+
+console.log(LOG_PREFIX, 'loaded');
 
 let audioCtx = null;
 let audioProcessor = null;
@@ -104,7 +106,7 @@ async function flushAudioChunk() {
   const wavBuf = encodeWAV(bufs, sampleRate);
   const audioChunk = arrayBufferToBase64(wavBuf);
 
-  console.log(LOG_PREFIX, 'chunk sent', {
+  console.log(LOG_PREFIX, 'chunk emitted', {
     videoId: activeVideoId,
     start_seconds: startSec,
     end_seconds: endSec,
@@ -147,6 +149,7 @@ async function stopCapture(reason = 'stopped') {
 async function startCapture(streamId, videoId) {
   await stopCapture('restart');
   activeVideoId = String(videoId || '').trim();
+  console.log(LOG_PREFIX, 'start received', { videoId: activeVideoId });
 
   const stream = await navigator.mediaDevices.getUserMedia({
     audio: {
@@ -163,6 +166,11 @@ async function startCapture(streamId, videoId) {
     throw new Error('audio_capture_unavailable');
   }
 
+  console.log(LOG_PREFIX, 'stream ready', {
+    videoId: activeVideoId,
+    tracks: tracks.length,
+  });
+
   audioInputStream = stream;
   audioCtx = new AudioContext({ sampleRate: AUDIO_SAMPLE_RATE });
   if (audioCtx.state === 'suspended') {
@@ -171,7 +179,7 @@ async function startCapture(streamId, videoId) {
 
   const workletUrl = chrome.runtime.getURL('audio_chunk_processor.js');
   await audioCtx.audioWorklet.addModule(workletUrl);
-  console.log(LOG_PREFIX, 'audio worklet loaded');
+  console.log(LOG_PREFIX, 'worklet loaded');
 
   const source = audioCtx.createMediaStreamSource(stream);
   const workletNode = new AudioWorkletNode(audioCtx, 'audio-chunk-processor');
@@ -209,6 +217,9 @@ function classifyCaptureError(error) {
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === 'isweep_offscreen_start_tab_capture') {
+    console.log(LOG_PREFIX, 'start received', {
+      videoId: String(message.video_id || '').trim(),
+    });
     startCapture(message.stream_id, message.video_id)
       .then(() => sendResponse({ ok: true }))
       .catch((error) => sendResponse({ ok: false, failure_reason: classifyCaptureError(error) }));

@@ -66,6 +66,7 @@ test('caption runtime status prefers YouTube fallback when active tab reports li
   const result = await bg.handleCaptionRuntimeStatus();
   assert.equal(result.state, 'youtube_fallback');
   assert.equal(result.label, 'Captions: YouTube fallback');
+  assert.equal(result.sourceLabel, 'YouTube Fallback');
 });
 
 test('caption runtime status reports backend offline when health probe fails', async () => {
@@ -76,6 +77,7 @@ test('caption runtime status reports backend offline when health probe fails', a
   const result = await bg.handleCaptionRuntimeStatus();
   assert.equal(result.state, 'backend_offline');
   assert.equal(result.label, 'Audio captions: Backend offline');
+  assert.equal(result.sourceLabel, 'Backend Offline');
 });
 
 test('missing token handling for /event returns structured none decision', async () => {
@@ -418,6 +420,7 @@ test('audio caption chunk posts to transcribe and relays transcript to content s
   await bg.relayAudioCaptionResultToTab(result);
 
   assert.equal(sent.some((entry) => entry.payload.type === 'isweep_audio_caption_text'), true);
+  assert.equal(sent.some((entry) => entry.payload.source === 'audio_stt_live'), true);
 });
 
 test('start audio captions creates offscreen document', async () => {
@@ -481,6 +484,37 @@ test('placeholder or status source does not call /event', async () => {
           events: [],
           text: 'ISweep Captions listening...',
           failure_reason: 'stt_disabled',
+        }),
+      };
+    }
+    return {
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ action: 'none' }),
+    };
+  };
+
+  await bg.handleAudioAhead('video1', 'ZmFrZQ==', 'audio/wav', 1, 2);
+  assert.equal(urls.filter((url) => String(url).endsWith('/event')).length, 0);
+});
+
+test('live masked source does not call /event', async () => {
+  const bg = loadBackgroundContext();
+  bg.getAuthToken = async () => 'token';
+  bg.getBackendUrl = async () => 'http://127.0.0.1:5000';
+
+  const urls = [];
+  bg.fetch = async (url) => {
+    urls.push(url);
+    if (String(url).endsWith('/captions/transcribe')) {
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({
+          status: 'ready',
+          source: 'live_masked',
+          events: [],
+          text: 'that was masked live text',
         }),
       };
     }

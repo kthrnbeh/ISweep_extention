@@ -279,6 +279,8 @@
   let lastAppliedCleanCaptionStyle = null;
   let lastAppliedCleanCaptionSize = null;
   let lastAudioCaptionSource = null;
+  let lastAudioCaptionText = '';
+  let lastAudioCaptionReceivedAtMs = 0;
   let lastAudioCaptionFailureReason = null;
 
   // Audio watch-ahead state.
@@ -531,6 +533,15 @@
     const liveCaptionObservedAtMs = Number.isFinite(Number(options.liveCaptionObservedAtMs))
       ? Number(options.liveCaptionObservedAtMs)
       : lastLiveCaptionObservedAtMs;
+    const audioCaptionText = typeof options.audioCaptionText === 'string'
+      ? options.audioCaptionText
+      : lastAudioCaptionText;
+    const audioCaptionSource = typeof options.audioCaptionSource === 'string'
+      ? options.audioCaptionSource
+      : lastAudioCaptionSource;
+    const audioCaptionObservedAtMs = Number.isFinite(Number(options.audioCaptionObservedAtMs))
+      ? Number(options.audioCaptionObservedAtMs)
+      : lastAudioCaptionReceivedAtMs;
     const nowMs = Number.isFinite(Number(options.nowMs)) ? Number(options.nowMs) : Date.now();
     const lookaheadSec = Number.isFinite(Number(options.lookaheadSec)) ? Number(options.lookaheadSec) : CLEAN_CAPTION_LOOKAHEAD_SEC;
     const staleMs = Number.isFinite(Number(options.staleMs)) ? Number(options.staleMs) : CLEAN_CAPTION_STALE_MS;
@@ -580,6 +591,18 @@
         cleanResumeTime: Number.isFinite(Number(liveAudioEntry.clean_resume_time))
           ? Number(liveAudioEntry.clean_resume_time)
           : null,
+      };
+    }
+
+    const normalizedAudioSource = String(audioCaptionSource || '').toLowerCase();
+    const freshAudioText = String(audioCaptionText || '').trim();
+    const audioAgeMs = audioCaptionObservedAtMs > 0 ? nowMs - audioCaptionObservedAtMs : Number.POSITIVE_INFINITY;
+    if (freshAudioText && normalizedAudioSource.startsWith('audio_stt') && audioAgeMs <= staleMs) {
+      return {
+        text: freshAudioText,
+        source: normalizedAudioSource.includes('cached') ? 'audio_stt_cached' : 'audio_stt_live',
+        stale: false,
+        cleanResumeTime: null,
       };
     }
 
@@ -957,6 +980,8 @@
     audioAheadVideoId = null;
     if (reason === 'captions_disabled') {
       lastAudioCaptionSource = null;
+      lastAudioCaptionText = '';
+      lastAudioCaptionReceivedAtMs = 0;
       lastAudioCaptionFailureReason = null;
       audioCapturePermissionDenied = false;
       tabAudioCaptureState = 'idle';
@@ -1417,6 +1442,8 @@
     preCachedAudioCleanCaptions = [];
     liveAudioCleanCaptions = [];
     lastAudioCaptionSource = null;
+    lastAudioCaptionText = '';
+    lastAudioCaptionReceivedAtMs = 0;
     lastAudioCaptionFailureReason = null;
     audioCapturePermissionDenied = false; // Reset capture state for navigation changes
     tabAudioCaptureState = 'idle';
@@ -1585,8 +1612,15 @@
         return true;
       }
       if (message?.type === 'isweep_audio_caption_text') {
-        lastAudioCaptionSource = message.source || 'audio_stt';
+        lastAudioCaptionSource = message.cached === true ? 'audio_stt_cached' : (message.source || 'audio_stt_live');
+        lastAudioCaptionText = String(message.text || message.clean_text || message.cleaned_text || '').trim();
+        lastAudioCaptionReceivedAtMs = Date.now();
         lastAudioCaptionFailureReason = message.failure_reason || null;
+        console.log(CLEAN_CC_LOG_PREFIX, 'audio_stt message received', {
+          source: lastAudioCaptionSource,
+          textPreview: lastAudioCaptionText.slice(0, 80),
+          cached: message.cached === true,
+        });
         const startSec = Number.isFinite(Number(message.start_seconds)) ? Number(message.start_seconds) : (findVideo()?.currentTime || 0);
         const endSec = Number.isFinite(Number(message.end_seconds)) ? Number(message.end_seconds) : startSec + 2;
         if (Array.isArray(message.events) && message.events.length > 0) {
@@ -1609,6 +1643,7 @@
           } else {
             liveAudioCleanCaptions = normalizedAudioCaptions;
           }
+          console.log(CLEAN_CC_LOG_PREFIX, 'overlay source', message.cached === true ? 'audio_stt_cached' : 'audio_stt_live');
           updateCleanOverlay(lastCaptionText, findVideo()?.currentTime || 0);
         }
         sendResponse({ ok: true });
@@ -2023,6 +2058,9 @@
         placeholderText: CLEAN_CC_PLACEHOLDER_TEXT,
         sttDisabledText: CLEAN_CC_STT_DISABLED_TEXT,
         audioCaptionMode: getAudioCaptionMode(),
+        audioCaptionText: lastAudioCaptionText,
+        audioCaptionSource: lastAudioCaptionSource,
+        audioCaptionObservedAtMs: lastAudioCaptionReceivedAtMs,
       },
     );
     const nextKey = `${resolved.source || 'none'}:${resolved.text}`;
@@ -2082,7 +2120,6 @@
       cleanCaptionOverlayEl.dataset.source = resolved.source || 'live_masked';
       if (lastRenderedCleanCaptionKey !== nextKey) {
         const sourceLabel = String(resolved.source || 'live_masked');
-        const canonicalSource = sourceLabel.startsWith('audio_stt') ? 'audio_stt' : sourceLabel;
         console.log(CLEAN_CC_LOG_PREFIX, 'text updated');
         console.log(CLEAN_CC_LOG_PREFIX, 'overlay text rendered');
         if (resolved.text.includes('___')) {
@@ -2091,22 +2128,22 @@
             clean_resume_time: resolved.cleanResumeTime || null,
           });
         }
-        if (canonicalSource === 'pre_analyzed') {
+        if (sourceLabel === 'pre_analyzed') {
           console.log(CLEAN_CC_LOG_PREFIX, 'source pre_analyzed');
-        } else if (canonicalSource === 'marker_text') {
+        } else if (sourceLabel === 'marker_text') {
           console.log(CLEAN_CC_LOG_PREFIX, 'source marker_text');
-        } else if (canonicalSource === 'audio_stt') {
-          console.log(CLEAN_CC_LOG_PREFIX, 'source audio_stt');
-        } else if (canonicalSource === 'live_masked') {
+        } else if (sourceLabel === 'audio_stt_cached') {
+          console.log(CLEAN_CC_LOG_PREFIX, 'source audio_stt_cached');
+        } else if (sourceLabel === 'audio_stt_live' || sourceLabel === 'audio_stt') {
+          console.log(CLEAN_CC_LOG_PREFIX, 'source audio_stt_live');
+        } else if (sourceLabel === 'live_masked') {
           console.log(CLEAN_CC_LOG_PREFIX, 'source live_masked');
         }
         console.log(CLEAN_CC_LOG_PREFIX, 'fade update', {
           source: resolved.source || 'live_masked',
           fade_ms: CLEAN_CC_FADE_MS,
         });
-        console.log(CLEAN_CC_LOG_PREFIX, 'overlay source', {
-          source: resolved.source || 'live_masked',
-        });
+        console.log(CLEAN_CC_LOG_PREFIX, 'overlay source', resolved.source || 'live_masked');
         if (resolved.source !== 'waiting_audio_text') {
           console.log('[ISWEEP][CAPTION_UI] showing:', resolved.text);
         }

@@ -206,8 +206,12 @@ async function startCapture(streamId, videoId) {
 
   const source = audioCtx.createMediaStreamSource(stream);
   const workletNode = new AudioWorkletNode(audioCtx, 'audio-chunk-processor');
-  const silentGain = audioCtx.createGain();
-  silentGain.gain.value = 0;
+
+  // Create a monitor gain node to preserve tab audio playback.
+  // Chrome tabCapture may otherwise silence normal tab playback unless the captured stream
+  // is explicitly routed back to the audio context destination.
+  const monitorGain = audioCtx.createGain();
+  monitorGain.gain.value = 1.0;
 
   workletNode.port.onmessage = (event) => {
     if (!running || !audioCtx) return;
@@ -219,9 +223,13 @@ async function startCapture(streamId, videoId) {
     }
   };
 
+  // Route captured tab audio to both caption processing and speakers.
+  // Caption path: source → worklet → (no output; worklet only extracts samples).
+  // Playback path: source → monitorGain → destination (preserves normal audio).
   source.connect(workletNode);
-  workletNode.connect(silentGain);
-  silentGain.connect(audioCtx.destination);
+  source.connect(monitorGain);
+  monitorGain.connect(audioCtx.destination);
+  console.log(LOG_PREFIX, 'tab audio routed to speakers');
 
   audioProcessor = workletNode;
   running = true;

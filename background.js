@@ -783,6 +783,30 @@ function shouldAnalyzeTranscriptForFiltering(text, source) {
   return true;
 }
 
+function shouldApplyFilterDecision(decision, transcriptText, source) {
+  // Gate: only apply filter decisions (mute, skip, fast_forward) for real transcript text
+  // from legitimate sources. Prevents false muting on silence, placeholders, or errors.
+  const clean = String(transcriptText || '').trim();
+  if (!clean) return false;
+
+  const src = String(source || '').trim().toLowerCase();
+  const invalidSources = [
+    'silence',
+    'audio_stt_disabled',
+    'backend_offline',
+    'audio_capture_unavailable',
+    'waiting_audio_text',
+    'placeholder',
+    'error',
+  ];
+  if (invalidSources.includes(src)) return false;
+
+  if (!decision || decision.action === 'none') return false;
+  if (!['mute', 'skip', 'fast_forward'].includes(decision.action)) return false;
+
+  return true;
+}
+
 async function handleMarkerAnalyze(videoId, forceRefresh = false) {
   const cleanVideoId = (videoId || '').trim();
   if (!cleanVideoId) {
@@ -1055,7 +1079,7 @@ async function handleAudioAhead(videoId, audioChunk, mimeType, startSeconds, end
         source: 'audio_stt',
         dedupeWindowMs: AUDIO_CAPTION_DEDUPE_WINDOW_MS,
       });
-      if (decision && decision.action && decision.action !== 'none') {
+      if (shouldApplyFilterDecision(decision, result.text, result.source)) {
         result.events = [{
           id: `audio-stt-${cleanVideoId}-${normalizedStart}-${decision.action}`,
           action: decision.action,
@@ -1066,6 +1090,14 @@ async function handleAudioAhead(videoId, audioChunk, mimeType, startSeconds, end
           reason: decision.reason || 'audio stt /event decision',
           source: 'audio_stt',
         }];
+        if (decision.action === 'mute') {
+          console.log('[ISWEEP][WORD_MUTE] applying mute for matched filtered word', {
+            videoId: cleanVideoId,
+            word: decision.matched_category || null,
+            startSeconds: normalizedStart,
+            endSeconds: normalizedEnd,
+          });
+        }
       }
     }
     console.log(AUDIO_LOG, 'chunk result', {

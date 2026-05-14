@@ -636,6 +636,7 @@ test('mute only happens when /event returns action=mute for real transcript', as
           action: 'mute',
           duration_seconds: 1.0,
           matched_category: 'profanity',
+          matched_word: 'bad',
         }),
       };
     }
@@ -650,5 +651,125 @@ test('mute only happens when /event returns action=mute for real transcript', as
   assert.equal(result.status, 'ready');
   assert.equal(result.events.length, 1);
   assert.equal(result.events[0].action, 'mute');
+  assert.equal(result.events[0].matched_word, 'bad');
   assert.equal(urls.filter((url) => String(url).endsWith('/event')).length, 1);
+});
+
+test('mute decision without matched word is skipped', async () => {
+  const bg = loadBackgroundContext();
+  bg.getAuthToken = async () => 'token';
+  bg.getBackendUrl = async () => 'http://127.0.0.1:5000';
+
+  const urls = [];
+  bg.fetch = async (url) => {
+    urls.push(url);
+    if (String(url).endsWith('/captions/transcribe')) {
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({
+          status: 'ready',
+          source: 'audio_stt',
+          events: [],
+          text: 'some text here',
+        }),
+      };
+    }
+    if (String(url).endsWith('/event')) {
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({
+          action: 'mute',
+          duration_seconds: 1.0,
+          matched_category: 'profanity',
+          // NO matched_word, matched_phrase, or match field
+        }),
+      };
+    }
+    return {
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({}),
+    };
+  };
+
+  const result = await bg.handleAudioAhead('video1', 'ZmFrZQ==', 'audio/wav', 5, 6);
+  assert.equal(result.status, 'ready');
+  // No mute event should be created because matched_word is missing
+  assert.equal(result.events.length, 0);
+});
+
+test('mute decision action=none does not create event', async () => {
+  const bg = loadBackgroundContext();
+  bg.getAuthToken = async () => 'token';
+  bg.getBackendUrl = async () => 'http://127.0.0.1:5000';
+
+  const urls = [];
+  bg.fetch = async (url) => {
+    urls.push(url);
+    if (String(url).endsWith('/captions/transcribe')) {
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({
+          status: 'ready',
+          source: 'audio_stt',
+          events: [],
+          text: 'clean text here',
+        }),
+      };
+    }
+    if (String(url).endsWith('/event')) {
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({
+          action: 'none',
+          duration_seconds: 0,
+          matched_category: null,
+        }),
+      };
+    }
+    return {
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({}),
+    };
+  };
+
+  const result = await bg.handleAudioAhead('video1', 'ZmFrZQ==', 'audio/wav', 5, 6);
+  assert.equal(result.status, 'ready');
+  assert.equal(result.events.length, 0);
+});
+
+test('audio_capture_unavailable source does not call /event', async () => {
+  const bg = loadBackgroundContext();
+  bg.getAuthToken = async () => 'token';
+  bg.getBackendUrl = async () => 'http://127.0.0.1:5000';
+
+  const urls = [];
+  bg.fetch = async (url) => {
+    urls.push(url);
+    if (String(url).endsWith('/captions/transcribe')) {
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({
+          status: 'ready',
+          source: 'audio_capture_unavailable',
+          events: [],
+          text: 'text but unavailable',
+        }),
+      };
+    }
+    return {
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({}),
+    };
+  };
+
+  await bg.handleAudioAhead('video1', 'ZmFrZQ==', 'audio/wav', 5, 6);
+  assert.equal(urls.filter((url) => String(url).endsWith('/event')).length, 0);
 });

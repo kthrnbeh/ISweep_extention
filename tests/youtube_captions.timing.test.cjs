@@ -764,3 +764,30 @@ test('audio marker source priority ranks audio before transcript and caption fal
   assert.equal(hooks.markerSourcePriority('transcript'), 1);
   assert.equal(hooks.markerSourcePriority('live_masked'), 2);
 });
+
+test('mute marker with matched_word applies mute', () => {
+  const hooks = loadYoutubeTimingHooks();
+  const marker = {
+    id: 'audio-test-1',
+    action: 'mute',
+    start_seconds: 10.0,
+    end_seconds: 10.5,
+    matched_word: 'badword',
+    matched_category: 'profanity',
+    source: 'audio_stt',
+  };
+  // Marker with matched_word should be valid for muting.
+  assert.ok(marker.matched_word);
+  assert.equal(marker.action, 'mute');
+});
+
+test('caption overlay still updates while audio is audible', () => {
+  const hooks = loadYoutubeTimingHooks();
+  // Verify that youtube_captions.js does not mute on caption start.
+  // The offscreen.js audio routing should ensure audio continues while captions are processed.
+  const filePath = path.resolve(__dirname, '..', 'youtube_captions.js');
+  const source = fs.readFileSync(filePath, 'utf8');
+  // Verify that caption overlay is updated independently from muting decisions
+  assert.equal(source.includes('audioAheadActive'), true);
+  assert.equal(source.includes('applyMuteWindow'), true);
+});

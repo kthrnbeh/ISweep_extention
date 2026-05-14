@@ -776,6 +776,7 @@ function shouldAnalyzeTranscriptForFiltering(text, source) {
     'live_masked',
     'audio_stt_disabled',
     'backend_offline',
+    'audio_capture_unavailable',
     'silence',
     'error',
   ]);
@@ -804,6 +805,54 @@ function shouldApplyFilterDecision(decision, transcriptText, source) {
 
   if (!decision || decision.action === 'none') return false;
   if (!['mute', 'skip', 'fast_forward'].includes(decision.action)) return false;
+
+  return true;
+}
+
+function getMatchedFilterText(decision) {
+  // Extract the actual matched word/phrase from the decision.
+  // Multiple field names are checked for compatibility with different API responses.
+  return String(
+    decision?.matched_word ||
+    decision?.matched_phrase ||
+    decision?.matched_text ||
+    decision?.match ||
+    decision?.word ||
+    ''
+  ).trim();
+}
+
+function shouldApplyWordMute(decision, transcriptText, source) {
+  // Stricter gate for mute specifically: only mute if a real word/phrase is matched.
+  // Category-only matches (profanity without matched_word) should not trigger mute.
+  const cleanText = String(transcriptText || '').trim();
+  if (!cleanText) return false;
+
+  const src = String(source || '').trim().toLowerCase();
+  const invalidSources = [
+    'silence',
+    'audio_stt_disabled',
+    'backend_offline',
+    'audio_capture_unavailable',
+    'waiting_audio_text',
+    'placeholder',
+    'error',
+  ];
+  if (invalidSources.includes(src)) return false;
+
+  if (!decision || decision.action !== 'mute') return false;
+
+  // CRITICAL: Only mute if there is an actual matched word/phrase.
+  // Do not mute on category alone (e.g., matched_category='profanity' without matched_word).
+  const matchedText = getMatchedFilterText(decision);
+  if (!matchedText) {
+    console.warn('[ISWEEP][WORD_MUTE] skipped mute: no matched word/phrase', {
+      action: decision?.action,
+      matched_category: decision?.matched_category || null,
+      source: src,
+    });
+    return false;
+  }
 
   return true;
 }
@@ -1081,23 +1130,47 @@ async function handleAudioAhead(videoId, audioChunk, mimeType, startSeconds, end
         dedupeWindowMs: AUDIO_CAPTION_DEDUPE_WINDOW_MS,
       });
       if (shouldApplyFilterDecision(decision, result.text, result.source)) {
-        result.events = [{
-          id: `audio-stt-${cleanVideoId}-${normalizedStart}-${decision.action}`,
-          action: decision.action,
-          start_seconds: normalizedStart,
-          end_seconds: normalizedEnd,
-          duration_seconds: captionDurationSeconds,
-          matched_category: decision.matched_category || null,
-          reason: decision.reason || 'audio stt /event decision',
-          source: 'audio_stt',
-        }];
-        if (decision.action === 'mute') {
+        // Additional strict check for mute: require matched word/phrase, not just category.
+        if (decision.action === 'mute' && !shouldApplyWordMute(decision, result.text, result.source)) {
+          // Mute was gated; skip event creation.
+          console.log('[ISWEEP][AUDIO_AHEAD] chunk handled without mute', {
+            videoId: cleanVideoId,
+            reason: 'no matched word/phrase',
+            matched_category: decision.matched_category || null,
+          });
+        } else if (decision.action === 'mute' && shouldApplyWordMute(decision, result.text, result.source)) {
+          // Mute is authorized; create the event.
+          const matchedText = getMatchedFilterText(decision);
+          result.events = [{
+            id: `audio-stt-${cleanVideoId}-${normalizedStart}-${decision.action}`,
+            action: decision.action,
+            start_seconds: normalizedStart,
+            end_seconds: normalizedEnd,
+            duration_seconds: captionDurationSeconds,
+            matched_category: decision.matched_category || null,
+            matched_word: matchedText,
+            reason: decision.reason || 'audio stt /event decision',
+            source: 'audio_stt',
+          }];
           console.log('[ISWEEP][WORD_MUTE] applying mute for matched filtered word', {
             videoId: cleanVideoId,
-            word: decision.matched_category || null,
+            word: matchedText,
+            category: decision.matched_category || null,
             startSeconds: normalizedStart,
             endSeconds: normalizedEnd,
           });
+        } else if (decision.action !== 'mute') {
+          // Non-mute action (skip, fast_forward, etc.); apply directly.
+          result.events = [{
+            id: `audio-stt-${cleanVideoId}-${normalizedStart}-${decision.action}`,
+            action: decision.action,
+            start_seconds: normalizedStart,
+            end_seconds: normalizedEnd,
+            duration_seconds: captionDurationSeconds,
+            matched_category: decision.matched_category || null,
+            reason: decision.reason || 'audio stt /event decision',
+            source: 'audio_stt',
+          }];
         }
       }
     }

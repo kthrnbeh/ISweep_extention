@@ -8,8 +8,8 @@ and relays WAV chunks back to background for /captions/transcribe.
 
 const LOG_PREFIX = '[ISWEEP][AUDIO_CAPTIONS][OFFSCREEN]';
 const AUDIO_SAMPLE_RATE = 16000;
-const AUDIO_CHUNK_SEC = 2.0;
-const AUDIO_CHUNK_OVERLAP_SEC = 0.5;
+const AUDIO_CHUNK_SEC = 1.0; // Reduced from 2.0 for lower latency
+const AUDIO_CHUNK_OVERLAP_SEC = 0.25; // Reduced from 0.5 for lower latency
 
 console.log(LOG_PREFIX, 'loaded');
 

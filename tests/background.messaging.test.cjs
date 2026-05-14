@@ -592,3 +592,63 @@ test('real transcript calls /event once when no events are returned', async () =
   await bg.handleAudioAhead('video1', 'ZmFrZQ==', 'audio/wav', 1, 2);
   assert.equal(urls.filter((url) => String(url).endsWith('/event')).length, 1);
 });
+
+test('starting [CC] does not call mute or change video state', async () => {
+  const bg = loadBackgroundContext();
+  bg.chrome.tabs.query = async () => ([{ id: 99, url: 'https://www.youtube.com/watch?v=cctest' }]);
+  bg.chrome.tabs.sendMessage = async () => ({ ok: true });
+  bg.chrome.offscreen.createDocument = async () => {};
+  bg.chrome.runtime.sendMessage = async (payload) => {
+    if (payload.type === 'isweep_offscreen_start_tab_capture') return { ok: true };
+    return { ok: true };
+  };
+
+  const result = await bg.handleStartTabAudioCaptions();
+  assert.equal(result.ok, true);
+  assert.equal(result.source, 'tab_capture');
+});
+
+test('mute only happens when /event returns action=mute for real transcript', async () => {
+  const bg = loadBackgroundContext();
+  bg.getAuthToken = async () => 'token';
+  bg.getBackendUrl = async () => 'http://127.0.0.1:5000';
+
+  const urls = [];
+  bg.fetch = async (url) => {
+    urls.push(url);
+    if (String(url).endsWith('/captions/transcribe')) {
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({
+          status: 'ready',
+          source: 'audio_stt',
+          events: [],
+          text: 'bad word here',
+        }),
+      };
+    }
+    if (String(url).endsWith('/event')) {
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({
+          action: 'mute',
+          duration_seconds: 1.0,
+          matched_category: 'profanity',
+        }),
+      };
+    }
+    return {
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({}),
+    };
+  };
+
+  const result = await bg.handleAudioAhead('video1', 'ZmFrZQ==', 'audio/wav', 5, 6);
+  assert.equal(result.status, 'ready');
+  assert.equal(result.events.length, 1);
+  assert.equal(result.events[0].action, 'mute');
+  assert.equal(urls.filter((url) => String(url).endsWith('/event')).length, 1);
+});

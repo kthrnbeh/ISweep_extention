@@ -395,6 +395,7 @@ async function handleStartTabAudioCaptions() {
     return start;
   }
   await postTabCaptureStatusToTab(tabId, 'ready', null);
+  console.log('[ISWEEP][AUDIO_CAPTIONS] captions started without muting playback', { tabId, videoId });
   return { ok: true, tabId, video_id: videoId, source: 'tab_capture' };
 }
 

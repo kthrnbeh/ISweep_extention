@@ -1678,9 +1678,18 @@
       }
       if (message?.type === 'isweep_audio_caption_text') {
         lastAudioCaptionSource = message.cached === true ? 'audio_stt_cached' : (message.source || 'audio_stt_live');
-        lastAudioCaptionText = String(message.text || message.clean_text || message.cleaned_text || '').trim();
+        const incomingText = String(message.text || message.clean_text || message.cleaned_text || '').trim();
         lastAudioCaptionReceivedAtMs = Date.now();
         lastAudioCaptionFailureReason = message.failure_reason || null;
+
+        // If text is empty, don't overwrite a recent caption
+        if (!incomingText) {
+          console.log(CLEAN_CC_LOG_PREFIX, 'ignored empty audio_stt message');
+          sendResponse({ ok: true });
+          return true;
+        }
+
+        lastAudioCaptionText = incomingText;
         console.log(CLEAN_CC_LOG_PREFIX, 'audio_stt message received', {
           source: lastAudioCaptionSource,
           textPreview: lastAudioCaptionText.slice(0, 80),
@@ -1708,7 +1717,7 @@
           } else {
             liveAudioCleanCaptions = normalizedAudioCaptions;
           }
-          console.log(CLEAN_CC_LOG_PREFIX, 'overlay source', message.cached === true ? 'audio_stt_cached' : 'audio_stt_live');
+          console.log(CLEAN_CC_LOG_PREFIX, 'overlay source audio_stt_live');
           updateCleanOverlay(lastCaptionText, findVideo()?.currentTime || 0);
         }
         sendResponse({ ok: true });

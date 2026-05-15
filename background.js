@@ -1313,13 +1313,13 @@ async function handleAudioCaptionChunk(videoId, audioChunk, mimeType, startSecon
     const cleanText = typeof payload.clean_text === 'string' ? payload.clean_text : text;
     const source = payload.source || (text ? 'audio_stt' : 'silence');
 
-    // Caption-only mode: suppress all filtering-related fields
+    // Build result; events will be populated below if filtering decision warrants mute/skip
     const result = {
       status: payload.status || 'ready',
       source: source,
       start_seconds: normalizedStart,
       end_seconds: normalizedEnd,
-      events: [], // NEVER return events for audio captions
+      events: [], // populated below if filtering decision results in mute/skip
       cleaned_captions: [],
       clean_captions: [],
       text: text,
@@ -1340,6 +1340,57 @@ async function handleAudioCaptionChunk(videoId, audioChunk, mimeType, startSecon
         source: result.source,
       });
       console.log(AUDIO_CAPTIONS_BG_LOG, 'forwarding transcript to overlay');
+
+      // Apply content filtering: check transcript against user's filter preferences
+      const transcriptEligible = shouldAnalyzeTranscriptForFiltering(result.text, result.source);
+      if (result.status === 'ready' && transcriptEligible) {
+        const captionDurationSeconds = Math.max(normalizedEnd - normalizedStart, 0);
+        const decision = await handleCaptionDecision(result.text, captionDurationSeconds, {
+          source: 'audio_stt',
+          dedupeWindowMs: AUDIO_CAPTION_DEDUPE_WINDOW_MS,
+        });
+        if (shouldApplyFilterDecision(decision, result.text, result.source)) {
+          if (decision.action === 'mute' && !shouldApplyWordMute(decision, result.text, result.source)) {
+            // Mute was gated — no matched word/phrase specific enough to mute
+            console.log(AUDIO_CAPTIONS_BG_LOG, 'chunk handled without mute', {
+              videoId: cleanVideoId,
+              reason: 'no matched word/phrase',
+              matched_category: decision.matched_category || null,
+            });
+          } else if (decision.action === 'mute' && shouldApplyWordMute(decision, result.text, result.source)) {
+            const matchedText = getMatchedFilterText(decision);
+            result.events = [{
+              id: `audio-stt-${cleanVideoId}-${normalizedStart}-${decision.action}`,
+              action: decision.action,
+              start_seconds: normalizedStart,
+              end_seconds: normalizedEnd,
+              duration_seconds: captionDurationSeconds,
+              matched_category: decision.matched_category || null,
+              matched_word: matchedText,
+              reason: decision.reason || 'audio stt /event decision',
+              source: 'audio_stt',
+            }];
+            console.log('[ISWEEP][WORD_MUTE] applying mute for matched filtered word', {
+              videoId: cleanVideoId,
+              word: matchedText,
+              category: decision.matched_category || null,
+              startSeconds: normalizedStart,
+              endSeconds: normalizedEnd,
+            });
+          } else if (decision.action !== 'mute') {
+            result.events = [{
+              id: `audio-stt-${cleanVideoId}-${normalizedStart}-${decision.action}`,
+              action: decision.action,
+              start_seconds: normalizedStart,
+              end_seconds: normalizedEnd,
+              duration_seconds: captionDurationSeconds,
+              matched_category: decision.matched_category || null,
+              reason: decision.reason || 'audio stt /event decision',
+              source: 'audio_stt',
+            }];
+          }
+        }
+      }
     } else {
       console.log(AUDIO_CAPTIONS_BG_LOG, 'silence/no transcript');
     }

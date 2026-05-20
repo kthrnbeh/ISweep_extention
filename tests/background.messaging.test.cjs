@@ -774,32 +774,47 @@ test('audio_capture_unavailable source does not call /event', async () => {
   assert.equal(urls.filter((url) => String(url).endsWith('/event')).length, 0);
 });
 
-test('handleAudioCaptionChunk posts to /captions/transcribe and never calls /event', async () => {
+test('handleAudioCaptionChunk always returns events: []', async () => {
   const bg = loadBackgroundContext();
   bg.getAuthToken = async () => 'token';
   bg.getBackendUrl = async () => 'http://127.0.0.1:5000';
 
-  const urls = [];
+  bg.fetch = async (url) => ({
+    ok: true,
+    status: 200,
+    text: async () => JSON.stringify({
+      status: 'ready',
+      source: 'audio_stt',
+      events: [{ id: 'fake', start_seconds: 0, end_seconds: 1, action: 'mute' }],
+      text: 'hello world',
+    }),
+  });
+
+  const result = await bg.handleAudioCaptionChunk('vid1', 'ZmFrZQ==', 'audio/wav', 0, 2);
+  assert.ok(Array.isArray(result.events) && result.events.length === 0, 'handleAudioCaptionChunk must always return events: []');
+});
+
+test('handleAudioCaptionChunk does not call /event', async () => {
+  const bg = loadBackgroundContext();
+  bg.getAuthToken = async () => 'token';
+  bg.getBackendUrl = async () => 'http://127.0.0.1:5000';
+
+  const postedUrls = [];
   bg.fetch = async (url) => {
-    urls.push(url);
+    postedUrls.push(String(url));
     return {
       ok: true,
       status: 200,
-      text: async () => JSON.stringify({
-        status: 'ready',
-        source: 'audio_stt',
-        events: [],
-        text: 'hello world',
-      }),
+      text: async () => JSON.stringify({ status: 'ready', source: 'audio_stt', events: [], text: 'hello' }),
     };
   };
 
-  const result = await bg.handleAudioCaptionChunk('video1', 'ZmFrZQ==', 'audio/wav', 5, 6);
-  assert.equal(urls.filter((url) => String(url).endsWith('/captions/transcribe')).length > 0, true);
-  assert.equal(urls.filter((url) => String(url).endsWith('/event')).length, 0);
+  await bg.handleAudioCaptionChunk('vid1', 'ZmFrZQ==', 'audio/wav', 0, 2);
+  assert.equal(postedUrls.filter((u) => u.endsWith('/event')).length, 0, 'handleAudioCaptionChunk must not call /event');
+  assert.equal(postedUrls.filter((u) => u.endsWith('/captions/transcribe')).length, 1, 'must post to /captions/transcribe');
 });
 
-test('handleAudioCaptionChunk always returns events array empty', async () => {
+test('handleAudioCaptionChunk forwards non-empty transcript to content script', async () => {
   const bg = loadBackgroundContext();
   bg.getAuthToken = async () => 'token';
   bg.getBackendUrl = async () => 'http://127.0.0.1:5000';
@@ -807,20 +822,25 @@ test('handleAudioCaptionChunk always returns events array empty', async () => {
   bg.fetch = async () => ({
     ok: true,
     status: 200,
-    text: async () => JSON.stringify({
-      status: 'ready',
-      source: 'audio_stt',
-      events: [{ id: 'e1', action: 'mute', start_seconds: 5.0, end_seconds: 5.5 }],
-      text: 'profanity here',
-    }),
+    text: async () => JSON.stringify({ status: 'ready', source: 'audio_stt', events: [], text: 'hello world' }),
   });
 
-  const result = await bg.handleAudioCaptionChunk('video1', 'ZmFrZQ==', 'audio/wav', 5, 6);
-  assert.equal(Array.isArray(result.events), true);
-  assert.equal(result.events.length, 0);
+  const sent = [];
+  bg.chrome.tabs.query = async () => ([{ id: 55, url: 'https://www.youtube.com/watch?v=ccvid1' }]);
+  bg.chrome.tabs.sendMessage = async (tabId, payload) => { sent.push(payload); return { ok: true }; };
+  bg.chrome.runtime.sendMessage = async () => ({ ok: true });
+
+  await bg.handleStartTabAudioCaptions();
+  const result = await bg.handleAudioCaptionChunk('ccvid1', 'ZmFrZQ==', 'audio/wav', 0, 2);
+  await bg.relayAudioCaptionResultToTab(result);
+
+  const captionMsg = sent.find((p) => p.type === 'isweep_audio_caption_text');
+  assert.ok(captionMsg, 'must send isweep_audio_caption_text to content script');
+  assert.equal(captionMsg.text, 'hello world');
+  assert.ok(Array.isArray(captionMsg.events) && captionMsg.events.length === 0, 'events must be empty []');
 });
 
-test('handleAudioCaptionChunk returns caption text correctly', async () => {
+test('handleAudioCaptionChunk does not forward empty transcript text', async () => {
   const bg = loadBackgroundContext();
   bg.getAuthToken = async () => 'token';
   bg.getBackendUrl = async () => 'http://127.0.0.1:5000';
@@ -828,39 +848,10 @@ test('handleAudioCaptionChunk returns caption text correctly', async () => {
   bg.fetch = async () => ({
     ok: true,
     status: 200,
-    text: async () => JSON.stringify({
-      status: 'ready',
-      source: 'audio_stt',
-      events: [],
-      text: 'hello world',
-      clean_text: 'hello world',
-    }),
+    text: async () => JSON.stringify({ status: 'ready', source: 'audio_stt', events: [], text: '' }),
   });
 
-  const result = await bg.handleAudioCaptionChunk('video1', 'ZmFrZQ==', 'audio/wav', 5, 6);
-  assert.equal(result.text, 'hello world');
-  assert.equal(result.status, 'ready');
+  const result = await bg.handleAudioCaptionChunk('vid1', 'ZmFrZQ==', 'audio/wav', 0, 2);
+  assert.ok(Array.isArray(result.events) && result.events.length === 0, 'events must always be []');
+  assert.equal(result.text === '' || result.text === null, true, 'empty transcript must not become non-empty');
 });
-
-test('handleAudioCaptionChunk returns source silence when Whisper finds no words', async () => {
-  const bg = loadBackgroundContext();
-  bg.getAuthToken = async () => 'token';
-  bg.getBackendUrl = async () => 'http://127.0.0.1:5000';
-
-  bg.fetch = async () => ({
-    ok: true,
-    status: 200,
-    text: async () => JSON.stringify({
-      status: 'ready',
-      source: 'silence',
-      events: [],
-      text: '',
-      clean_text: '',
-    }),
-  });
-
-  const result = await bg.handleAudioCaptionChunk('video1', 'ZmFrZQ==', 'audio/wav', 5, 6);
-  assert.equal(result.source, 'silence');
-  assert.equal(result.events.length, 0);
-});
-

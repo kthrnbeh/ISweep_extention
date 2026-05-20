@@ -12,13 +12,6 @@
     CLEAN_CAPTION_SETTINGS: 'isweepCleanCaptionSettings',
     AUDIO_FILTERING_ENABLED: 'audioFilteringEnabled',
   };
-
-  // Caption source mode flags: Control which caption systems are active.
-  // When [CC] is ON, use ONLY audio_stt_live. YouTube DOM and old AUDIO_AHEAD are disabled by default.
-  const ISWEEP_AUDIO_STT_PRIMARY = true; // Audio STT is the primary caption source
-  const ISWEEP_YOUTUBE_DOM_FALLBACK_ENABLED = false; // YouTube caption DOM overlay disabled by default (set to true for debug only)
-  const ISWEEP_CONTENT_SCRIPT_AUDIO_AHEAD_ENABLED = false; // Old in-page audio capture disabled (use background/offscreen instead)
-
   // Track caption text and when it started so we can measure how long words are spoken.
   // Playback-only: ISweep never edits media or captions; it only controls live playback state (mute/unmute/seek/rate).
   let lastCaptionText = '';
@@ -26,11 +19,6 @@
   let videoEl = null;
   let restoreMuteTimeout = null;
   let restoreRateTimeout = null;
-
-  // Audio STT timing constants for better caption visibility
-  const AUDIO_STT_MIN_VISIBLE_MS = 1200; // Minimum time to show audio STT caption (1.2 seconds)
-  const AUDIO_STT_STALE_MS = 3500; // Maximum time to show audio STT caption before returning to listening state (3.5 seconds)
-
   const WORD_PRE_BUFFER_MS = 200; // Lead-in before matched word
   const WORD_POST_BUFFER_MS = 320; // Tail after matched word
   const WORD_GAP_MERGE_MS = 160; // Merge close windows to avoid choppiness
@@ -318,6 +306,11 @@
   // scheduler lead short and specific to profanity muting.
   const PROFANITY_MARKER_FIRE_EARLY_SEC = AUDIO_PREROLL_MS / 1000;
   const AUDIO_MARKER_FALLBACK_SKIP_WINDOW_SEC = 0.75;
+  const ISWEEP_AUDIO_STT_PRIMARY = true;
+  const ISWEEP_YOUTUBE_DOM_FALLBACK_ENABLED = false;
+  const ISWEEP_CONTENT_SCRIPT_AUDIO_AHEAD_ENABLED = false;
+  const AUDIO_STT_MIN_VISIBLE_MS = 1200;
+  const AUDIO_STT_STALE_MS = 3500;
 
   // Marker engine state. Future audio watch-ahead analyzers can emit the same marker shape.
   let activeVideoId = null;
@@ -679,15 +672,6 @@
         source: normalizedAudioSource.includes('cached') ? 'audio_stt_cached' : 'audio_stt_live',
         stale: false,
         cleanResumeTime: null,
-      };
-    }
-
-    // Guard: YouTube DOM fallback disabled by default (only use as fallback when flag is true for debugging)
-    if (!ISWEEP_YOUTUBE_DOM_FALLBACK_ENABLED) {
-      return {
-        text: '',
-        source: 'silence',
-        stale: true,
       };
     }
 
@@ -1451,12 +1435,6 @@
   }
 
   async function startAudioCapture() {
-    // Guard: Content-script audio capture is disabled by default (use background/offscreen captions only)
-    if (!ISWEEP_CONTENT_SCRIPT_AUDIO_AHEAD_ENABLED) {
-      console.log('[ISWEEP][AUDIO_AHEAD] disabled: using background/offscreen audio captions only');
-      return;
-    }
-
     const video = findVideo();
     console.log(AUDIO_AHEAD_LOG_PREFIX, 'start requested', {
       videoId: activeVideoId,
@@ -1705,18 +1683,9 @@
       }
       if (message?.type === 'isweep_audio_caption_text') {
         lastAudioCaptionSource = message.cached === true ? 'audio_stt_cached' : (message.source || 'audio_stt_live');
-        const incomingText = String(message.text || message.clean_text || message.cleaned_text || '').trim();
+        lastAudioCaptionText = String(message.text || message.clean_text || message.cleaned_text || '').trim();
         lastAudioCaptionReceivedAtMs = Date.now();
         lastAudioCaptionFailureReason = message.failure_reason || null;
-
-        // If text is empty, don't overwrite a recent caption
-        if (!incomingText) {
-          console.log(CLEAN_CC_LOG_PREFIX, 'ignored empty audio_stt message');
-          sendResponse({ ok: true });
-          return true;
-        }
-
-        lastAudioCaptionText = incomingText;
         console.log(CLEAN_CC_LOG_PREFIX, 'audio_stt message received', {
           source: lastAudioCaptionSource,
           textPreview: lastAudioCaptionText.slice(0, 80),
@@ -1724,8 +1693,12 @@
         });
         const startSec = Number.isFinite(Number(message.start_seconds)) ? Number(message.start_seconds) : (findVideo()?.currentTime || 0);
         const endSec = Number.isFinite(Number(message.end_seconds)) ? Number(message.end_seconds) : startSec + 2;
-        if (Array.isArray(message.events) && message.events.length > 0) {
-          ingestAudioMarkers(message.events, activeVideoId || getCurrentVideoId());
+        // Caption-only: never call ingestAudioMarkers from audio caption messages.
+        // ingestAudioMarkers may only be called when a dedicated filtering mode is enabled.
+        if (!lastAudioCaptionText) {
+          // Empty STT text: do not clear or update the overlay.
+          sendResponse({ ok: true });
+          return true;
         }
         const normalizedAudioCaptions = buildAudioResponseCaptions({
           status: message.status || 'ready',
@@ -1744,7 +1717,7 @@
           } else {
             liveAudioCleanCaptions = normalizedAudioCaptions;
           }
-          console.log(CLEAN_CC_LOG_PREFIX, 'overlay source audio_stt_live');
+          console.log(CLEAN_CC_LOG_PREFIX, 'overlay source', message.cached === true ? 'audio_stt_cached' : 'audio_stt_live');
           updateCleanOverlay(lastCaptionText, findVideo()?.currentTime || 0);
         }
         sendResponse({ ok: true });
@@ -3077,11 +3050,6 @@
   }
 
   const observer = new MutationObserver(() => {
-    // Guard: YouTube DOM caption reading is disabled by default (use only audio_stt_live)
-    if (!ISWEEP_YOUTUBE_DOM_FALLBACK_ENABLED) {
-      return;
-    }
-
     ensureCleanCaptionOverlay();
     const caption = extractCaptionText();
 
@@ -3130,12 +3098,6 @@
   });
 
   function startObserving() {
-    // Guard: YouTube DOM caption reading is disabled by default
-    if (!ISWEEP_YOUTUBE_DOM_FALLBACK_ENABLED) {
-      console.log('[ISWEEP][CAPTIONS] youtube DOM fallback disabled');
-      return;
-    }
-
     // Observe the YouTube caption container instead of the whole DOM to cut down on noisy mutations and improve performance.
     const captionsRoot = document.querySelector('.ytp-caption-window-container');
     if (!captionsRoot) {

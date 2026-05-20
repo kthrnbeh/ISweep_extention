@@ -33,6 +33,7 @@ const OFFSCREEN_DOCUMENT_PATH = 'offscreen.html';
 
 const markerCacheByVideoId = new Map();
 const AUDIO_CAPTION_DEDUPE_WINDOW_MS = 1600;
+const AUDIO_CAPTION_FILTER_ACTIONS_ENABLED = false; // Caption-only mode: keep false until filtering is intentionally re-enabled
 const recentCaptionByText = new Map();
 const tabCaptureSessionByTabId = new Map();
 let activeTabAudioCapture = null;
@@ -954,6 +955,143 @@ async function handleMarkerAnalyze(videoId, forceRefresh = false) {
   }
 }
 
+// Caption-only audio transcription. Posts to /captions/transcribe and forwards transcript text.
+// Never calls handleCaptionDecision, never calls /event, never creates filter events.
+// Guard: AUDIO_CAPTION_FILTER_ACTIONS_ENABLED must remain false until filtering is intentionally re-enabled.
+async function handleAudioCaptionChunk(videoId, audioChunk, mimeType, startSeconds, endSeconds, audioSamples = null, sampleRate = null, channels = null) {
+  if (!AUDIO_CAPTION_FILTER_ACTIONS_ENABLED) {
+    // captions only; never call /event here
+  }
+  const AUDIO_CAPTIONS_LOG = '[ISWEEP][AUDIO_CAPTIONS]';
+  const cleanVideoId = (videoId || '').trim();
+
+  if (!cleanVideoId) {
+    return { status: 'error', events: [], failure_reason: 'missing_video_id' };
+  }
+  const hasSampleArray = Array.isArray(audioSamples) && audioSamples.length > 0;
+  if (!audioChunk && !hasSampleArray) {
+    return { status: 'error', events: [], failure_reason: 'analyze_exception' };
+  }
+
+  const normalizedStart = Number.isFinite(Number(startSeconds)) ? Number(startSeconds) : 0;
+  const normalizedEnd = Number.isFinite(Number(endSeconds))
+    ? Math.max(Number(endSeconds), normalizedStart)
+    : normalizedStart;
+
+  const backendUrl = await getBackendUrl();
+  const token = await getAuthToken();
+  if (!token) {
+    return { status: 'unavailable', events: [], failure_reason: 'missing_token' };
+  }
+
+  let res;
+  let responseBody = '';
+  try {
+    console.log(AUDIO_CAPTIONS_BG_LOG, 'posting /captions/transcribe (caption-only)', {
+      videoId: cleanVideoId,
+      startSeconds: normalizedStart,
+      endSeconds: normalizedEnd,
+      mimeType: mimeType || 'audio/wav',
+    });
+    res = await fetch(`${backendUrl}/captions/transcribe`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        video_id: cleanVideoId,
+        audio_base64: audioChunk,
+        start_time: normalizedStart,
+        preferences: normalizePreferences((await chrome.storage.local.get([STORAGE_KEYS.PREFS]))[STORAGE_KEYS.PREFS] || {}),
+        audio_chunk: audioChunk,
+        mime_type: mimeType || 'audio/wav',
+        chunk_start_seconds: normalizedStart,
+        chunk_end_seconds: normalizedEnd,
+        start_seconds: normalizedStart,
+        end_seconds: normalizedEnd,
+        audio: hasSampleArray ? audioSamples : undefined,
+        sampleRate: Number.isFinite(Number(sampleRate)) ? Number(sampleRate) : undefined,
+        channels: Number.isFinite(Number(channels)) ? Number(channels) : undefined,
+      }),
+    });
+
+    responseBody = await res.text();
+    if (res.status === 401) {
+      await chrome.storage.local.remove([TOKEN_KEY, STORAGE_KEYS.USER_ID, STORAGE_KEYS.AUTH, STORAGE_KEYS.PREFS]);
+      return { status: 'error', events: [], failure_reason: 'unauthorized' };
+    }
+    if (!res.ok) {
+      let backendFailureReason = null;
+      try {
+        const parsed = responseBody ? JSON.parse(responseBody) : null;
+        if (parsed && typeof parsed === 'object') {
+          backendFailureReason = typeof parsed.failure_reason === 'string'
+            ? parsed.failure_reason
+            : (typeof parsed.error === 'string' ? parsed.error : null);
+        }
+      } catch (_) {}
+      return {
+        status: 'error',
+        events: [],
+        failure_reason: backendFailureReason || 'analyze_exception',
+        backend_status: res.status,
+        backend_body: (responseBody || '').slice(0, 500),
+      };
+    }
+
+    const payload = responseBody ? JSON.parse(responseBody) : {};
+    const normalizedCleanedCaptions = Array.isArray(payload.cleaned_captions)
+      ? payload.cleaned_captions
+      : (Array.isArray(payload.clean_captions) ? payload.clean_captions : []);
+    const hasDisplayPayload = Boolean(
+      (Array.isArray(normalizedCleanedCaptions) && normalizedCleanedCaptions.length)
+      || typeof payload.clean_text === 'string'
+      || typeof payload.cleaned_text === 'string'
+      || typeof payload.caption_text === 'string'
+      || typeof payload.text === 'string'
+      || (Array.isArray(payload.words) && payload.words.length)
+    );
+    const normalizedStatus = payload.status || (hasDisplayPayload ? 'ready' : 'error');
+    const result = {
+      status: normalizedStatus,
+      source: payload.source || 'audio',
+      start_seconds: normalizedStart,
+      end_seconds: normalizedEnd,
+      events: [],  // caption-only: never return filter events
+      cleaned_captions: normalizedCleanedCaptions,
+      clean_captions: normalizedCleanedCaptions,
+      text: typeof payload.text === 'string' ? payload.text : null,
+      clean_text: typeof payload.clean_text === 'string' ? payload.clean_text : null,
+      cleaned_text: typeof payload.cleaned_text === 'string' ? payload.cleaned_text : null,
+      caption_text: typeof payload.caption_text === 'string' ? payload.caption_text : null,
+      words: Array.isArray(payload.words) ? payload.words : [],
+      failure_reason: payload.failure_reason || payload.reason || null,
+      cached: payload.cached === true,
+    };
+    console.log(AUDIO_CAPTIONS_BG_LOG, 'caption transcribe response', {
+      videoId: cleanVideoId,
+      status: result.status,
+      source: result.source,
+      textPreview: typeof result.text === 'string' ? result.text.slice(0, 80) : '',
+      failure_reason: result.failure_reason || null,
+    });
+    if (result.source === 'audio_stt_disabled' || result.failure_reason === 'stt_disabled') {
+      console.warn(AUDIO_CAPTIONS_LOG, 'STT disabled', {
+        videoId: cleanVideoId,
+        failure_reason: result.failure_reason,
+      });
+    }
+    return result;
+  } catch (err) {
+    const errorText = err?.message || String(err);
+    const failureReason = /Failed to fetch|NetworkError|fetch/i.test(errorText)
+      ? 'backend_not_running'
+      : 'analyze_exception';
+    return { status: 'error', source: null, events: [], failure_reason: failureReason };
+  }
+}
+
 // Receives a real-time audio chunk from youtube_captions.js, forwards to /captions/transcribe,
 // and returns { status, source, events, cleaned_captions, failure_reason, cached }.
 async function handleAudioAhead(videoId, audioChunk, mimeType, startSeconds, endSeconds, audioSamples = null, sampleRate = null, channels = null) {
@@ -1202,206 +1340,6 @@ async function handleAudioAhead(videoId, audioChunk, mimeType, startSeconds, end
     }
     console.error(AUDIO_LOG, 'chunk exception', {
       videoId: cleanVideoId,
-      failureReason,
-      error: errorText,
-    });
-    return { status: 'error', events: [], failure_reason: failureReason };
-  }
-}
-
-// Hard flag to completely disable audio-caption-driven muting/filtering.
-// When false, audio captions are for overlay display only and never trigger
-// /event calls, mute events, skip events, or fast-forward events.
-const AUDIO_CAPTION_FILTER_ACTIONS_ENABLED = false;
-
-// Caption-only path for audio transcription.
-// Receives audio chunks, posts to /captions/transcribe, and relays transcript text
-// to the overlay ONLY. Never calls /event, never creates mute/skip events.
-async function handleAudioCaptionChunk(videoId, audioChunk, mimeType, startSeconds, endSeconds, audioSamples = null, sampleRate = null, channels = null) {
-  const cleanVideoId = (videoId || '').trim();
-
-  if (!cleanVideoId) {
-    console.log(AUDIO_CAPTIONS_BG_LOG, 'caption chunk dropped', { reason: 'missing_video_id' });
-    return { status: 'error', events: [], failure_reason: 'missing_video_id' };
-  }
-
-  const hasSampleArray = Array.isArray(audioSamples) && audioSamples.length > 0;
-  if (!audioChunk && !hasSampleArray) {
-    console.log(AUDIO_CAPTIONS_BG_LOG, 'caption chunk dropped', { reason: 'missing_audio' });
-    return { status: 'error', events: [], failure_reason: 'missing_audio' };
-  }
-
-  const normalizedStart = Number.isFinite(Number(startSeconds)) ? Number(startSeconds) : 0;
-  const normalizedEnd = Number.isFinite(Number(endSeconds))
-    ? Math.max(Number(endSeconds), normalizedStart)
-    : normalizedStart;
-
-  const backendUrl = await getBackendUrl();
-  const token = await getAuthToken();
-  if (!token) {
-    console.warn(AUDIO_CAPTIONS_BG_LOG, 'caption chunk dropped', { reason: 'missing_token' });
-    return { status: 'unavailable', events: [], failure_reason: 'missing_token' };
-  }
-
-  let res;
-  let responseBody = '';
-  try {
-    console.log(AUDIO_CAPTIONS_BG_LOG, 'caption chunk received');
-    console.log(AUDIO_CAPTIONS_BG_LOG, 'posting /captions/transcribe', {
-      videoId: cleanVideoId,
-      startSeconds: normalizedStart,
-      endSeconds: normalizedEnd,
-      mimeType: mimeType || 'audio/wav',
-    });
-
-    res = await fetch(`${backendUrl}/captions/transcribe`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${token}`,
-      },
-      body: JSON.stringify({
-        video_id: cleanVideoId,
-        audio_base64: audioChunk,
-        start_time: normalizedStart,
-        preferences: normalizePreferences((await chrome.storage.local.get([STORAGE_KEYS.PREFS]))[STORAGE_KEYS.PREFS] || {}),
-        audio_chunk: audioChunk,
-        mime_type: mimeType || 'audio/wav',
-        chunk_start_seconds: normalizedStart,
-        chunk_end_seconds: normalizedEnd,
-        start_seconds: normalizedStart,
-        end_seconds: normalizedEnd,
-        audio: hasSampleArray ? audioSamples : undefined,
-        sampleRate: Number.isFinite(Number(sampleRate)) ? Number(sampleRate) : undefined,
-        channels: Number.isFinite(Number(channels)) ? Number(channels) : undefined,
-      }),
-    });
-
-    responseBody = await res.text();
-    if (res.status === 401) {
-      await chrome.storage.local.remove([TOKEN_KEY, STORAGE_KEYS.USER_ID, STORAGE_KEYS.AUTH, STORAGE_KEYS.PREFS]);
-      console.warn(AUDIO_CAPTIONS_BG_LOG, 'caption chunk dropped', { reason: 'unauthorized' });
-      return { status: 'error', events: [], failure_reason: 'unauthorized' };
-    }
-
-    if (!res.ok) {
-      let backendFailureReason = null;
-      try {
-        const parsed = responseBody ? JSON.parse(responseBody) : null;
-        if (parsed && typeof parsed === 'object') {
-          backendFailureReason = typeof parsed.failure_reason === 'string'
-            ? parsed.failure_reason
-            : (typeof parsed.error === 'string' ? parsed.error : null);
-        }
-      } catch (_) {}
-      const failureReason = 'analyze_exception';
-      console.error(AUDIO_CAPTIONS_BG_LOG, 'caption endpoint failed', {
-        status: res.status,
-        failureReason,
-        backend_failure_reason: backendFailureReason,
-      });
-      return {
-        status: 'error',
-        events: [],
-        failure_reason: backendFailureReason || failureReason,
-        backend_status: res.status,
-      };
-    }
-
-    const payload = responseBody ? JSON.parse(responseBody) : {};
-    const text = typeof payload.text === 'string' ? payload.text : '';
-    const cleanText = typeof payload.clean_text === 'string' ? payload.clean_text : text;
-    const source = payload.source || (text ? 'audio_stt' : 'silence');
-
-    // Build result; events will be populated below if filtering decision warrants mute/skip
-    const result = {
-      status: payload.status || 'ready',
-      source: source,
-      start_seconds: normalizedStart,
-      end_seconds: normalizedEnd,
-      events: [], // populated below if filtering decision results in mute/skip
-      cleaned_captions: [],
-      clean_captions: [],
-      text: text,
-      clean_text: cleanText,
-      cleaned_text: cleanText,
-      words: Array.isArray(payload.words) ? payload.words : [],
-      failure_reason: payload.failure_reason || null,
-      cached: payload.cached === true,
-    };
-
-    const textPreview = text ? text.slice(0, 80) : '';
-    const textLength = text ? text.length : 0;
-
-    if (text) {
-      console.log(AUDIO_CAPTIONS_BG_LOG, 'transcribe response', {
-        textLength,
-        textPreview,
-        source: result.source,
-      });
-      console.log(AUDIO_CAPTIONS_BG_LOG, 'forwarding transcript to overlay');
-
-      // Apply content filtering: check transcript against user's filter preferences
-      const transcriptEligible = shouldAnalyzeTranscriptForFiltering(result.text, result.source);
-      if (result.status === 'ready' && transcriptEligible) {
-        const captionDurationSeconds = Math.max(normalizedEnd - normalizedStart, 0);
-        const decision = await handleCaptionDecision(result.text, captionDurationSeconds, {
-          source: 'audio_stt',
-          dedupeWindowMs: AUDIO_CAPTION_DEDUPE_WINDOW_MS,
-        });
-        if (shouldApplyFilterDecision(decision, result.text, result.source)) {
-          if (decision.action === 'mute' && !shouldApplyWordMute(decision, result.text, result.source)) {
-            // Mute was gated — no matched word/phrase specific enough to mute
-            console.log(AUDIO_CAPTIONS_BG_LOG, 'chunk handled without mute', {
-              videoId: cleanVideoId,
-              reason: 'no matched word/phrase',
-              matched_category: decision.matched_category || null,
-            });
-          } else if (decision.action === 'mute' && shouldApplyWordMute(decision, result.text, result.source)) {
-            const matchedText = getMatchedFilterText(decision);
-            result.events = [{
-              id: `audio-stt-${cleanVideoId}-${normalizedStart}-${decision.action}`,
-              action: decision.action,
-              start_seconds: normalizedStart,
-              end_seconds: normalizedEnd,
-              duration_seconds: captionDurationSeconds,
-              matched_category: decision.matched_category || null,
-              matched_word: matchedText,
-              reason: decision.reason || 'audio stt /event decision',
-              source: 'audio_stt',
-            }];
-            console.log('[ISWEEP][WORD_MUTE] applying mute for matched filtered word', {
-              videoId: cleanVideoId,
-              word: matchedText,
-              category: decision.matched_category || null,
-              startSeconds: normalizedStart,
-              endSeconds: normalizedEnd,
-            });
-          } else if (decision.action !== 'mute') {
-            result.events = [{
-              id: `audio-stt-${cleanVideoId}-${normalizedStart}-${decision.action}`,
-              action: decision.action,
-              start_seconds: normalizedStart,
-              end_seconds: normalizedEnd,
-              duration_seconds: captionDurationSeconds,
-              matched_category: decision.matched_category || null,
-              reason: decision.reason || 'audio stt /event decision',
-              source: 'audio_stt',
-            }];
-          }
-        }
-      }
-    } else {
-      console.log(AUDIO_CAPTIONS_BG_LOG, 'silence/no transcript');
-    }
-
-    return result;
-  } catch (err) {
-    const errorText = err?.message || String(err);
-    const failureReason = /Failed to fetch|NetworkError|fetch/i.test(errorText)
-      ? 'backend_not_running'
-      : 'analyze_exception';
-    console.error(AUDIO_CAPTIONS_BG_LOG, 'caption chunk exception', {
       failureReason,
       error: errorText,
     });

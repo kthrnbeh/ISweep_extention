@@ -7,6 +7,7 @@ const vm = require('node:vm');
 function loadBackgroundContext() {
   const filePath = path.resolve(__dirname, '..', 'background.js');
   const source = fs.readFileSync(filePath, 'utf8');
+  const localStore = {};
 
   const chrome = {
     runtime: {
@@ -29,9 +30,25 @@ function loadBackgroundContext() {
     storage: {
       onChanged: { addListener() {} },
       local: {
-        get: async () => ({}),
-        set: async () => ({}),
-        remove: async () => ({}),
+        get: async (keys) => {
+          if (Array.isArray(keys)) {
+            const out = {};
+            keys.forEach((key) => {
+              out[key] = localStore[key];
+            });
+            return out;
+          }
+          return { ...localStore };
+        },
+        set: async (values) => {
+          Object.assign(localStore, values || {});
+        },
+        remove: async (keys) => {
+          const list = Array.isArray(keys) ? keys : [keys];
+          list.forEach((key) => {
+            delete localStore[key];
+          });
+        },
       },
     },
     action: {
@@ -61,12 +78,66 @@ test('caption runtime status prefers YouTube fallback when active tab reports li
   const bg = loadBackgroundContext();
   bg.fetch = async () => ({ ok: true, status: 200, json: async () => ({ status: 'ok', stt_enabled: true }) });
   bg.chrome.tabs.query = async () => ([{ id: 7 }]);
-  bg.chrome.tabs.sendMessage = async () => ({ usingYoutubeFallback: true, usingAudioStt: false });
+  bg.chrome.tabs.sendMessage = async () => ({
+    usingYoutubeFallback: true,
+    usingAudioStt: false,
+    youtubeDomFallbackEnabled: true,
+  });
 
   const result = await bg.handleCaptionRuntimeStatus();
   assert.equal(result.state, 'youtube_fallback');
   assert.equal(result.label, 'Captions: YouTube fallback');
   assert.equal(result.sourceLabel, 'YouTube Fallback');
+});
+
+test('caption runtime status reports listening when health has stt_enabled true and no transcript yet', async () => {
+  const bg = loadBackgroundContext();
+  bg.fetch = async () => ({ ok: true, status: 200, json: async () => ({ status: 'ok', stt_enabled: true }) });
+  bg.chrome.tabs.query = async () => ([{ id: 7 }]);
+  bg.chrome.tabs.sendMessage = async () => ({
+    usingYoutubeFallback: false,
+    usingAudioStt: false,
+    overlaySource: 'waiting_audio_text',
+    youtubeDomFallbackEnabled: false,
+  });
+
+  const result = await bg.handleCaptionRuntimeStatus();
+  assert.equal(result.state, 'ready');
+  assert.equal(result.source, 'listening');
+  assert.equal(result.sourceLabel, 'Listening');
+  assert.equal(result.sttEnabled, true);
+});
+
+test('caption runtime status reports stt_disabled only when health stt_enabled is false', async () => {
+  const bg = loadBackgroundContext();
+  bg.fetch = async () => ({ ok: true, status: 200, json: async () => ({ status: 'ok', stt_enabled: false }) });
+  bg.chrome.tabs.query = async () => ([{ id: 7 }]);
+  bg.chrome.tabs.sendMessage = async () => ({
+    usingYoutubeFallback: false,
+    usingAudioStt: false,
+    overlaySource: 'waiting_audio_text',
+    youtubeDomFallbackEnabled: false,
+  });
+
+  const result = await bg.handleCaptionRuntimeStatus();
+  assert.equal(result.state, 'stt_disabled');
+  assert.equal(result.source, 'stt_disabled');
+  assert.equal(result.sourceLabel, 'STT Disabled');
+  assert.equal(result.sttEnabled, false);
+});
+
+test('backend URL defaults to 127.0.0.1:5000 and normalizes old localhost value', async () => {
+  const bg = loadBackgroundContext();
+
+  const first = await bg.getBackendUrl();
+  assert.equal(first, 'http://127.0.0.1:5000');
+
+  await bg.chrome.storage.local.set({ isweepBackendUrl: 'http://localhost:5000' });
+  const normalized = await bg.getBackendUrl();
+  assert.equal(normalized, 'http://127.0.0.1:5000');
+
+  const stored = await bg.chrome.storage.local.get(['isweepBackendUrl']);
+  assert.equal(stored.isweepBackendUrl, 'http://127.0.0.1:5000');
 });
 
 test('caption runtime status reports backend offline when health probe fails', async () => {

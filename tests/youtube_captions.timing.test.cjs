@@ -222,10 +222,9 @@ test('clean caption text follows precedence order: pre-analyzed, marker, audio, 
     nowMs,
   });
 
-  assert.equal(liveResult.source, 'live_masked');
+  assert.equal(liveResult.source, null);
   assert.equal(liveResult.stale, false);
-  assert.equal(/shit/i.test(liveResult.text), false);
-  assert.equal(liveResult.text.includes('___'), true);
+  assert.equal(liveResult.text, '');
 });
 
 test('mute window preserves backend preroll and clean resume time', () => {
@@ -254,7 +253,7 @@ test('user-muted video skips new ISweep mute windows', () => {
   assert.equal(hooks.shouldSkipMuteBecauseUserMuted(false, false), false);
 });
 
-test('live masked text is used when no pre-analyzed caption exists', () => {
+test('YouTube DOM fallback is disabled when no pre-analyzed caption exists', () => {
   const hooks = loadYoutubeTimingHooks();
   hooks.setCachedPreferences({
     enabled: true,
@@ -268,10 +267,9 @@ test('live masked text is used when no pre-analyzed caption exists', () => {
     nowMs: Date.now(),
   });
 
-  assert.equal(result.source, 'live_masked');
+  assert.equal(result.source, null);
   assert.equal(result.stale, false);
-  assert.equal(/shit/i.test(result.text), false);
-    assert.equal(result.text.includes('___'), true);
+  assert.equal(result.text, '');
 });
 
 test('fresh audio STT outranks native caption fallback', () => {
@@ -304,8 +302,8 @@ test('stale live caption text is not displayed', () => {
   });
 
   assert.equal(result.text, '');
-  assert.equal(result.source, 'live_masked');
-  assert.equal(result.stale, true);
+  assert.equal(result.source, null);
+  assert.equal(result.stale, false);
 });
 
 test('marker text is used when timed metadata matches and no pre-analyzed caption exists', () => {

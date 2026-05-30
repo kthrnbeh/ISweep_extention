@@ -37,6 +37,7 @@ const AUDIO_CAPTION_FILTER_ACTIONS_ENABLED = false; // Caption-only mode: keep f
 const recentCaptionByText = new Map();
 const tabCaptureSessionByTabId = new Map();
 let activeTabAudioCapture = null;
+let didLogBackendUrl = false;
 
 function normalizeCaptionTextForDedupe(text) {
   return String(text || '').toLowerCase().replace(/\s+/g, ' ').trim();
@@ -137,17 +138,32 @@ async function getCaptionBackendStatus() {
   try {
     const res = await fetch(`${backendUrl}/health`);
     if (!res.ok) {
-      return { state: 'backend_offline', ok: false };
+      return {
+        state: 'backend_offline',
+        ok: false,
+        backendOnline: false,
+        sttEnabled: false,
+        stt_enabled: false,
+      };
     }
     const body = await res.json().catch(() => ({}));
     const sttEnabled = body?.stt_enabled === true;
     return {
       state: sttEnabled ? 'ready' : 'stt_disabled',
       ok: true,
+      backendOnline: true,
       sttEnabled,
+      stt_enabled: sttEnabled,
     };
   } catch (err) {
-    return { state: 'backend_offline', ok: false, error: err?.message || String(err) };
+    return {
+      state: 'backend_offline',
+      ok: false,
+      backendOnline: false,
+      sttEnabled: false,
+      stt_enabled: false,
+      error: err?.message || String(err),
+    };
   }
 }
 
@@ -169,26 +185,42 @@ async function handleCaptionRuntimeStatus() {
   let state = backend.state || 'backend_offline';
   let label = 'Audio captions: Backend offline';
   let sourceLabel = 'Backend Offline';
+  let source = 'backend_offline';
+
+  const youtubeFallbackEnabled = tabStatus?.youtubeDomFallbackEnabled === true;
 
   if (tabStatus?.usingAudioStt) {
     state = 'ready';
-    label = 'Audio captions: Ready';
-    sourceLabel = tabStatus?.overlaySource === 'audio_stt_cached' ? 'Audio STT Cached' : 'Audio STT Live';
-  } else if (tabStatus?.usingYoutubeFallback) {
+    source = tabStatus?.overlaySource === 'audio_stt_cached' ? 'audio_stt_cached' : 'audio_stt_live';
+    label = source === 'audio_stt_cached' ? 'Audio captions: Audio STT Cached' : 'Audio captions: Audio STT Live';
+    sourceLabel = source === 'audio_stt_cached' ? 'Audio STT Cached' : 'Audio STT Live';
+  } else if (youtubeFallbackEnabled && tabStatus?.usingYoutubeFallback) {
     state = 'youtube_fallback';
+    source = 'youtube_fallback';
     label = 'Captions: YouTube fallback';
     sourceLabel = 'YouTube Fallback';
   } else if (backend.state === 'ready') {
     state = 'ready';
-    label = 'Audio captions: Ready';
+    source = 'listening';
+    label = 'Audio captions: Listening';
     sourceLabel = 'Listening';
   } else if (backend.state === 'stt_disabled') {
     state = 'stt_disabled';
+    source = 'stt_disabled';
     label = 'Audio captions: STT disabled';
     sourceLabel = 'STT Disabled';
   }
 
-  const response = { state, label, sourceLabel, backend, tabStatus };
+  const response = {
+    state,
+    label,
+    source,
+    sourceLabel,
+    backend,
+    backendOnline: backend?.backendOnline === true,
+    sttEnabled: backend?.sttEnabled === true,
+    tabStatus,
+  };
   console.log(CAPTION_LOG_PREFIX, 'popup runtime status', response);
   return response;
 }
@@ -278,6 +310,7 @@ async function requestTabCaptureStreamId(tabId) {
 }
 
 async function startTabAudioCapture(tabId, videoId) {
+  console.log(AUDIO_CAPTIONS_BG_LOG, 'start requested', { tabId, videoId });
   console.log('[ISWEEP][AUDIO_CAPTIONS] start requested', { tabId, videoId });
   console.log('[ISWEEP][AUDIO_CAPTIONS] tab capture start requested', { tabId, videoId });
   const stream = await requestTabCaptureStreamId(tabId);
@@ -405,9 +438,33 @@ async function handleStopTabAudioCaptions() {
   return { ok: true };
 }
 
+function normalizeBackendUrl(rawUrl) {
+  const value = String(rawUrl || '').trim();
+  if (!value) return DEFAULT_BACKEND;
+  try {
+    const parsed = new URL(value);
+    const port = parsed.port || '80';
+    if (parsed.protocol === 'http:' && parsed.hostname === '127.0.0.1' && port === '5000') {
+      return DEFAULT_BACKEND;
+    }
+  } catch (_) {
+    return DEFAULT_BACKEND;
+  }
+  return DEFAULT_BACKEND;
+}
+
 async function getBackendUrl() {
   const store = await chrome.storage.local.get([STORAGE_KEYS.BACKEND_URL]);
-  return store[STORAGE_KEYS.BACKEND_URL] || DEFAULT_BACKEND;
+  const stored = store[STORAGE_KEYS.BACKEND_URL];
+  const normalized = normalizeBackendUrl(stored);
+  if (stored !== normalized) {
+    await chrome.storage.local.set({ [STORAGE_KEYS.BACKEND_URL]: normalized });
+  }
+  if (!didLogBackendUrl) {
+    didLogBackendUrl = true;
+    console.log('[ISWEEP][BG] backend URL http://127.0.0.1:5000');
+  }
+  return normalized;
 }
 
 function isLocalBackendUrl(url) {

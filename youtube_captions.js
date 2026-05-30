@@ -676,7 +676,7 @@
     }
 
     const maskedLiveText = toCleanCaptionText(String(liveText || ''));
-    if (maskedLiveText) {
+    if (ISWEEP_YOUTUBE_DOM_FALLBACK_ENABLED && maskedLiveText) {
       const isStale = liveCaptionObservedAtMs > 0 && (nowMs - liveCaptionObservedAtMs) > staleMs;
       if (isStale) {
         return {
@@ -1156,6 +1156,9 @@
   }
 
   async function startAudioPipeline(audioStream, sourceLabel, video, captureMethod = null) {
+    if (!ISWEEP_CONTENT_SCRIPT_AUDIO_AHEAD_ENABLED) {
+      return false;
+    }
     try {
       audioCtx = new AudioContext({ sampleRate: AUDIO_SAMPLE_RATE });
       console.log(AUDIO_AHEAD_LOG_PREFIX, 'audio context state before resume', {
@@ -1435,6 +1438,9 @@
   }
 
   async function startAudioCapture() {
+    if (!ISWEEP_CONTENT_SCRIPT_AUDIO_AHEAD_ENABLED) {
+      return;
+    }
     const video = findVideo();
     console.log(AUDIO_AHEAD_LOG_PREFIX, 'start requested', {
       videoId: activeVideoId,
@@ -1520,7 +1526,7 @@
     stopAudioCapture('video_changed');
     resetMarkerEngine('video changed');
     analyzeCurrentVideoMarkers(false);
-    if (cleanCaptionSettings.cleanCaptionsEnabled) {
+    if (ISWEEP_CONTENT_SCRIPT_AUDIO_AHEAD_ENABLED && cleanCaptionSettings.cleanCaptionsEnabled) {
       setTimeout(startAudioCapture, 1500); // Give the player 1.5 s to start before capturing
     }
   }
@@ -1532,7 +1538,7 @@
     markerVideoWatchInterval = setInterval(() => {
       handleVideoIdChange(getCurrentVideoId());
       // Retry audio capture each tick if tracks weren't available on the first attempt.
-      if (tabAudioCaptureState !== 'ready' && tabAudioCaptureState !== 'starting' && activeVideoId && cleanCaptionSettings.cleanCaptionsEnabled && !audioAheadActive && !audioCapturePermissionDenied) startAudioCapture();
+      if (ISWEEP_CONTENT_SCRIPT_AUDIO_AHEAD_ENABLED && tabAudioCaptureState !== 'ready' && tabAudioCaptureState !== 'starting' && activeVideoId && cleanCaptionSettings.cleanCaptionsEnabled && !audioAheadActive && !audioCapturePermissionDenied) startAudioCapture();
     }, 1000);
   }
 
@@ -1623,7 +1629,7 @@
           if (previousSettings.cleanCaptionsEnabled === false) {
             audioCapturePermissionDenied = false;
           }
-          if (tabAudioCaptureState !== 'ready' && tabAudioCaptureState !== 'starting' && activeVideoId && !audioAheadActive && !audioCapturePermissionDenied) {
+          if (ISWEEP_CONTENT_SCRIPT_AUDIO_AHEAD_ENABLED && tabAudioCaptureState !== 'ready' && tabAudioCaptureState !== 'starting' && activeVideoId && !audioAheadActive && !audioCapturePermissionDenied) {
             startAudioCapture();
           }
         }
@@ -1646,7 +1652,8 @@
           overlaySource,
           audioCaptionMode: getAudioCaptionMode(),
           usingAudioStt: overlaySource.startsWith('audio_stt'),
-          usingYoutubeFallback: overlaySource === 'live_masked',
+          usingYoutubeFallback: ISWEEP_YOUTUBE_DOM_FALLBACK_ENABLED && overlaySource === 'live_masked',
+          youtubeDomFallbackEnabled: ISWEEP_YOUTUBE_DOM_FALLBACK_ENABLED,
         };
         console.log(CLEAN_CC_LOG_PREFIX, 'runtime status reported', status);
         sendResponse(status);
@@ -1672,7 +1679,7 @@
           lastAudioCaptionFailureReason = null;
         } else if (state === 'unavailable') {
           lastAudioCaptionFailureReason = message.failure_reason || 'audio_capture_unavailable';
-          if (activeVideoId && cleanCaptionSettings.cleanCaptionsEnabled && !audioAheadActive && !audioCapturePermissionDenied) {
+          if (ISWEEP_CONTENT_SCRIPT_AUDIO_AHEAD_ENABLED && activeVideoId && cleanCaptionSettings.cleanCaptionsEnabled && !audioAheadActive && !audioCapturePermissionDenied) {
             startAudioCapture();
           }
         } else if (state === 'stopped') {
@@ -1697,6 +1704,7 @@
         // ingestAudioMarkers may only be called when a dedicated filtering mode is enabled.
         if (!lastAudioCaptionText) {
           // Empty STT text: do not clear or update the overlay.
+          console.log(CLEAN_CC_LOG_PREFIX, 'ignored empty audio_stt message');
           sendResponse({ ok: true });
           return true;
         }
@@ -1731,7 +1739,7 @@
       } else {
         audioCapturePermissionDenied = false;
       }
-      if (cleanCaptionSettings.cleanCaptionsEnabled && tabAudioCaptureState !== 'ready' && tabAudioCaptureState !== 'starting' && activeVideoId && !audioAheadActive && !audioCapturePermissionDenied) {
+      if (ISWEEP_CONTENT_SCRIPT_AUDIO_AHEAD_ENABLED && cleanCaptionSettings.cleanCaptionsEnabled && tabAudioCaptureState !== 'ready' && tabAudioCaptureState !== 'starting' && activeVideoId && !audioAheadActive && !audioCapturePermissionDenied) {
         startAudioCapture();
       }
       applyCleanCaptionOverlayStyles();
@@ -2192,9 +2200,9 @@
       cleanCaptionTextEl.style.opacity = '0';
       cleanCaptionTextEl.textContent = resolved.text;
       cleanCaptionOverlayEl.style.visibility = 'visible';
-      cleanCaptionOverlayEl.dataset.source = resolved.source || 'live_masked';
+      cleanCaptionOverlayEl.dataset.source = resolved.source || 'none';
       if (lastRenderedCleanCaptionKey !== nextKey) {
-        const sourceLabel = String(resolved.source || 'live_masked');
+        const sourceLabel = String(resolved.source || 'none');
         console.log(CLEAN_CC_LOG_PREFIX, 'text updated');
         console.log(CLEAN_CC_LOG_PREFIX, 'overlay text rendered');
         if (resolved.text.includes('___')) {
@@ -2211,14 +2219,14 @@
           console.log(CLEAN_CC_LOG_PREFIX, 'source audio_stt_cached');
         } else if (sourceLabel === 'audio_stt_live' || sourceLabel === 'audio_stt') {
           console.log(CLEAN_CC_LOG_PREFIX, 'source audio_stt_live');
-        } else if (sourceLabel === 'live_masked') {
+        } else if (ISWEEP_YOUTUBE_DOM_FALLBACK_ENABLED && sourceLabel === 'live_masked') {
           console.log(CLEAN_CC_LOG_PREFIX, 'source live_masked');
         }
         console.log(CLEAN_CC_LOG_PREFIX, 'fade update', {
-          source: resolved.source || 'live_masked',
+          source: resolved.source || 'none',
           fade_ms: CLEAN_CC_FADE_MS,
         });
-        console.log(CLEAN_CC_LOG_PREFIX, 'overlay source', resolved.source || 'live_masked');
+        console.log(CLEAN_CC_LOG_PREFIX, 'overlay source', resolved.source || 'none');
         if (resolved.source !== 'waiting_audio_text') {
           console.log('[ISWEEP][CAPTION_UI] showing:', resolved.text);
         }
@@ -2229,7 +2237,7 @@
       });
       lastRenderedCleanCaptionKey = nextKey;
       lastRenderedOverlayText = resolved.text;
-      lastRenderedOverlaySource = resolved.source || 'live_masked';
+      lastRenderedOverlaySource = resolved.source || 'none';
       lastRenderedOverlayAtMs = nowMs;
       maybeLogNativeCaptionOverlayWarning();
     }

@@ -7,6 +7,7 @@
 // Configuration - Web App Base URL
 // Default to public GitHub Pages; allow override via stored setting for local dev.
 const DEFAULT_FRONTEND_BASE = 'https://kthrnbeh.github.io/ISweep';
+const DEFAULT_BACKEND = 'http://127.0.0.1:5000';
 
 // Storage Keys
 const STORAGE_KEYS = {
@@ -63,7 +64,23 @@ function isLocalBackendUrl(url) {
 
 async function getBackendUrl() {
   const store = await chrome.storage.local.get([STORAGE_KEYS.BACKEND_URL]); // Fetch stored backend URL
-  return store[STORAGE_KEYS.BACKEND_URL] || 'http://127.0.0.1:5000'; // Default to local backend
+  const value = String(store[STORAGE_KEYS.BACKEND_URL] || '').trim();
+  let normalized = DEFAULT_BACKEND;
+  if (value) {
+    try {
+      const parsed = new URL(value);
+      const port = parsed.port || '80';
+      if (parsed.protocol === 'http:' && parsed.hostname === '127.0.0.1' && port === '5000') {
+        normalized = DEFAULT_BACKEND;
+      }
+    } catch (_) {
+      normalized = DEFAULT_BACKEND;
+    }
+  }
+  if (store[STORAGE_KEYS.BACKEND_URL] !== normalized) {
+    await chrome.storage.local.set({ [STORAGE_KEYS.BACKEND_URL]: normalized });
+  }
+  return normalized;
 }
 
 async function getFrontendBaseUrl() {
@@ -116,7 +133,7 @@ let cleanCaptionSettingsCache = { ...CLEAN_CAPTION_DEFAULTS };
 function renderCaptionRuntimeStatus(status) {
   if (!captionRuntimeStatus) return;
   const state = typeof status?.state === 'string' ? status.state : 'backend_offline';
-  const label = typeof status?.label === 'string' ? status.label : 'Audio captions: STT disabled';
+  const label = typeof status?.label === 'string' ? status.label : 'Audio captions: Backend offline';
   const sourceLabel = typeof status?.sourceLabel === 'string' ? status.sourceLabel : '';
   captionRuntimeStatus.textContent = sourceLabel ? `Caption source: ${sourceLabel}` : label;
   captionRuntimeStatus.dataset.state = state;
@@ -126,6 +143,14 @@ async function refreshCaptionRuntimeStatus() {
   try {
     const status = await chrome.runtime.sendMessage({ type: 'isweep_get_caption_runtime_status' });
     renderCaptionRuntimeStatus(status);
+    const backendOk = status?.backend?.ok === true || status?.backendOnline === true;
+    const sttEnabled = status?.backend?.stt_enabled === true || status?.sttEnabled === true;
+    const captionSource = String(status?.source || status?.sourceLabel || status?.state || 'unknown');
+    console.log('[ISWEEP][POPUP] health status', {
+      backendOk,
+      stt_enabled: sttEnabled,
+      captionSource,
+    });
     console.log('[ISWEEP][CAPTIONS]', 'popup status refreshed', status);
   } catch (error) {
     renderCaptionRuntimeStatus({ state: 'backend_offline', label: 'Audio captions: Backend offline' });

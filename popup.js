@@ -130,6 +130,16 @@ const btnResetCaptionPosition = document.getElementById('btnResetCaptionPosition
 
 let cleanCaptionSettingsCache = { ...CLEAN_CAPTION_DEFAULTS };
 
+function setSyncPrefsAvailability(hasToken) {
+  if (!btnSyncPrefs) return;
+  const enabled = hasToken === true;
+  btnSyncPrefs.disabled = !enabled;
+  btnSyncPrefs.setAttribute('aria-disabled', enabled ? 'false' : 'true');
+  btnSyncPrefs.title = enabled
+    ? 'Sync preferences from your ISweep account'
+    : 'Sign in on the ISweep site to sync preferences';
+}
+
 function renderCaptionRuntimeStatus(status) {
   if (!captionRuntimeStatus) return;
   const state = typeof status?.state === 'string' ? status.state : 'backend_offline';
@@ -205,6 +215,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     
     if (authData && (authData.email || hasToken)) {
       renderLoggedInState(authData, isEnabled); // Show logged-in UI
+      setSyncPrefsAvailability(hasToken);
       // Reflect cached prefs status for clarity.
       if (signedInStatus) {
         const prefs = result[STORAGE_KEYS.PREFS];
@@ -218,6 +229,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
     } else {
       renderLoggedOutState(); // Show logged-out UI
+      setSyncPrefsAvailability(false);
     }
     
     // Set up event listeners
@@ -450,6 +462,7 @@ async function handleSyncPrefs(e) {
       if (devLocalAuthActive) {
         console.log('[ISWEEP][AUTH] dev local auth enabled');
         console.log('[ISWEEP][AUTH] using local preferences fallback');
+        setSyncPrefsAvailability(false);
         if (signedInStatus) {
           signedInStatus.textContent = preStore[STORAGE_KEYS.PREFS]
             ? 'Dev local auth enabled. Using cached preferences.'
@@ -458,12 +471,16 @@ async function handleSyncPrefs(e) {
         return;
       }
       console.warn(LOG_PREFIX, 'prefs sync failed', 'missing token');
-      alert('Sync failed. Please sign in on the ISweep site, then try again.');
+      setSyncPrefsAvailability(false);
+      if (signedInStatus) {
+        signedInStatus.textContent = 'Captions active. Sign in on the ISweep site to sync preferences.';
+      }
       return;
     }
 
     // Refresh canonical token key in storage for background fetch logic.
     await chrome.storage.local.set({ [TOKEN_KEY]: token });
+    setSyncPrefsAvailability(true);
 
     const res = await chrome.runtime
       .sendMessage({ type: 'isweep_sync_prefs' })
@@ -557,6 +574,7 @@ async function handleQuickLogin() {
         ? 'Signed in. Preferences cached.'
         : 'Signed in. No preferences cached yet (open Filters and Save).';
     }
+    setSyncPrefsAvailability(true);
     renderLoggedInState(authData, true);
 
     quickLoginForm.classList.add('hidden');
@@ -626,6 +644,7 @@ async function handleLogout(e) {
       STORAGE_KEYS.PREFS,
       TOKEN_KEY,
     ]);
+    setSyncPrefsAvailability(false);
     
     console.log('[ISWEEP][POPUP] Logged out successfully');
     

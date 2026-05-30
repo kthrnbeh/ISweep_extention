@@ -521,7 +521,13 @@ function handleLoginClick(e) {
 function handleCreateAccountClick(e) {
   e.preventDefault();
   console.log(LOG_PREFIX, 'create account link clicked');
-  chrome.tabs.create({ url: `${WEB_BASE_URL}/Account.html#create` });
+  getFrontendBaseUrl()
+    .then((base) => {
+      chrome.tabs.create({ url: `${base}/Account.html#create` });
+    })
+    .catch(() => {
+      chrome.tabs.create({ url: `${DEFAULT_FRONTEND_BASE}/Account.html#create` });
+    });
 }
 
 /**
@@ -552,7 +558,12 @@ async function handleQuickLogin() {
       });
     if (!response || !response.ok) {
       console.warn(LOG_PREFIX, 'login failed', response?.error || 'unknown');
-      alert('Login failed. Please check your credentials and backend URL.');
+      const errorText = String(response?.error || '').toLowerCase();
+      if (errorText.includes('invalid credentials')) {
+        alert('Login failed: invalid credentials for this backend. If using local backend, create a local account first.');
+      } else {
+        alert(`Login failed. ${response?.error || 'Please check your credentials and backend URL.'}`);
+      }
       return;
     }
     console.log('[ISWEEP][POPUP] login success', response.status || '');

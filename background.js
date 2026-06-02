@@ -372,7 +372,18 @@ async function stopTabAudioCapture(reason = 'captions_disabled') {
 }
 
 async function relayAudioCaptionResultToTab(result) {
-  const tabId = Number(activeTabAudioCapture?.tabId);
+  let tabId = Number(activeTabAudioCapture?.tabId);
+  // If the service worker restarted and lost in-memory state, the tabId will be
+  // NaN. Fall back to querying for any YouTube watch tab so the relay still works.
+  if (!Number.isFinite(tabId)) {
+    try {
+      const [ytTab] = await chrome.tabs.query({ url: '*://www.youtube.com/watch*' });
+      tabId = Number(ytTab?.id);
+      if (Number.isFinite(tabId)) {
+        console.log(AUDIO_CAPTIONS_BG_LOG, 'relay tabId recovered from tab query after SW restart', { tabId });
+      }
+    } catch (_) {}
+  }
   if (!Number.isFinite(tabId)) return false;
   try {
     const relaySource = result?.source === 'audio_stt_disabled'

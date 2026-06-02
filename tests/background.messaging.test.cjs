@@ -8,11 +8,16 @@ function loadBackgroundContext() {
   const filePath = path.resolve(__dirname, '..', 'background.js');
   const source = fs.readFileSync(filePath, 'utf8');
   const localStore = {};
+  let onMessageListener = null;
 
   const chrome = {
     runtime: {
       onInstalled: { addListener() {} },
-      onMessage: { addListener() {} },
+      onMessage: {
+        addListener(listener) {
+          onMessageListener = listener;
+        },
+      },
       sendMessage: async () => ({}),
       getURL: (p) => `chrome-extension://unit-test/${p}`,
       getContexts: async () => ([]),
@@ -71,6 +76,18 @@ function loadBackgroundContext() {
 
   vm.createContext(context);
   vm.runInContext(source, context, { filename: 'background.js' });
+
+  context.__sendRuntimeMessage = (message) => new Promise((resolve) => {
+    if (typeof onMessageListener !== 'function') {
+      resolve({ ok: false, error: 'listener_not_registered' });
+      return;
+    }
+    const ret = onMessageListener(message, { tab: null }, (response) => resolve(response));
+    // If handler returned synchronously without using sendResponse, resolve anyway.
+    if (ret !== true) {
+      setTimeout(() => resolve(undefined), 0);
+    }
+  });
   return context;
 }
 
@@ -195,6 +212,7 @@ test('missing token handling for /audio/analyze returns unavailable + missing_to
   const bg = loadBackgroundContext();
   bg.getAuthToken = async () => null;
   bg.getBackendUrl = async () => 'http://127.0.0.1:5000';
+  bg.ensureLocalDevCaptionToken = async () => null;
 
   const result = await bg.handleAudioAhead('video1', 'ZmFrZQ==', 'audio/wav', 10, 11);
   assert.equal(result.status, 'unavailable');
@@ -925,4 +943,71 @@ test('handleAudioCaptionChunk does not forward empty transcript text', async () 
   const result = await bg.handleAudioCaptionChunk('vid1', 'ZmFrZQ==', 'audio/wav', 0, 2);
   assert.ok(Array.isArray(result.events) && result.events.length === 0, 'events must always be []');
   assert.equal(result.text === '' || result.text === null, true, 'empty transcript must not become non-empty');
+});
+
+test('isweep_get_audio_caption_debug returns counters and diag messages update state', async () => {
+  const bg = loadBackgroundContext();
+
+  const before = await bg.__sendRuntimeMessage({ type: 'isweep_get_audio_caption_debug' });
+  assert.equal(typeof before, 'object');
+  assert.equal(typeof before.offscreenStreamReadyCount, 'number');
+  assert.equal(typeof before.offscreenWorkletLoadedCount, 'number');
+  assert.equal(typeof before.offscreenChunkCount, 'number');
+
+  await bg.__sendRuntimeMessage({ type: 'isweep_audio_diag', stage: 'offscreen_stream_ready', videoId: 'v1' });
+  await bg.__sendRuntimeMessage({ type: 'isweep_audio_diag', stage: 'offscreen_worklet_loaded' });
+  await bg.__sendRuntimeMessage({ type: 'isweep_audio_diag', stage: 'offscreen_chunk_emitted', chunkCount: 10, sampleCount: 12345 });
+
+  const after = await bg.__sendRuntimeMessage({ type: 'isweep_get_audio_caption_debug' });
+  assert.equal(after.offscreenStreamReadyCount, before.offscreenStreamReadyCount + 1);
+  assert.equal(after.offscreenWorkletLoadedCount, before.offscreenWorkletLoadedCount + 1);
+  assert.equal(after.offscreenChunkCount, before.offscreenChunkCount + 1);
+});
+
+test('relay recovers tabId after SW restart and retries after content script inject', async () => {
+  const bg = loadBackgroundContext();
+
+  bg.chrome.tabs.query = async () => ([{ id: 99, url: 'https://www.youtube.com/watch?v=abc123' }]);
+  let sendAttempts = 0;
+  bg.chrome.tabs.sendMessage = async () => {
+    sendAttempts += 1;
+    if (sendAttempts === 1) {
+      throw new Error('Could not establish connection. Receiving end does not exist.');
+    }
+    return { ok: true };
+  };
+  let injected = 0;
+  bg.chrome.scripting = {
+    executeScript: async () => {
+      injected += 1;
+    },
+  };
+
+  const ok = await bg.relayAudioCaptionResultToTab({
+    status: 'ready',
+    source: 'audio_stt',
+    text: 'hello world',
+    events: [],
+  });
+
+  assert.equal(ok, true);
+  assert.equal(sendAttempts, 2, 'should retry once after inject');
+  assert.equal(injected, 1, 'should inject content script before retry');
+});
+
+test('relay fails with reason when no active tab can be recovered', async () => {
+  const bg = loadBackgroundContext();
+  bg.chrome.tabs.query = async () => ([]);
+
+  const ok = await bg.relayAudioCaptionResultToTab({
+    status: 'ready',
+    source: 'audio_stt',
+    text: 'hello world',
+    events: [],
+  });
+
+  assert.equal(ok, false);
+  const debug = await bg.__sendRuntimeMessage({ type: 'isweep_get_audio_caption_debug' });
+  assert.equal(debug.lastError, 'relay_no_tab_id');
+  assert.equal(debug.relayFailureCount > 0, true);
 });

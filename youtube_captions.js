@@ -297,7 +297,7 @@
   const AUDIO_CAPTURE_LOG_PREFIX = '[ISWEEP][AUDIO_CAPTIONS]';
   const WORD_MUTE_LOG_PREFIX = '[ISWEEP][WORD_MUTE]';
   const FALLBACK_LOG_PREFIX = '[ISWEEP][FALLBACK]';
-  const AUDIO_CHUNK_SEC = 2.0;
+  const AUDIO_CHUNK_SEC = 3.0;
   const AUDIO_CHUNK_OVERLAP_SEC = 0.5;
   const AUDIO_SAMPLE_RATE = 16000;    // 16 kHz mono — standard for speech recognition
   const MARKER_SCHEDULER_INTERVAL_MS = 100;

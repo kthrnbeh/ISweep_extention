@@ -789,3 +789,71 @@ test('caption overlay still updates while audio is audible', () => {
   assert.equal(source.includes('audioAheadActive'), true);
   assert.equal(source.includes('applyMuteWindow'), true);
 });
+
+test('non-empty audio_stt_live caption is selected immediately for overlay', () => {
+  const hooks = loadYoutubeTimingHooks();
+  const entries = hooks.buildAudioResponseCaptions(
+    {
+      status: 'ready',
+      source: 'audio_stt',
+      text: 'hello from stt',
+      clean_text: 'hello from stt',
+      cleaned_captions: [],
+      clean_captions: [],
+      words: [],
+      cached: false,
+    },
+    10.0,
+    10.8,
+  );
+
+  const best = hooks.getBestCleanCaptionText('', 10.2, {
+    preCachedAudioCaptions: [],
+    liveAudioCaptions: entries,
+    preAnalyzedCaptions: [],
+    markerEntries: [],
+    liveCaptionObservedAtMs: Date.now(),
+    nowMs: Date.now(),
+  });
+
+  assert.equal(best.source, 'audio_stt_live');
+  assert.equal(best.text, 'hello from stt');
+});
+
+test('empty audio_stt text does not replace with live_masked fallback', () => {
+  const hooks = loadYoutubeTimingHooks();
+  const entries = hooks.buildAudioResponseCaptions(
+    {
+      status: 'ready',
+      source: 'audio_stt',
+      text: '',
+      clean_text: '',
+      cleaned_captions: [],
+      clean_captions: [],
+      words: [],
+      cached: false,
+    },
+    20.0,
+    20.8,
+  );
+
+  assert.equal(entries.length, 0, 'empty audio_stt payload should not create live audio entries');
+  const best = hooks.getBestCleanCaptionText('native fallback text', 20.2, {
+    preCachedAudioCaptions: [],
+    liveAudioCaptions: entries,
+    preAnalyzedCaptions: [],
+    markerEntries: [],
+    // Stale native captions must not show up either.
+    liveCaptionObservedAtMs: Date.now() - hooks.constants.CLEAN_CAPTION_STALE_MS - 10,
+    nowMs: Date.now(),
+  });
+
+  assert.equal(best.source, null);
+  assert.equal(best.text, '');
+});
+
+test('audio chunk timing contract exports chunk length >= 3.0 seconds', () => {
+  const hooks = loadYoutubeTimingHooks();
+  assert.equal(hooks.constants.AUDIO_CHUNK_SEC >= 3.0, true);
+  assert.equal(hooks.constants.AUDIO_CHUNK_OVERLAP_SEC >= 0.5, true);
+});

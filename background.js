@@ -898,6 +898,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   } else if (message.type === 'isweep_get_audio_caption_debug') {
     sendResponse({ ...audioCaptionDebug });
     return true;
+  }
 
   sendResponse({ ok: false, error: 'unknown message' });
   return; // unknown message handled
@@ -1330,10 +1331,12 @@ async function handleAudioCaptionChunk(videoId, audioChunk, mimeType, startSecon
       failure_reason: result.failure_reason || null,
     });
     const resultText = result.text || result.clean_text || result.cleaned_text || '';
-    if (resultText) {
+    if (result.status === 'ready' && resultText) {
       audioCaptionDebug.transcribeOkCount += 1;
-    } else {
+    } else if (!resultText) {
       audioCaptionDebug.transcribeEmptyCount += 1;
+    } else {
+      audioCaptionDebug.transcribeErrorCount += 1;
     }
     audioCaptionDebug.lastTranscribeStatus = result.status;
     audioCaptionDebug.lastTranscribeSource = result.source;

@@ -28,6 +28,28 @@ test('popup CC toggle sends exact audio caption start/stop messages', () => {
   assert.equal(popupSource.includes('isweep_stop_tab_audio_captions'), false);
 });
 
+test('popup supports local dev account shortcut and tokenless sync messaging', () => {
+  const popupHtml = fs.readFileSync(path.join(extensionRoot, 'popup.html'), 'utf8');
+  const popupSource = fs.readFileSync(path.join(extensionRoot, 'popup.js'), 'utf8');
+
+  assert.equal(popupHtml.includes('btnCreateLocalDevAccount'), true);
+  assert.equal(popupSource.includes('async function handleCreateLocalDevAccount'), true);
+  assert.equal(popupSource.includes('/auth/register'), true);
+  assert.equal(popupSource.includes('[TOKEN_KEY]'), true);
+  assert.equal(popupSource.includes('Captions active. Sign in to sync preferences.'), true);
+  assert.equal(popupSource.includes('setSyncPrefsAvailability(false)'), true);
+  assert.equal(popupSource.includes('invalid credentials for this backend'), true);
+  assert.equal(popupSource.includes('isweep_start_audio_captions'), true);
+});
+
+test('popup account links use preferred frontend base URL helper', () => {
+  const popupSource = fs.readFileSync(path.join(extensionRoot, 'popup.js'), 'utf8');
+  assert.equal(popupSource.includes('async function getPreferredFrontendBaseUrl'), true);
+  assert.equal(popupSource.includes('DEFAULT_LOCAL_FRONTEND_BASE'), true);
+  assert.equal(popupSource.includes('getPreferredFrontendBaseUrl()'), true);
+  assert.equal(popupSource.includes('Account.html#create'), true);
+});
+
 test('offscreen.js routes captured tab audio back to speakers', () => {
   const offscreenSource = fs.readFileSync(path.join(extensionRoot, 'offscreen.js'), 'utf8');
   // Verify audio routing: source → monitorGain → destination (for speakers)
@@ -45,4 +67,19 @@ test('background.js uses filter decision gating to prevent false mutes', () => {
   assert.equal(bgSource.includes('function shouldApplyFilterDecision'), true);
   // Verify it's used in handleAudioAhead
   assert.equal(bgSource.includes('shouldApplyFilterDecision(decision,'), true);
+});
+
+test('background captions can bootstrap local dev token when user token is missing', () => {
+  const bgSource = fs.readFileSync(path.join(extensionRoot, 'background.js'), 'utf8');
+  assert.equal(bgSource.includes('async function ensureLocalDevCaptionToken'), true);
+  assert.equal(bgSource.includes('LOCAL_DEV_CAPTION_EMAIL'), true);
+  assert.equal(bgSource.includes('token = await ensureLocalDevCaptionToken(backendUrl);'), true);
+  assert.equal(bgSource.includes('posting /captions/transcribe (caption-only)'), true);
+});
+
+test('background login success persists token for sync preferences', () => {
+  const bgSource = fs.readFileSync(path.join(extensionRoot, 'background.js'), 'utf8');
+  assert.equal(bgSource.includes("[TOKEN_KEY]: token"), true);
+  assert.equal(bgSource.includes("[STORAGE_KEYS.USER_ID]: userId"), true);
+  assert.equal(bgSource.includes('login success'), true);
 });

@@ -30,6 +30,8 @@ const AUDIO_CAPTIONS_BG_LOG = '[ISWEEP][AUDIO_CAPTIONS][BG]';
 
 const DEFAULT_BACKEND = 'http://127.0.0.1:5000';
 const OFFSCREEN_DOCUMENT_PATH = 'offscreen.html';
+const LOCAL_DEV_CAPTION_EMAIL = 'local-captions@isweep.dev';
+const LOCAL_DEV_CAPTION_PASSWORD = 'LocalCaption1089!';
 
 const markerCacheByVideoId = new Map();
 const AUDIO_CAPTION_DEDUPE_WINDOW_MS = 1600;
@@ -527,6 +529,54 @@ async function getAuthToken() {
     length: token ? String(token).length : 0,
   });
   return token;
+}
+
+async function ensureLocalDevCaptionToken(backendUrl) {
+  if (!isLocalBackendUrl(backendUrl)) return null;
+
+  const store = await chrome.storage.local.get(['isweepLocalCaptionToken']);
+  const cachedToken = store.isweepLocalCaptionToken;
+  if (cachedToken) return cachedToken;
+
+  const payload = {
+    email: LOCAL_DEV_CAPTION_EMAIL,
+    password: LOCAL_DEV_CAPTION_PASSWORD,
+  };
+
+  const signupResponse = await fetch(`${backendUrl}/auth/register`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+
+  if (signupResponse.ok) {
+    const signupBody = await signupResponse.json().catch(() => ({}));
+    const token = signupBody?.token || null;
+    if (token) {
+      await chrome.storage.local.set({ isweepLocalCaptionToken: token });
+      console.log('[ISWEEP][AUTH] local dev caption token created');
+      return token;
+    }
+  }
+
+  if (signupResponse.status === 409) {
+    const loginResponse = await fetch(`${backendUrl}/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (loginResponse.ok) {
+      const loginBody = await loginResponse.json().catch(() => ({}));
+      const token = loginBody?.token || null;
+      if (token) {
+        await chrome.storage.local.set({ isweepLocalCaptionToken: token });
+        console.log('[ISWEEP][AUTH] local dev caption token reused');
+        return token;
+      }
+    }
+  }
+
+  return null;
 }
 
 async function fetchPreferences(token, backendUrl) {
@@ -1036,7 +1086,10 @@ async function handleAudioCaptionChunk(videoId, audioChunk, mimeType, startSecon
     : normalizedStart;
 
   const backendUrl = await getBackendUrl();
-  const token = await getAuthToken();
+  let token = await getAuthToken();
+  if (!token) {
+    token = await ensureLocalDevCaptionToken(backendUrl);
+  }
   if (!token) {
     return { status: 'unavailable', events: [], failure_reason: 'missing_token' };
   }
@@ -1170,7 +1223,10 @@ async function handleAudioAhead(videoId, audioChunk, mimeType, startSeconds, end
     : normalizedStart;
 
   const backendUrl = await getBackendUrl();
-  const token = await getAuthToken();
+  let token = await getAuthToken();
+  if (!token) {
+    token = await ensureLocalDevCaptionToken(backendUrl);
+  }
   if (!token) {
     console.warn('[ISWEEP][BG][AUTH] missing token affected /captions/transcribe', {
       backendUrl,

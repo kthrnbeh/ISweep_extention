@@ -8,6 +8,7 @@
 // Default to public GitHub Pages; allow override via stored setting for local dev.
 const DEFAULT_FRONTEND_BASE = 'https://kthrnbeh.github.io/ISweep';
 const DEFAULT_BACKEND = 'http://127.0.0.1:5000';
+const DEFAULT_LOCAL_FRONTEND_BASE = 'http://127.0.0.1:5500/ISweep_frontend/docs';
 
 // Storage Keys
 const STORAGE_KEYS = {
@@ -89,6 +90,16 @@ async function getFrontendBaseUrl() {
   return base.replace(/\/+$/, ''); // Trim trailing slashes
 }
 
+async function getPreferredFrontendBaseUrl() {
+  const store = await chrome.storage.local.get([STORAGE_KEYS.FRONTEND_URL, STORAGE_KEYS.BACKEND_URL]);
+  const configuredFrontend = String(store[STORAGE_KEYS.FRONTEND_URL] || '').trim();
+  if (configuredFrontend) return configuredFrontend.replace(/\/+$/, '');
+
+  const backend = String(store[STORAGE_KEYS.BACKEND_URL] || DEFAULT_BACKEND).trim();
+  if (isLocalBackendUrl(backend)) return DEFAULT_LOCAL_FRONTEND_BASE;
+  return DEFAULT_FRONTEND_BASE;
+}
+
 async function saveAuthSession({ authData }) {
   const payload = {
     [STORAGE_KEYS.AUTH]: authData,   // Persist auth payload
@@ -105,6 +116,7 @@ const quickLoginForm = document.getElementById('quickLoginForm'); // Inline logi
 const emailInput = document.getElementById('emailInput'); // Email input field
 const passwordInput = document.getElementById('passwordInput'); // Password input field
 const btnQuickLogin = document.getElementById('btnQuickLogin'); // Submit quick login
+const btnCreateLocalDevAccount = document.getElementById('btnCreateLocalDevAccount');
 const btnCancelQuickLogin = document.getElementById('btnCancelQuickLogin'); // Cancel quick login
 
 // DOM Elements - Logged In State
@@ -306,6 +318,9 @@ function setupEventListeners() {
   btnLogin.addEventListener('click', handleLoginClick); // Open login flow
   linkCreateAccount.addEventListener('click', handleCreateAccountClick); // Open account creation
   btnQuickLogin.addEventListener('click', handleQuickLogin); // Submit quick login
+  if (btnCreateLocalDevAccount) {
+    btnCreateLocalDevAccount.addEventListener('click', handleCreateLocalDevAccount);
+  }
   btnCancelQuickLogin.addEventListener('click', handleCancelQuickLogin); // Cancel quick login
   
   // Logged In State Events
@@ -473,7 +488,7 @@ async function handleSyncPrefs(e) {
       console.warn(LOG_PREFIX, 'prefs sync failed', 'missing token');
       setSyncPrefsAvailability(false);
       if (signedInStatus) {
-        signedInStatus.textContent = 'Captions active. Sign in on the ISweep site to sync preferences.';
+        signedInStatus.textContent = 'Captions active. Sign in to sync preferences.';
       }
       return;
     }
@@ -521,13 +536,89 @@ function handleLoginClick(e) {
 function handleCreateAccountClick(e) {
   e.preventDefault();
   console.log(LOG_PREFIX, 'create account link clicked');
-  getFrontendBaseUrl()
+  getPreferredFrontendBaseUrl()
     .then((base) => {
       chrome.tabs.create({ url: `${base}/Account.html#create` });
     })
     .catch(() => {
-      chrome.tabs.create({ url: `${DEFAULT_FRONTEND_BASE}/Account.html#create` });
+      chrome.tabs.create({ url: `${DEFAULT_LOCAL_FRONTEND_BASE}/Account.html#create` });
     });
+}
+
+async function handleCreateLocalDevAccount() {
+  const email = emailInput.value.trim();
+  const password = (passwordInput?.value || '').trim();
+
+  if (!email || !email.includes('@') || !password) {
+    alert('Enter email and password to create a local dev account.');
+    return;
+  }
+
+  const backendUrl = await getBackendUrl();
+  if (!isLocalBackendUrl(backendUrl)) {
+    alert('Local dev account creation is only available with local backend.');
+    return;
+  }
+
+  const payload = { email, password };
+  let responseBody = null;
+  try {
+    const signup = await fetch(`${backendUrl}/auth/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+
+    if (signup.ok) {
+      responseBody = await signup.json().catch(() => ({}));
+    } else if (signup.status === 409) {
+      const login = await fetch(`${backendUrl}/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      if (!login.ok) {
+        const body = await login.text();
+        throw new Error(body || `status ${login.status}`);
+      }
+      responseBody = await login.json().catch(() => ({}));
+    } else {
+      const body = await signup.text();
+      throw new Error(body || `status ${signup.status}`);
+    }
+
+    if (!responseBody?.token) {
+      throw new Error('Missing token in auth response');
+    }
+
+    const displayName = email.split('@')[0];
+    const authData = {
+      email,
+      displayName,
+      initials: getInitials(displayName),
+      loggedInAt: new Date().toISOString(),
+    };
+
+    await chrome.storage.local.set({
+      [TOKEN_KEY]: responseBody.token,
+      [STORAGE_KEYS.USER_ID]: responseBody.user_id,
+      [STORAGE_KEYS.AUTH]: authData,
+      [STORAGE_KEYS.ENABLED]: true,
+    });
+    setSyncPrefsAvailability(true);
+    renderLoggedInState(authData, true);
+    if (signedInStatus) {
+      signedInStatus.textContent = 'Signed in. Preferences can now sync.';
+    }
+
+    quickLoginForm.classList.add('hidden');
+    emailInput.value = '';
+    if (passwordInput) passwordInput.value = '';
+    console.log(LOG_PREFIX, 'local dev account ready');
+  } catch (error) {
+    console.warn(LOG_PREFIX, 'local dev account creation failed', error?.message || error);
+    alert('Local dev account creation failed. Please verify backend and credentials.');
+  }
 }
 
 /**
@@ -635,7 +726,7 @@ async function handleResetFilters(e) {
 async function handleManageAccount(e) {
   e.preventDefault();
   console.log(LOG_PREFIX, 'opening Manage Account');
-  const base = await getFrontendBaseUrl();
+  const base = await getPreferredFrontendBaseUrl();
   chrome.tabs.create({ url: `${base}/Account.html` });
 }
 

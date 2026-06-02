@@ -1698,6 +1698,11 @@
           textPreview: lastAudioCaptionText.slice(0, 80),
           cached: message.cached === true,
         });
+        console.log('[ISWEEP][AUDIO_DIAG]', 'content script received audio_stt', {
+          source: lastAudioCaptionSource,
+          textLength: lastAudioCaptionText.length,
+          textPreview: lastAudioCaptionText.slice(0, 60),
+        });
         const startSec = Number.isFinite(Number(message.start_seconds)) ? Number(message.start_seconds) : (findVideo()?.currentTime || 0);
         const endSec = Number.isFinite(Number(message.end_seconds)) ? Number(message.end_seconds) : startSec + 2;
         // Caption-only: never call ingestAudioMarkers from audio caption messages.
@@ -1726,6 +1731,9 @@
             liveAudioCleanCaptions = normalizedAudioCaptions;
           }
           console.log(CLEAN_CC_LOG_PREFIX, 'overlay source', message.cached === true ? 'audio_stt_cached' : 'audio_stt_live');
+          if (!message.cached) {
+            console.log('[ISWEEP][AUDIO_DIAG]', 'overlay rendered audio_stt_live', { textLength: lastAudioCaptionText.length });
+          }
           updateCleanOverlay(lastCaptionText, findVideo()?.currentTime || 0);
         }
         sendResponse({ ok: true });

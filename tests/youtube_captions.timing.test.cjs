@@ -882,8 +882,8 @@ test('audio_stt hold keeps last partial caption visible until hold timeout', () 
   assert.equal(afterHold.text, '');
 });
 
-test('audio chunk timing contract exports chunk length 1.5 seconds with 0.35 overlap', () => {
+test('audio chunk timing contract exports chunk length 3.0 seconds with 0.5 overlap', () => {
   const hooks = loadYoutubeTimingHooks();
-  assert.equal(hooks.constants.AUDIO_CHUNK_SEC, 1.5);
-  assert.equal(hooks.constants.AUDIO_CHUNK_OVERLAP_SEC, 0.35);
+  assert.equal(hooks.constants.AUDIO_CHUNK_SEC, 3.0);
+  assert.equal(hooks.constants.AUDIO_CHUNK_OVERLAP_SEC, 0.5);
 });

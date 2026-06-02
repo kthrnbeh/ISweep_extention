@@ -39,7 +39,6 @@ const AUDIO_CAPTION_DEDUPE_WINDOW_MS = 1600;
 const AUDIO_CAPTION_FILTER_ACTIONS_ENABLED = false; // Caption-only mode: keep false until filtering is intentionally re-enabled
 const recentCaptionByText = new Map();
 const tabCaptureSessionByTabId = new Map();
-const lastAudioTranscriptByVideoId = new Map();
 let activeTabAudioCapture = null;
 let didLogBackendUrl = false;
 
@@ -78,39 +77,8 @@ const audioCaptionDebug = {
   overlayRenderedAt: null,
   totalLatencyMs: null,
   chunkWindowSec: null,
-  emptyTranscribeStreak: 0,
   updatedAt: Date.now(),
 };
-
-function dedupeOverlappingTranscript(previousText, incomingText) {
-  const prev = String(previousText || '').trim();
-  const next = String(incomingText || '').trim();
-  if (!next) return '';
-  if (!prev) return next;
-
-  const prevWords = prev.split(/\s+/).filter(Boolean);
-  const nextWords = next.split(/\s+/).filter(Boolean);
-  if (!prevWords.length || !nextWords.length) return next;
-
-  let bestOverlap = 0;
-  const maxOverlap = Math.min(prevWords.length, nextWords.length);
-  for (let size = maxOverlap; size >= 1; size -= 1) {
-    const prevTail = prevWords.slice(prevWords.length - size).join(' ').toLowerCase();
-    const nextHead = nextWords.slice(0, size).join(' ').toLowerCase();
-    if (prevTail === nextHead) {
-      bestOverlap = size;
-      break;
-    }
-  }
-
-  if (bestOverlap >= 2) {
-    return nextWords.slice(bestOverlap).join(' ').trim();
-  }
-  if (next.toLowerCase().startsWith(prev.toLowerCase())) {
-    return next.slice(prev.length).trim();
-  }
-  return next;
-}
 
 function normalizeCaptionTextForDedupe(text) {
   return String(text || '').toLowerCase().replace(/\s+/g, ' ').trim();
@@ -566,9 +534,6 @@ async function handleStartTabAudioCaptions() {
   }
   const tabId = Number(activeTab.id);
   const videoId = getYouTubeVideoIdFromUrl(activeTab.url);
-  if (videoId) {
-    lastAudioTranscriptByVideoId.delete(videoId);
-  }
   await postTabCaptureStatusToTab(tabId, 'starting', null);
 
   const start = await startTabAudioCapture(tabId, videoId);
@@ -582,9 +547,6 @@ async function handleStartTabAudioCaptions() {
 }
 
 async function handleStopTabAudioCaptions() {
-  if (activeTabAudioCapture?.videoId) {
-    lastAudioTranscriptByVideoId.delete(String(activeTabAudioCapture.videoId));
-  }
   await stopTabAudioCapture('captions_disabled');
   return { ok: true };
 }
@@ -869,7 +831,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true; // async
   } else if (message.type === 'isweep_start_audio_captions') {
     audioCaptionDebug.ccStartCount += 1;
-    audioCaptionDebug.emptyTranscribeStreak = 0;
     audioCaptionDebug.chunkStartedAt = null;
     audioCaptionDebug.chunkFlushedAt = null;
     audioCaptionDebug.transcribeStartedAt = null;
@@ -1438,42 +1399,13 @@ async function handleAudioCaptionChunk(videoId, audioChunk, mimeType, startSecon
       textPreview: typeof result.text === 'string' ? result.text.slice(0, 80) : '',
       failure_reason: result.failure_reason || null,
     });
-    const rawResultText = result.text || result.clean_text || result.cleaned_text || '';
-    const previousTranscript = lastAudioTranscriptByVideoId.get(cleanVideoId) || '';
-    const dedupedResultText = dedupeOverlappingTranscript(previousTranscript, rawResultText);
-    if (typeof result.text === 'string') result.text = dedupedResultText;
-    if (typeof result.clean_text === 'string') result.clean_text = dedupedResultText;
-    if (typeof result.cleaned_text === 'string') result.cleaned_text = dedupedResultText;
-    if (rawResultText) {
-      lastAudioTranscriptByVideoId.set(cleanVideoId, rawResultText);
-    }
-    const resultText = dedupedResultText;
+    const resultText = result.text || result.clean_text || result.cleaned_text || '';
     if (result.status === 'ready' && resultText) {
       audioCaptionDebug.transcribeOkCount += 1;
-      audioCaptionDebug.emptyTranscribeStreak = 0;
     } else if (!resultText) {
       audioCaptionDebug.transcribeEmptyCount += 1;
-      audioCaptionDebug.emptyTranscribeStreak += 1;
     } else {
       audioCaptionDebug.transcribeErrorCount += 1;
-      audioCaptionDebug.emptyTranscribeStreak = 0;
-    }
-    if (audioCaptionDebug.emptyTranscribeStreak >= 3) {
-      console.log(CAPTION_LATENCY_LOG, 'increasing chunk window after empty streak', {
-        videoId: cleanVideoId,
-        emptyTranscribeStreak: audioCaptionDebug.emptyTranscribeStreak,
-      });
-      try {
-        await chrome.runtime.sendMessage({
-          type: 'isweep_offscreen_set_caption_window',
-          chunkSec: 2.0,
-          overlapSec: 0.35,
-          reason: 'empty_streak',
-        });
-      } catch (_) {
-        // best effort
-      }
-      audioCaptionDebug.emptyTranscribeStreak = 0;
     }
     audioCaptionDebug.lastTranscribeStatus = result.status;
     audioCaptionDebug.lastTranscribeSource = result.source;

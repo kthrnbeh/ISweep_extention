@@ -61,12 +61,25 @@ test('offscreen.js routes captured tab audio back to speakers', () => {
   assert.equal(offscreenSource.includes("chromeMediaSource: 'tab'"), true);
 });
 
-test('offscreen chunk config uses low-latency 1.5s/0.35s with 1.0s min-send guard', () => {
+test('offscreen chunk config uses stable 3.0s/0.5s with 2.0s min-send guard', () => {
   const offscreenSource = fs.readFileSync(path.join(extensionRoot, 'offscreen.js'), 'utf8');
-  assert.equal(offscreenSource.includes('const AUDIO_CAPTION_CHUNK_SEC = 1.5;'), true);
-  assert.equal(offscreenSource.includes('const AUDIO_CAPTION_OVERLAP_SEC = 0.35;'), true);
-  assert.equal(offscreenSource.includes('const AUDIO_CAPTION_MIN_SEND_SEC = 1.0;'), true);
+  assert.equal(offscreenSource.includes('const AUDIO_CAPTION_CHUNK_SEC = 3.0;'), true);
+  assert.equal(offscreenSource.includes('const AUDIO_CAPTION_OVERLAP_SEC = 0.5;'), true);
+  assert.equal(offscreenSource.includes('const AUDIO_CAPTION_MIN_SEND_SEC = 2.0;'), true);
   assert.equal(offscreenSource.includes('if (!force && durationSec < AUDIO_CAPTION_MIN_SEND_SEC)'), true);
+  assert.equal(offscreenSource.includes('isweep_offscreen_set_caption_window'), false);
+});
+
+test('youtube captions script enforces CC-mode captions-only safety guard', () => {
+  const youtubeSource = fs.readFileSync(path.join(extensionRoot, 'youtube_captions.js'), 'utf8');
+  assert.equal(
+    youtubeSource.includes('[CC] mode is captions-only: do not fire marker-based mute/skip/fast-forward actions.'),
+    true
+  );
+  assert.equal(
+    youtubeSource.includes('[CC] mode uses audio STT captions only. Keep native timing state updated but skip decision/muting behavior.'),
+    true
+  );
 });
 
 test('background.js uses filter decision gating to prevent false mutes', () => {

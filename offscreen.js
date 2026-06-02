@@ -10,12 +10,9 @@ const LOG_PREFIX = '[ISWEEP][AUDIO_CAPTIONS][OFFSCREEN]';
 const AUDIO_DIAG_LOG = '[ISWEEP][AUDIO_DIAG]';
 const CAPTION_LATENCY_LOG = '[ISWEEP][CAPTION_LATENCY]';
 const AUDIO_SAMPLE_RATE = 16000;
-const AUDIO_CAPTION_CHUNK_SEC = 1.5;
-const AUDIO_CAPTION_OVERLAP_SEC = 0.35;
-const AUDIO_CAPTION_MIN_SEND_SEC = 1.0;
-
-let activeChunkSec = AUDIO_CAPTION_CHUNK_SEC;
-let activeChunkOverlapSec = AUDIO_CAPTION_OVERLAP_SEC;
+const AUDIO_CAPTION_CHUNK_SEC = 3.0;
+const AUDIO_CAPTION_OVERLAP_SEC = 0.5;
+const AUDIO_CAPTION_MIN_SEND_SEC = 2.0;
 
 let offscreenChunkEmitCount = 0;
 let audioChunkStartedAtMs = 0;
@@ -136,7 +133,7 @@ async function flushAudioChunk(options = {}) {
     : Date.now();
   const chunkFlushedAt = Date.now();
 
-  const overlapSamples = Math.floor(Math.max(activeChunkOverlapSec, 0) * sampleRate);
+  const overlapSamples = Math.floor(Math.max(AUDIO_CAPTION_OVERLAP_SEC, 0) * sampleRate);
   const overlapBufs = takeTailSampleBuffers(bufs, overlapSamples);
   const overlapCount = overlapBufs.reduce((n, b) => n + b.length, 0);
   const overlapDurationSec = sampleRate > 0 ? overlapCount / sampleRate : 0;
@@ -163,8 +160,8 @@ async function flushAudioChunk(options = {}) {
     chunkStartedAt,
     chunkFlushedAt,
     chunkDurationMs: Math.max(chunkFlushedAt - chunkStartedAt, 0),
-    chunkWindowSec: activeChunkSec,
-    overlapSec: activeChunkOverlapSec,
+    chunkWindowSec: AUDIO_CAPTION_CHUNK_SEC,
+    overlapSec: AUDIO_CAPTION_OVERLAP_SEC,
     forced: force,
   });
   if (offscreenChunkEmitCount % 10 === 0) {
@@ -175,7 +172,7 @@ async function flushAudioChunk(options = {}) {
       sampleCount: bufs.reduce((n, b) => n + b.length, 0),
       chunkStartedAt,
       chunkFlushedAt,
-      chunkWindowSec: activeChunkSec,
+      chunkWindowSec: AUDIO_CAPTION_CHUNK_SEC,
     }).catch(() => {});
   }
   await safeRuntimeSendMessage({
@@ -189,8 +186,8 @@ async function flushAudioChunk(options = {}) {
     end_seconds: endSec,
     chunk_started_at: chunkStartedAt,
     chunk_flushed_at: chunkFlushedAt,
-    chunk_window_sec: activeChunkSec,
-    chunk_overlap_sec: activeChunkOverlapSec,
+    chunk_window_sec: AUDIO_CAPTION_CHUNK_SEC,
+    chunk_overlap_sec: AUDIO_CAPTION_OVERLAP_SEC,
   }).catch(() => {});
 }
 
@@ -279,7 +276,9 @@ async function startCapture(streamId, videoId) {
     }
     audioSampleBufs.push(new Float32Array(event.data));
     const total = audioSampleBufs.reduce((n, b) => n + b.length, 0);
-    const required = (audioChunkWarm ? (activeChunkSec - activeChunkOverlapSec) : activeChunkSec) * audioCtx.sampleRate;
+    const required = (audioChunkWarm
+      ? (AUDIO_CAPTION_CHUNK_SEC - AUDIO_CAPTION_OVERLAP_SEC)
+      : AUDIO_CAPTION_CHUNK_SEC) * audioCtx.sampleRate;
     if (total >= required) {
       flushAudioChunk();
     }
@@ -324,24 +323,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     stopCapture(message.reason || 'stopped')
       .then(() => sendResponse({ ok: true }))
       .catch(() => sendResponse({ ok: true }));
-    return true;
-  }
-
-  if (message?.type === 'isweep_offscreen_set_caption_window') {
-    const nextChunkSec = Number(message.chunkSec);
-    const nextOverlapSec = Number(message.overlapSec);
-    if (Number.isFinite(nextChunkSec) && nextChunkSec >= AUDIO_CAPTION_MIN_SEND_SEC && nextChunkSec <= 3.0) {
-      activeChunkSec = nextChunkSec;
-    }
-    if (Number.isFinite(nextOverlapSec) && nextOverlapSec >= 0 && nextOverlapSec < activeChunkSec) {
-      activeChunkOverlapSec = nextOverlapSec;
-    }
-    console.log(CAPTION_LATENCY_LOG, 'caption chunk window updated', {
-      chunkSec: activeChunkSec,
-      overlapSec: activeChunkOverlapSec,
-      reason: String(message.reason || 'runtime_update'),
-    });
-    sendResponse({ ok: true, chunkSec: activeChunkSec, overlapSec: activeChunkOverlapSec });
     return true;
   }
 

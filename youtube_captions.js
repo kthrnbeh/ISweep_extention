@@ -298,8 +298,8 @@
   const AUDIO_CAPTURE_LOG_PREFIX = '[ISWEEP][AUDIO_CAPTIONS]';
   const WORD_MUTE_LOG_PREFIX = '[ISWEEP][WORD_MUTE]';
   const FALLBACK_LOG_PREFIX = '[ISWEEP][FALLBACK]';
-  const AUDIO_CHUNK_SEC = 1.5;
-  const AUDIO_CHUNK_OVERLAP_SEC = 0.35;
+  const AUDIO_CHUNK_SEC = 3.0;
+  const AUDIO_CHUNK_OVERLAP_SEC = 0.5;
   const AUDIO_SAMPLE_RATE = 16000;    // 16 kHz mono — standard for speech recognition
   const MARKER_SCHEDULER_INTERVAL_MS = 100;
   const AUDIO_PREROLL_MS = 120;
@@ -353,36 +353,6 @@
   let lastAudioCaptionText = '';
   let lastAudioCaptionReceivedAtMs = 0;
   let lastAudioCaptionFailureReason = null;
-  let lastAudioTranscriptText = '';
-  function dedupeOverlappingTranscript(previousText, incomingText) {
-    const prev = String(previousText || '').trim();
-    const next = String(incomingText || '').trim();
-    if (!next) return '';
-    if (!prev) return next;
-
-    const prevWords = prev.split(/\s+/).filter(Boolean);
-    const nextWords = next.split(/\s+/).filter(Boolean);
-    if (!prevWords.length || !nextWords.length) return next;
-
-    let bestOverlap = 0;
-    const maxOverlap = Math.min(prevWords.length, nextWords.length);
-    for (let size = maxOverlap; size >= 1; size -= 1) {
-      const prevTail = prevWords.slice(prevWords.length - size).join(' ').toLowerCase();
-      const nextHead = nextWords.slice(0, size).join(' ').toLowerCase();
-      if (prevTail === nextHead) {
-        bestOverlap = size;
-        break;
-      }
-    }
-
-    if (bestOverlap >= 2) {
-      return nextWords.slice(bestOverlap).join(' ').trim();
-    }
-    if (next.toLowerCase().startsWith(prev.toLowerCase())) {
-      return next.slice(prev.length).trim();
-    }
-    return next;
-  }
 
 
   // Audio watch-ahead state.
@@ -897,6 +867,9 @@
     const nowSec = video.currentTime || 0;
 
     updateCleanOverlay(lastCaptionText, nowSec);
+
+    // [CC] mode is captions-only: do not fire marker-based mute/skip/fast-forward actions.
+    if (cleanCaptionSettings.cleanCaptionsEnabled) return;
 
     if (!markerEvents.length) return;
 
@@ -1724,11 +1697,7 @@
       }
       if (message?.type === 'isweep_audio_caption_text') {
         const nextSource = message.cached === true ? 'audio_stt_cached' : (message.source || 'audio_stt_live');
-        const incomingText = String(message.clean_text || message.cleaned_text || message.text || '').trim();
-        const dedupedText = dedupeOverlappingTranscript(lastAudioTranscriptText, incomingText);
-        if (incomingText) {
-          lastAudioTranscriptText = incomingText;
-        }
+        const dedupedText = String(message.clean_text || message.cleaned_text || message.text || '').trim();
         lastAudioCaptionFailureReason = message.failure_reason || null;
         if (dedupedText) {
           lastAudioCaptionSource = nextSource;
@@ -2922,6 +2891,10 @@
   }
 
   async function sendCaption(payload) {
+    if (cleanCaptionSettings.cleanCaptionsEnabled) {
+      return;
+    }
+
     // Send latest caption text (plus duration hint) to background for /event analysis.
     if (!markerSchedulerInterval) {
       markerFallbackReason = 'scheduler_not_started';
@@ -3034,6 +3007,14 @@
     // Record when a live caption was last seen so getBestCleanCaptionText can ignore stale caption text.
     const now = video && typeof video.currentTime === 'number' ? video.currentTime : null; // Current playback time
     const prevDuration = captionStartTime !== null && now !== null ? Math.max(0, now - captionStartTime) : null; // Duration of previous caption
+
+    if (cleanCaptionSettings.cleanCaptionsEnabled) {
+      // [CC] mode uses audio STT captions only. Keep native timing state updated but skip decision/muting behavior.
+      lastCaptionText = text;
+      captionStartTime = now;
+      return;
+    }
+
     let appliedMuteThisCycle = false;
     lastLiveCaptionObservedAtMs = Date.now();
 

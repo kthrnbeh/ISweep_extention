@@ -945,7 +945,7 @@ test('handleAudioCaptionChunk does not forward empty transcript text', async () 
   assert.equal(result.text === '' || result.text === null, true, 'empty transcript must not become non-empty');
 });
 
-test('handleAudioCaptionChunk deduplicates overlapping transcript chunks', async () => {
+test('handleAudioCaptionChunk preserves transcript text per chunk', async () => {
   const bg = loadBackgroundContext();
   bg.getAuthToken = async () => 'token';
   bg.getBackendUrl = async () => 'http://127.0.0.1:5000';
@@ -970,7 +970,7 @@ test('handleAudioCaptionChunk deduplicates overlapping transcript chunks', async
   const second = await bg.handleAudioCaptionChunk('vid-overlap', 'ZmFrZQ==', 'audio/wav', 1.0, 2.5);
 
   assert.equal(first.text, 'we should move right now');
-  assert.equal(second.text, 'please');
+  assert.equal(second.text, 'should move right now please');
 });
 
 test('isweep_get_audio_caption_debug returns counters and diag messages update state', async () => {

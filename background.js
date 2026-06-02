@@ -27,6 +27,7 @@ const LOG_PREFIX = '[ISWEEP][BG]';
 const CAPTION_LOG_PREFIX = '[ISWEEP][CAPTIONS]';
 const MARKER_LOG_PREFIX = '[ISWEEP][MARKERS]';
 const AUDIO_CAPTIONS_BG_LOG = '[ISWEEP][AUDIO_CAPTIONS][BG]';
+const CAPTION_LATENCY_LOG = '[ISWEEP][CAPTION_LATENCY]';
 
 const DEFAULT_BACKEND = 'http://127.0.0.1:5000';
 const OFFSCREEN_DOCUMENT_PATH = 'offscreen.html';
@@ -38,6 +39,7 @@ const AUDIO_CAPTION_DEDUPE_WINDOW_MS = 1600;
 const AUDIO_CAPTION_FILTER_ACTIONS_ENABLED = false; // Caption-only mode: keep false until filtering is intentionally re-enabled
 const recentCaptionByText = new Map();
 const tabCaptureSessionByTabId = new Map();
+const lastAudioTranscriptByVideoId = new Map();
 let activeTabAudioCapture = null;
 let didLogBackendUrl = false;
 
@@ -68,8 +70,47 @@ const audioCaptionDebug = {
   lastTextLength: 0,
   lastTextPreview: '',
   lastError: null,
+  chunkStartedAt: null,
+  chunkFlushedAt: null,
+  transcribeStartedAt: null,
+  transcribeFinishedAt: null,
+  relaySentAt: null,
+  overlayRenderedAt: null,
+  totalLatencyMs: null,
+  chunkWindowSec: null,
+  emptyTranscribeStreak: 0,
   updatedAt: Date.now(),
 };
+
+function dedupeOverlappingTranscript(previousText, incomingText) {
+  const prev = String(previousText || '').trim();
+  const next = String(incomingText || '').trim();
+  if (!next) return '';
+  if (!prev) return next;
+
+  const prevWords = prev.split(/\s+/).filter(Boolean);
+  const nextWords = next.split(/\s+/).filter(Boolean);
+  if (!prevWords.length || !nextWords.length) return next;
+
+  let bestOverlap = 0;
+  const maxOverlap = Math.min(prevWords.length, nextWords.length);
+  for (let size = maxOverlap; size >= 1; size -= 1) {
+    const prevTail = prevWords.slice(prevWords.length - size).join(' ').toLowerCase();
+    const nextHead = nextWords.slice(0, size).join(' ').toLowerCase();
+    if (prevTail === nextHead) {
+      bestOverlap = size;
+      break;
+    }
+  }
+
+  if (bestOverlap >= 2) {
+    return nextWords.slice(bestOverlap).join(' ').trim();
+  }
+  if (next.toLowerCase().startsWith(prev.toLowerCase())) {
+    return next.slice(prev.length).trim();
+  }
+  return next;
+}
 
 function normalizeCaptionTextForDedupe(text) {
   return String(text || '').toLowerCase().replace(/\s+/g, ' ').trim();
@@ -448,6 +489,7 @@ async function relayAudioCaptionResultToTab(result) {
     cleaned_text: result?.cleaned_text || null,
     words: Array.isArray(result?.words) ? result.words : [],
     cached: result?.cached === true,
+    latency: result?.latency && typeof result.latency === 'object' ? result.latency : null,
   };
 
   audioCaptionDebug.relayAttemptCount += 1;
@@ -464,6 +506,10 @@ async function relayAudioCaptionResultToTab(result) {
 
   try {
     await trySend(tabId);
+    audioCaptionDebug.relaySentAt = Date.now();
+    if (result?.latency && typeof result.latency === 'object') {
+      result.latency.relaySentAt = audioCaptionDebug.relaySentAt;
+    }
     audioCaptionDebug.relaySuccessCount += 1;
     audioCaptionDebug.updatedAt = Date.now();
     console.log(AUDIO_DIAG_LOG, 'relay success', { tabId });
@@ -520,6 +566,9 @@ async function handleStartTabAudioCaptions() {
   }
   const tabId = Number(activeTab.id);
   const videoId = getYouTubeVideoIdFromUrl(activeTab.url);
+  if (videoId) {
+    lastAudioTranscriptByVideoId.delete(videoId);
+  }
   await postTabCaptureStatusToTab(tabId, 'starting', null);
 
   const start = await startTabAudioCapture(tabId, videoId);
@@ -533,6 +582,9 @@ async function handleStartTabAudioCaptions() {
 }
 
 async function handleStopTabAudioCaptions() {
+  if (activeTabAudioCapture?.videoId) {
+    lastAudioTranscriptByVideoId.delete(String(activeTabAudioCapture.videoId));
+  }
   await stopTabAudioCapture('captions_disabled');
   return { ok: true };
 }
@@ -817,6 +869,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true; // async
   } else if (message.type === 'isweep_start_audio_captions') {
     audioCaptionDebug.ccStartCount += 1;
+    audioCaptionDebug.emptyTranscribeStreak = 0;
+    audioCaptionDebug.chunkStartedAt = null;
+    audioCaptionDebug.chunkFlushedAt = null;
+    audioCaptionDebug.transcribeStartedAt = null;
+    audioCaptionDebug.transcribeFinishedAt = null;
+    audioCaptionDebug.relaySentAt = null;
+    audioCaptionDebug.overlayRenderedAt = null;
+    audioCaptionDebug.totalLatencyMs = null;
     audioCaptionDebug.updatedAt = Date.now();
     console.log(AUDIO_DIAG_LOG, 'cc start requested', { count: audioCaptionDebug.ccStartCount });
     handleStartTabAudioCaptions().then(sendResponse);
@@ -842,8 +902,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return;
   } else if (message.type === 'isweep_audio_caption_chunk') {
     const bgChunkVideoId = String(message.video_id || activeTabAudioCapture?.videoId || '').trim();
+    const chunkStartedAt = Number.isFinite(Number(message.chunk_started_at)) ? Number(message.chunk_started_at) : null;
+    const chunkFlushedAt = Number.isFinite(Number(message.chunk_flushed_at)) ? Number(message.chunk_flushed_at) : null;
     audioCaptionDebug.bgChunkReceivedCount += 1;
     audioCaptionDebug.lastVideoId = bgChunkVideoId || audioCaptionDebug.lastVideoId;
+    audioCaptionDebug.chunkStartedAt = chunkStartedAt;
+    audioCaptionDebug.chunkFlushedAt = chunkFlushedAt;
+    audioCaptionDebug.chunkWindowSec = Number.isFinite(Number(message.chunk_window_sec)) ? Number(message.chunk_window_sec) : audioCaptionDebug.chunkWindowSec;
+    audioCaptionDebug.lastChunkBytes = typeof message.audio_chunk === 'string' ? message.audio_chunk.length : 0;
     audioCaptionDebug.updatedAt = Date.now();
     console.log(AUDIO_DIAG_LOG, 'background chunk received', {
       videoId: bgChunkVideoId,
@@ -864,7 +930,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       message.end_seconds,
       message.audio,
       message.sampleRate,
-      message.channels
+      message.channels,
+      {
+        chunkStartedAt,
+        chunkFlushedAt,
+        chunkWindowSec: audioCaptionDebug.chunkWindowSec,
+      }
     ).then(async (result) => {
       await relayAudioCaptionResultToTab(result);
       sendResponse(result);
@@ -887,11 +958,30 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       console.log(AUDIO_DIAG_LOG, 'offscreen worklet loaded');
     } else if (stage === 'offscreen_chunk_emitted') {
       audioCaptionDebug.offscreenChunkCount += 1;
+      audioCaptionDebug.chunkStartedAt = Number.isFinite(Number(message.chunkStartedAt))
+        ? Number(message.chunkStartedAt)
+        : audioCaptionDebug.chunkStartedAt;
+      audioCaptionDebug.chunkFlushedAt = Number.isFinite(Number(message.chunkFlushedAt))
+        ? Number(message.chunkFlushedAt)
+        : audioCaptionDebug.chunkFlushedAt;
+      audioCaptionDebug.chunkWindowSec = Number.isFinite(Number(message.chunkWindowSec))
+        ? Number(message.chunkWindowSec)
+        : audioCaptionDebug.chunkWindowSec;
       audioCaptionDebug.updatedAt = Date.now();
       console.log(AUDIO_DIAG_LOG, 'offscreen chunk emitted', {
         chunkCount: message.chunkCount,
         sampleCount: message.sampleCount,
       });
+    } else if (stage === 'overlay_rendered') {
+      audioCaptionDebug.overlayRenderedAt = Number.isFinite(Number(message.overlayRenderedAt))
+        ? Number(message.overlayRenderedAt)
+        : Date.now();
+      audioCaptionDebug.totalLatencyMs = Number.isFinite(Number(message.totalLatencyMs))
+        ? Number(message.totalLatencyMs)
+        : (Number.isFinite(Number(audioCaptionDebug.chunkStartedAt))
+          ? Math.max(audioCaptionDebug.overlayRenderedAt - Number(audioCaptionDebug.chunkStartedAt), 0)
+          : null);
+      audioCaptionDebug.updatedAt = Date.now();
     }
     sendResponse({ ok: true });
     return;
@@ -1202,7 +1292,7 @@ async function handleMarkerAnalyze(videoId, forceRefresh = false) {
 // Caption-only audio transcription. Posts to /captions/transcribe and forwards transcript text.
 // Never calls handleCaptionDecision, never calls /event, never creates filter events.
 // Guard: AUDIO_CAPTION_FILTER_ACTIONS_ENABLED must remain false until filtering is intentionally re-enabled.
-async function handleAudioCaptionChunk(videoId, audioChunk, mimeType, startSeconds, endSeconds, audioSamples = null, sampleRate = null, channels = null) {
+async function handleAudioCaptionChunk(videoId, audioChunk, mimeType, startSeconds, endSeconds, audioSamples = null, sampleRate = null, channels = null, chunkMeta = null) {
   if (!AUDIO_CAPTION_FILTER_ACTIONS_ENABLED) {
     // captions only; never call /event here
   }
@@ -1221,6 +1311,8 @@ async function handleAudioCaptionChunk(videoId, audioChunk, mimeType, startSecon
   const normalizedEnd = Number.isFinite(Number(endSeconds))
     ? Math.max(Number(endSeconds), normalizedStart)
     : normalizedStart;
+  const chunkStartedAt = Number.isFinite(Number(chunkMeta?.chunkStartedAt)) ? Number(chunkMeta.chunkStartedAt) : null;
+  const chunkFlushedAt = Number.isFinite(Number(chunkMeta?.chunkFlushedAt)) ? Number(chunkMeta.chunkFlushedAt) : null;
 
   const backendUrl = await getBackendUrl();
   let token = await getAuthToken();
@@ -1234,8 +1326,10 @@ async function handleAudioCaptionChunk(videoId, audioChunk, mimeType, startSecon
   let res;
   let responseBody = '';
   try {
+    const transcribeStartedAt = Date.now();
     audioCaptionDebug.transcribePostCount += 1;
     audioCaptionDebug.lastBackendUrl = backendUrl;
+    audioCaptionDebug.transcribeStartedAt = transcribeStartedAt;
     audioCaptionDebug.updatedAt = Date.now();
     console.log(AUDIO_DIAG_LOG, 'posting transcribe', {
       videoId: cleanVideoId,
@@ -1262,6 +1356,8 @@ async function handleAudioCaptionChunk(videoId, audioChunk, mimeType, startSecon
         mime_type: mimeType || 'audio/wav',
         chunk_start_seconds: normalizedStart,
         chunk_end_seconds: normalizedEnd,
+        chunk_started_at: chunkStartedAt,
+        chunk_flushed_at: chunkFlushedAt,
         start_seconds: normalizedStart,
         end_seconds: normalizedEnd,
         audio: hasSampleArray ? audioSamples : undefined,
@@ -1295,6 +1391,7 @@ async function handleAudioCaptionChunk(videoId, audioChunk, mimeType, startSecon
     }
 
     const payload = responseBody ? JSON.parse(responseBody) : {};
+    const transcribeFinishedAt = Date.now();
     const normalizedCleanedCaptions = Array.isArray(payload.cleaned_captions)
       ? payload.cleaned_captions
       : (Array.isArray(payload.clean_captions) ? payload.clean_captions : []);
@@ -1322,6 +1419,17 @@ async function handleAudioCaptionChunk(videoId, audioChunk, mimeType, startSecon
       words: Array.isArray(payload.words) ? payload.words : [],
       failure_reason: payload.failure_reason || payload.reason || null,
       cached: payload.cached === true,
+      latency: {
+        chunkStartedAt,
+        chunkFlushedAt,
+        transcribeStartedAt,
+        transcribeFinishedAt,
+        relaySentAt: null,
+        overlayRenderedAt: null,
+        totalLatencyMs: Number.isFinite(Number(chunkStartedAt))
+          ? Math.max(transcribeFinishedAt - Number(chunkStartedAt), 0)
+          : null,
+      },
     };
     console.log(AUDIO_CAPTIONS_BG_LOG, 'caption transcribe response', {
       videoId: cleanVideoId,
@@ -1330,18 +1438,51 @@ async function handleAudioCaptionChunk(videoId, audioChunk, mimeType, startSecon
       textPreview: typeof result.text === 'string' ? result.text.slice(0, 80) : '',
       failure_reason: result.failure_reason || null,
     });
-    const resultText = result.text || result.clean_text || result.cleaned_text || '';
+    const rawResultText = result.text || result.clean_text || result.cleaned_text || '';
+    const previousTranscript = lastAudioTranscriptByVideoId.get(cleanVideoId) || '';
+    const dedupedResultText = dedupeOverlappingTranscript(previousTranscript, rawResultText);
+    if (typeof result.text === 'string') result.text = dedupedResultText;
+    if (typeof result.clean_text === 'string') result.clean_text = dedupedResultText;
+    if (typeof result.cleaned_text === 'string') result.cleaned_text = dedupedResultText;
+    if (rawResultText) {
+      lastAudioTranscriptByVideoId.set(cleanVideoId, rawResultText);
+    }
+    const resultText = dedupedResultText;
     if (result.status === 'ready' && resultText) {
       audioCaptionDebug.transcribeOkCount += 1;
+      audioCaptionDebug.emptyTranscribeStreak = 0;
     } else if (!resultText) {
       audioCaptionDebug.transcribeEmptyCount += 1;
+      audioCaptionDebug.emptyTranscribeStreak += 1;
     } else {
       audioCaptionDebug.transcribeErrorCount += 1;
+      audioCaptionDebug.emptyTranscribeStreak = 0;
+    }
+    if (audioCaptionDebug.emptyTranscribeStreak >= 3) {
+      console.log(CAPTION_LATENCY_LOG, 'increasing chunk window after empty streak', {
+        videoId: cleanVideoId,
+        emptyTranscribeStreak: audioCaptionDebug.emptyTranscribeStreak,
+      });
+      try {
+        await chrome.runtime.sendMessage({
+          type: 'isweep_offscreen_set_caption_window',
+          chunkSec: 2.0,
+          overlapSec: 0.35,
+          reason: 'empty_streak',
+        });
+      } catch (_) {
+        // best effort
+      }
+      audioCaptionDebug.emptyTranscribeStreak = 0;
     }
     audioCaptionDebug.lastTranscribeStatus = result.status;
     audioCaptionDebug.lastTranscribeSource = result.source;
     audioCaptionDebug.lastTextLength = resultText.length;
     audioCaptionDebug.lastTextPreview = resultText.slice(0, 60);
+    audioCaptionDebug.transcribeFinishedAt = transcribeFinishedAt;
+    audioCaptionDebug.totalLatencyMs = Number.isFinite(Number(chunkStartedAt))
+      ? Math.max(transcribeFinishedAt - Number(chunkStartedAt), 0)
+      : null;
     audioCaptionDebug.updatedAt = Date.now();
     console.log(AUDIO_DIAG_LOG, 'transcribe result', {
       status: result.status,
@@ -1349,6 +1490,15 @@ async function handleAudioCaptionChunk(videoId, audioChunk, mimeType, startSecon
       textLength: resultText.length,
       textPreview: resultText.slice(0, 60),
       failure_reason: result.failure_reason || null,
+    });
+    console.log(CAPTION_LATENCY_LOG, 'transcribe complete', {
+      videoId: cleanVideoId,
+      chunkStartedAt,
+      chunkFlushedAt,
+      transcribeStartedAt,
+      transcribeFinishedAt,
+      totalLatencyMs: result.latency.totalLatencyMs,
+      textLength: resultText.length,
     });
     if (result.source === 'audio_stt_disabled' || result.failure_reason === 'stt_disabled') {
       console.warn(AUDIO_CAPTIONS_LOG, 'STT disabled', {

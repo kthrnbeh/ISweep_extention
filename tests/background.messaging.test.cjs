@@ -945,6 +945,34 @@ test('handleAudioCaptionChunk does not forward empty transcript text', async () 
   assert.equal(result.text === '' || result.text === null, true, 'empty transcript must not become non-empty');
 });
 
+test('handleAudioCaptionChunk deduplicates overlapping transcript chunks', async () => {
+  const bg = loadBackgroundContext();
+  bg.getAuthToken = async () => 'token';
+  bg.getBackendUrl = async () => 'http://127.0.0.1:5000';
+
+  let call = 0;
+  bg.fetch = async (url) => {
+    if (!String(url).includes('/captions/transcribe')) {
+      return { ok: true, status: 200, json: async () => ({ status: 'ok', stt_enabled: true }), text: async () => '{}' };
+    }
+    call += 1;
+    const text = call === 1
+      ? 'we should move right now'
+      : 'should move right now please';
+    return {
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ status: 'ready', source: 'audio_stt', events: [], text }),
+    };
+  };
+
+  const first = await bg.handleAudioCaptionChunk('vid-overlap', 'ZmFrZQ==', 'audio/wav', 0, 1.5);
+  const second = await bg.handleAudioCaptionChunk('vid-overlap', 'ZmFrZQ==', 'audio/wav', 1.0, 2.5);
+
+  assert.equal(first.text, 'we should move right now');
+  assert.equal(second.text, 'please');
+});
+
 test('isweep_get_audio_caption_debug returns counters and diag messages update state', async () => {
   const bg = loadBackgroundContext();
 
@@ -953,6 +981,10 @@ test('isweep_get_audio_caption_debug returns counters and diag messages update s
   assert.equal(typeof before.offscreenStreamReadyCount, 'number');
   assert.equal(typeof before.offscreenWorkletLoadedCount, 'number');
   assert.equal(typeof before.offscreenChunkCount, 'number');
+  assert.equal('chunkStartedAt' in before, true);
+  assert.equal('transcribeStartedAt' in before, true);
+  assert.equal('overlayRenderedAt' in before, true);
+  assert.equal('totalLatencyMs' in before, true);
 
   await bg.__sendRuntimeMessage({ type: 'isweep_audio_diag', stage: 'offscreen_stream_ready', videoId: 'v1' });
   await bg.__sendRuntimeMessage({ type: 'isweep_audio_diag', stage: 'offscreen_worklet_loaded' });

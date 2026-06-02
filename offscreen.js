@@ -8,13 +8,17 @@ and relays WAV chunks back to background for /captions/transcribe.
 
 const LOG_PREFIX = '[ISWEEP][AUDIO_CAPTIONS][OFFSCREEN]';
 const AUDIO_DIAG_LOG = '[ISWEEP][AUDIO_DIAG]';
+const CAPTION_LATENCY_LOG = '[ISWEEP][CAPTION_LATENCY]';
 const AUDIO_SAMPLE_RATE = 16000;
-// 3-second chunks give faster-whisper enough context for stable transcription.
-// Overlap keeps words at chunk boundaries from being dropped.
-const AUDIO_CHUNK_SEC = 3.0;
-const AUDIO_CHUNK_OVERLAP_SEC = 0.5;
+const AUDIO_CAPTION_CHUNK_SEC = 1.5;
+const AUDIO_CAPTION_OVERLAP_SEC = 0.35;
+const AUDIO_CAPTION_MIN_SEND_SEC = 1.0;
+
+let activeChunkSec = AUDIO_CAPTION_CHUNK_SEC;
+let activeChunkOverlapSec = AUDIO_CAPTION_OVERLAP_SEC;
 
 let offscreenChunkEmitCount = 0;
+let audioChunkStartedAtMs = 0;
 
 console.log(LOG_PREFIX, 'loaded');
 safeRuntimeSendMessage({ type: 'isweep_audio_diag', stage: 'offscreen_loaded' }).catch(() => {});
@@ -112,24 +116,33 @@ function takeTailSampleBuffers(sampleBufs, tailSamples) {
   return out;
 }
 
-async function flushAudioChunk() {
+async function flushAudioChunk(options = {}) {
   if (!running || !audioCtx || !audioSampleBufs.length) return;
+  const force = options.force === true;
   const bufs = audioSampleBufs.slice();
   const sampleRate = audioCtx.sampleRate;
   const sampleCount = bufs.reduce((n, b) => n + b.length, 0);
   const durationSec = sampleRate > 0 ? sampleCount / sampleRate : 0;
+  if (!force && durationSec < AUDIO_CAPTION_MIN_SEND_SEC) {
+    return;
+  }
   const startSec = audioChunkStartSec;
   let endSec = startSec + durationSec;
   if (!(endSec > startSec)) {
     endSec = startSec + 0.05;
   }
+  const chunkStartedAt = Number.isFinite(Number(audioChunkStartedAtMs)) && audioChunkStartedAtMs > 0
+    ? Number(audioChunkStartedAtMs)
+    : Date.now();
+  const chunkFlushedAt = Date.now();
 
-  const overlapSamples = Math.floor(Math.max(AUDIO_CHUNK_OVERLAP_SEC, 0) * sampleRate);
+  const overlapSamples = Math.floor(Math.max(activeChunkOverlapSec, 0) * sampleRate);
   const overlapBufs = takeTailSampleBuffers(bufs, overlapSamples);
   const overlapCount = overlapBufs.reduce((n, b) => n + b.length, 0);
   const overlapDurationSec = sampleRate > 0 ? overlapCount / sampleRate : 0;
   audioSampleBufs = overlapBufs;
   audioChunkStartSec = Math.max(endSec - overlapDurationSec, 0);
+  audioChunkStartedAtMs = Math.max(chunkFlushedAt - Math.round(overlapDurationSec * 1000), 0);
   audioChunkWarm = true;
 
   const wavBuf = encodeWAV(bufs, sampleRate);
@@ -145,12 +158,24 @@ async function flushAudioChunk() {
     videoId: activeVideoId,
     chunkCount: offscreenChunkEmitCount,
   });
+  console.log(CAPTION_LATENCY_LOG, 'chunk flushed', {
+    videoId: activeVideoId,
+    chunkStartedAt,
+    chunkFlushedAt,
+    chunkDurationMs: Math.max(chunkFlushedAt - chunkStartedAt, 0),
+    chunkWindowSec: activeChunkSec,
+    overlapSec: activeChunkOverlapSec,
+    forced: force,
+  });
   if (offscreenChunkEmitCount % 10 === 0) {
     safeRuntimeSendMessage({
       type: 'isweep_audio_diag',
       stage: 'offscreen_chunk_emitted',
       chunkCount: offscreenChunkEmitCount,
       sampleCount: bufs.reduce((n, b) => n + b.length, 0),
+      chunkStartedAt,
+      chunkFlushedAt,
+      chunkWindowSec: activeChunkSec,
     }).catch(() => {});
   }
   await safeRuntimeSendMessage({
@@ -162,10 +187,21 @@ async function flushAudioChunk() {
     mime_type: 'audio/wav',
     start_seconds: startSec,
     end_seconds: endSec,
+    chunk_started_at: chunkStartedAt,
+    chunk_flushed_at: chunkFlushedAt,
+    chunk_window_sec: activeChunkSec,
+    chunk_overlap_sec: activeChunkOverlapSec,
   }).catch(() => {});
 }
 
 async function stopCapture(reason = 'stopped') {
+  if (running && audioCtx && audioSampleBufs.length) {
+    try {
+      await flushAudioChunk({ force: true });
+    } catch (_) {
+      // best-effort final flush
+    }
+  }
   running = false;
   if (audioProcessor) {
     try { audioProcessor.disconnect(); } catch (_) {}
@@ -184,6 +220,7 @@ async function stopCapture(reason = 'stopped') {
   audioSampleBufs = [];
   audioChunkWarm = false;
   audioChunkStartSec = 0;
+  audioChunkStartedAtMs = 0;
   activeVideoId = '';
   console.log(LOG_PREFIX, 'tab capture stopped', { reason });
 }
@@ -237,9 +274,12 @@ async function startCapture(streamId, videoId) {
 
   workletNode.port.onmessage = (event) => {
     if (!running || !audioCtx) return;
+    if (!audioSampleBufs.length) {
+      audioChunkStartedAtMs = Date.now();
+    }
     audioSampleBufs.push(new Float32Array(event.data));
     const total = audioSampleBufs.reduce((n, b) => n + b.length, 0);
-    const required = (audioChunkWarm ? (AUDIO_CHUNK_SEC - AUDIO_CHUNK_OVERLAP_SEC) : AUDIO_CHUNK_SEC) * audioCtx.sampleRate;
+    const required = (audioChunkWarm ? (activeChunkSec - activeChunkOverlapSec) : activeChunkSec) * audioCtx.sampleRate;
     if (total >= required) {
       flushAudioChunk();
     }
@@ -256,6 +296,7 @@ async function startCapture(streamId, videoId) {
   audioProcessor = workletNode;
   running = true;
   audioChunkStartSec = 0;
+  audioChunkStartedAtMs = Date.now();
   audioChunkWarm = false;
   audioSampleBufs = [];
 }
@@ -283,6 +324,24 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     stopCapture(message.reason || 'stopped')
       .then(() => sendResponse({ ok: true }))
       .catch(() => sendResponse({ ok: true }));
+    return true;
+  }
+
+  if (message?.type === 'isweep_offscreen_set_caption_window') {
+    const nextChunkSec = Number(message.chunkSec);
+    const nextOverlapSec = Number(message.overlapSec);
+    if (Number.isFinite(nextChunkSec) && nextChunkSec >= AUDIO_CAPTION_MIN_SEND_SEC && nextChunkSec <= 3.0) {
+      activeChunkSec = nextChunkSec;
+    }
+    if (Number.isFinite(nextOverlapSec) && nextOverlapSec >= 0 && nextOverlapSec < activeChunkSec) {
+      activeChunkOverlapSec = nextOverlapSec;
+    }
+    console.log(CAPTION_LATENCY_LOG, 'caption chunk window updated', {
+      chunkSec: activeChunkSec,
+      overlapSec: activeChunkOverlapSec,
+      reason: String(message.reason || 'runtime_update'),
+    });
+    sendResponse({ ok: true, chunkSec: activeChunkSec, overlapSec: activeChunkOverlapSec });
     return true;
   }
 

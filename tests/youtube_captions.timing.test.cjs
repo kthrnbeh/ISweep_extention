@@ -852,8 +852,38 @@ test('empty audio_stt text does not replace with live_masked fallback', () => {
   assert.equal(best.text, '');
 });
 
-test('audio chunk timing contract exports chunk length >= 3.0 seconds', () => {
+test('audio_stt hold keeps last partial caption visible until hold timeout', () => {
   const hooks = loadYoutubeTimingHooks();
-  assert.equal(hooks.constants.AUDIO_CHUNK_SEC >= 3.0, true);
-  assert.equal(hooks.constants.AUDIO_CHUNK_OVERLAP_SEC >= 0.5, true);
+  const nowMs = 10000;
+  const beforeHold = hooks.getBestCleanCaptionText('', 30.0, {
+    preCachedAudioCaptions: [],
+    liveAudioCaptions: [],
+    preAnalyzedCaptions: [],
+    markerEntries: [],
+    audioCaptionText: 'partial phrase',
+    audioCaptionSource: 'audio_stt_live',
+    audioCaptionObservedAtMs: nowMs - 1200,
+    nowMs,
+  });
+  assert.equal(beforeHold.source, 'audio_stt_live');
+  assert.equal(beforeHold.text, 'partial phrase');
+
+  const afterHold = hooks.getBestCleanCaptionText('', 30.0, {
+    preCachedAudioCaptions: [],
+    liveAudioCaptions: [],
+    preAnalyzedCaptions: [],
+    markerEntries: [],
+    audioCaptionText: 'partial phrase',
+    audioCaptionSource: 'audio_stt_live',
+    audioCaptionObservedAtMs: nowMs - hooks.constants.AUDIO_STT_HOLD_MS - 50,
+    nowMs,
+  });
+  assert.equal(afterHold.source, null);
+  assert.equal(afterHold.text, '');
+});
+
+test('audio chunk timing contract exports chunk length 1.5 seconds with 0.35 overlap', () => {
+  const hooks = loadYoutubeTimingHooks();
+  assert.equal(hooks.constants.AUDIO_CHUNK_SEC, 1.5);
+  assert.equal(hooks.constants.AUDIO_CHUNK_OVERLAP_SEC, 0.35);
 });

@@ -290,6 +290,7 @@
   const CLEAN_CC_LOG_PREFIX = '[ISWEEP][CAPTIONS]';
   const CLEAN_CC_PLACEHOLDER_TEXT = 'ISweep captions listening...';
   const CLEAN_CC_STT_DISABLED_TEXT = 'ISweep Captions need speech-to-text enabled.';
+  const CAPTION_LATENCY_LOG = '[ISWEEP][CAPTION_LATENCY]';
 
   // Audio watch-ahead constants.
   const AUDIO_AHEAD_LOG_PREFIX = '[ISWEEP][AUDIO_AHEAD]';
@@ -297,8 +298,8 @@
   const AUDIO_CAPTURE_LOG_PREFIX = '[ISWEEP][AUDIO_CAPTIONS]';
   const WORD_MUTE_LOG_PREFIX = '[ISWEEP][WORD_MUTE]';
   const FALLBACK_LOG_PREFIX = '[ISWEEP][FALLBACK]';
-  const AUDIO_CHUNK_SEC = 3.0;
-  const AUDIO_CHUNK_OVERLAP_SEC = 0.5;
+  const AUDIO_CHUNK_SEC = 1.5;
+  const AUDIO_CHUNK_OVERLAP_SEC = 0.35;
   const AUDIO_SAMPLE_RATE = 16000;    // 16 kHz mono — standard for speech recognition
   const MARKER_SCHEDULER_INTERVAL_MS = 100;
   const AUDIO_PREROLL_MS = 120;
@@ -310,6 +311,7 @@
   const ISWEEP_YOUTUBE_DOM_FALLBACK_ENABLED = false;
   const ISWEEP_CONTENT_SCRIPT_AUDIO_AHEAD_ENABLED = false;
   const AUDIO_STT_MIN_VISIBLE_MS = 1200;
+  const AUDIO_STT_HOLD_MS = 2500;
   const AUDIO_STT_STALE_MS = 3500;
 
   // Marker engine state. Future audio watch-ahead analyzers can emit the same marker shape.
@@ -351,6 +353,37 @@
   let lastAudioCaptionText = '';
   let lastAudioCaptionReceivedAtMs = 0;
   let lastAudioCaptionFailureReason = null;
+  let lastAudioTranscriptText = '';
+  function dedupeOverlappingTranscript(previousText, incomingText) {
+    const prev = String(previousText || '').trim();
+    const next = String(incomingText || '').trim();
+    if (!next) return '';
+    if (!prev) return next;
+
+    const prevWords = prev.split(/\s+/).filter(Boolean);
+    const nextWords = next.split(/\s+/).filter(Boolean);
+    if (!prevWords.length || !nextWords.length) return next;
+
+    let bestOverlap = 0;
+    const maxOverlap = Math.min(prevWords.length, nextWords.length);
+    for (let size = maxOverlap; size >= 1; size -= 1) {
+      const prevTail = prevWords.slice(prevWords.length - size).join(' ').toLowerCase();
+      const nextHead = nextWords.slice(0, size).join(' ').toLowerCase();
+      if (prevTail === nextHead) {
+        bestOverlap = size;
+        break;
+      }
+    }
+
+    if (bestOverlap >= 2) {
+      return nextWords.slice(bestOverlap).join(' ').trim();
+    }
+    if (next.toLowerCase().startsWith(prev.toLowerCase())) {
+      return next.slice(prev.length).trim();
+    }
+    return next;
+  }
+
 
   // Audio watch-ahead state.
   let audioCtx = null;
@@ -614,6 +647,7 @@
     const nowMs = Number.isFinite(Number(options.nowMs)) ? Number(options.nowMs) : Date.now();
     const lookaheadSec = Number.isFinite(Number(options.lookaheadSec)) ? Number(options.lookaheadSec) : CLEAN_CAPTION_LOOKAHEAD_SEC;
     const staleMs = Number.isFinite(Number(options.staleMs)) ? Number(options.staleMs) : CLEAN_CAPTION_STALE_MS;
+    const audioHoldMs = Number.isFinite(Number(options.audioHoldMs)) ? Number(options.audioHoldMs) : AUDIO_STT_HOLD_MS;
 
     const preAnalyzedEntry = findTimedCleanCaptionEntry(preAnalyzedCaptions, nowSec, lookaheadSec);
     if (preAnalyzedEntry) {
@@ -666,7 +700,7 @@
     const normalizedAudioSource = String(audioCaptionSource || '').toLowerCase();
     const freshAudioText = String(audioCaptionText || '').trim();
     const audioAgeMs = audioCaptionObservedAtMs > 0 ? nowMs - audioCaptionObservedAtMs : Number.POSITIVE_INFINITY;
-    if (freshAudioText && normalizedAudioSource.startsWith('audio_stt') && audioAgeMs <= staleMs) {
+    if (freshAudioText && normalizedAudioSource.startsWith('audio_stt') && audioAgeMs <= audioHoldMs) {
       return {
         text: freshAudioText,
         source: normalizedAudioSource.includes('cached') ? 'audio_stt_cached' : 'audio_stt_live',
@@ -1689,25 +1723,33 @@
         return true;
       }
       if (message?.type === 'isweep_audio_caption_text') {
-        lastAudioCaptionSource = message.cached === true ? 'audio_stt_cached' : (message.source || 'audio_stt_live');
-        lastAudioCaptionText = String(message.text || message.clean_text || message.cleaned_text || '').trim();
-        lastAudioCaptionReceivedAtMs = Date.now();
+        const nextSource = message.cached === true ? 'audio_stt_cached' : (message.source || 'audio_stt_live');
+        const incomingText = String(message.clean_text || message.cleaned_text || message.text || '').trim();
+        const dedupedText = dedupeOverlappingTranscript(lastAudioTranscriptText, incomingText);
+        if (incomingText) {
+          lastAudioTranscriptText = incomingText;
+        }
         lastAudioCaptionFailureReason = message.failure_reason || null;
+        if (dedupedText) {
+          lastAudioCaptionSource = nextSource;
+          lastAudioCaptionText = dedupedText;
+          lastAudioCaptionReceivedAtMs = Date.now();
+        }
         console.log(CLEAN_CC_LOG_PREFIX, 'audio_stt message received', {
-          source: lastAudioCaptionSource,
-          textPreview: lastAudioCaptionText.slice(0, 80),
+          source: nextSource,
+          textPreview: dedupedText.slice(0, 80),
           cached: message.cached === true,
         });
         console.log('[ISWEEP][AUDIO_DIAG]', 'content script received audio_stt', {
-          source: lastAudioCaptionSource,
-          textLength: lastAudioCaptionText.length,
-          textPreview: lastAudioCaptionText.slice(0, 60),
+          source: nextSource,
+          textLength: dedupedText.length,
+          textPreview: dedupedText.slice(0, 60),
         });
         const startSec = Number.isFinite(Number(message.start_seconds)) ? Number(message.start_seconds) : (findVideo()?.currentTime || 0);
         const endSec = Number.isFinite(Number(message.end_seconds)) ? Number(message.end_seconds) : startSec + 2;
         // Caption-only: never call ingestAudioMarkers from audio caption messages.
         // ingestAudioMarkers may only be called when a dedicated filtering mode is enabled.
-        if (!lastAudioCaptionText) {
+        if (!dedupedText) {
           // Empty STT text: do not clear or update the overlay.
           console.log(CLEAN_CC_LOG_PREFIX, 'ignored empty audio_stt message');
           sendResponse({ ok: true });
@@ -1719,8 +1761,8 @@
           cleaned_captions: message.cleaned_captions,
           clean_captions: message.clean_captions,
           text: message.text,
-          clean_text: message.clean_text,
-          cleaned_text: message.cleaned_text,
+          clean_text: dedupedText,
+          cleaned_text: dedupedText,
           words: message.words,
           cached: message.cached === true,
         }, startSec, endSec);
@@ -1732,7 +1774,30 @@
           }
           console.log(CLEAN_CC_LOG_PREFIX, 'overlay source', message.cached === true ? 'audio_stt_cached' : 'audio_stt_live');
           if (!message.cached) {
+            const overlayRenderedAt = Date.now();
+            const latency = message.latency && typeof message.latency === 'object' ? { ...message.latency } : {};
+            latency.overlayRenderedAt = overlayRenderedAt;
+            latency.totalLatencyMs = Number.isFinite(Number(latency.chunkStartedAt))
+              ? Math.max(overlayRenderedAt - Number(latency.chunkStartedAt), 0)
+              : null;
             console.log('[ISWEEP][AUDIO_DIAG]', 'overlay rendered audio_stt_live', { textLength: lastAudioCaptionText.length });
+            console.log(CAPTION_LATENCY_LOG, 'overlay rendered', {
+              source: nextSource,
+              textLength: lastAudioCaptionText.length,
+              chunkStartedAt: latency.chunkStartedAt || null,
+              chunkFlushedAt: latency.chunkFlushedAt || null,
+              transcribeStartedAt: latency.transcribeStartedAt || null,
+              transcribeFinishedAt: latency.transcribeFinishedAt || null,
+              relaySentAt: latency.relaySentAt || null,
+              overlayRenderedAt,
+              totalLatencyMs: latency.totalLatencyMs,
+            });
+            safeRuntimeSendMessage({
+              type: 'isweep_audio_diag',
+              stage: 'overlay_rendered',
+              overlayRenderedAt,
+              totalLatencyMs: latency.totalLatencyMs,
+            }).catch(() => {});
           }
           updateCleanOverlay(lastCaptionText, findVideo()?.currentTime || 0);
         }
@@ -3051,6 +3116,7 @@
         AUDIO_MARKER_FALLBACK_SKIP_WINDOW_SEC,
         AUDIO_CHUNK_SEC,
         AUDIO_CHUNK_OVERLAP_SEC,
+        AUDIO_STT_HOLD_MS,
         AUDIO_PREROLL_MS,
       },
       setCachedPreferences: (prefs) => {

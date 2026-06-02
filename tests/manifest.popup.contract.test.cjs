@@ -61,6 +61,14 @@ test('offscreen.js routes captured tab audio back to speakers', () => {
   assert.equal(offscreenSource.includes("chromeMediaSource: 'tab'"), true);
 });
 
+test('offscreen chunk config uses low-latency 1.5s/0.35s with 1.0s min-send guard', () => {
+  const offscreenSource = fs.readFileSync(path.join(extensionRoot, 'offscreen.js'), 'utf8');
+  assert.equal(offscreenSource.includes('const AUDIO_CAPTION_CHUNK_SEC = 1.5;'), true);
+  assert.equal(offscreenSource.includes('const AUDIO_CAPTION_OVERLAP_SEC = 0.35;'), true);
+  assert.equal(offscreenSource.includes('const AUDIO_CAPTION_MIN_SEND_SEC = 1.0;'), true);
+  assert.equal(offscreenSource.includes('if (!force && durationSec < AUDIO_CAPTION_MIN_SEND_SEC)'), true);
+});
+
 test('background.js uses filter decision gating to prevent false mutes', () => {
   const bgSource = fs.readFileSync(path.join(extensionRoot, 'background.js'), 'utf8');
   // Verify shouldApplyFilterDecision helper exists

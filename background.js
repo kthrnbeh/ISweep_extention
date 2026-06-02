@@ -41,6 +41,36 @@ const tabCaptureSessionByTabId = new Map();
 let activeTabAudioCapture = null;
 let didLogBackendUrl = false;
 
+const AUDIO_DIAG_LOG = '[ISWEEP][AUDIO_DIAG]';
+
+// In-memory diagnostic counters covering every stage of the audio caption pipeline.
+// Reset each time [CC] starts. Query via isweep_get_audio_caption_debug message.
+const audioCaptionDebug = {
+  ccStartCount: 0,
+  offscreenStartCount: 0,
+  offscreenStreamReadyCount: 0,
+  offscreenWorkletLoadedCount: 0,
+  offscreenChunkCount: 0,
+  bgChunkReceivedCount: 0,
+  transcribePostCount: 0,
+  transcribeOkCount: 0,
+  transcribeEmptyCount: 0,
+  transcribeErrorCount: 0,
+  relayAttemptCount: 0,
+  relaySuccessCount: 0,
+  relayFailureCount: 0,
+  lastBackendUrl: null,
+  lastTabId: null,
+  lastVideoId: null,
+  lastChunkBytes: 0,
+  lastTranscribeStatus: null,
+  lastTranscribeSource: null,
+  lastTextLength: 0,
+  lastTextPreview: '',
+  lastError: null,
+  updatedAt: Date.now(),
+};
+
 function normalizeCaptionTextForDedupe(text) {
   return String(text || '').toLowerCase().replace(/\s+/g, ' ').trim();
 }
@@ -312,6 +342,11 @@ async function requestTabCaptureStreamId(tabId) {
 }
 
 async function startTabAudioCapture(tabId, videoId) {
+  audioCaptionDebug.offscreenStartCount += 1;
+  audioCaptionDebug.lastTabId = tabId;
+  audioCaptionDebug.lastVideoId = videoId || null;
+  audioCaptionDebug.updatedAt = Date.now();
+  console.log(AUDIO_DIAG_LOG, 'offscreen start sent', { tabId, videoId });
   console.log(AUDIO_CAPTIONS_BG_LOG, 'start requested', { tabId, videoId });
   console.log('[ISWEEP][AUDIO_CAPTIONS] start requested', { tabId, videoId });
   console.log('[ISWEEP][AUDIO_CAPTIONS] tab capture start requested', { tabId, videoId });

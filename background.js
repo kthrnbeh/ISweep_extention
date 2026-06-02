@@ -419,32 +419,83 @@ async function relayAudioCaptionResultToTab(result) {
       }
     } catch (_) {}
   }
-  if (!Number.isFinite(tabId)) return false;
-  try {
-    const relaySource = result?.source === 'audio_stt_disabled'
+  if (!Number.isFinite(tabId)) {
+    audioCaptionDebug.relayAttemptCount += 1;
+    audioCaptionDebug.relayFailureCount += 1;
+    audioCaptionDebug.lastError = 'relay_no_tab_id';
+    audioCaptionDebug.updatedAt = Date.now();
+    console.warn(AUDIO_DIAG_LOG, 'relay failed', { reason: 'no_tab_id' });
+    return false;
+  }
+
+  const relayMsg = {
+    type: 'isweep_audio_caption_text',
+    text: result?.text || result?.clean_text || result?.cleaned_text || '',
+    source: result?.source === 'audio_stt_disabled'
       ? 'audio_stt_disabled'
       : (result?.source === 'silence'
         ? 'silence'
-        : (result?.cached === true ? 'audio_stt_cached' : 'audio_stt_live'));
-    await chrome.tabs.sendMessage(tabId, {
-      type: 'isweep_audio_caption_text',
-      text: result?.text || result?.clean_text || result?.cleaned_text || '',
-      source: relaySource,
-      confidence: Number.isFinite(Number(result?.confidence)) ? Number(result.confidence) : 0,
-      status: result?.status || 'error',
-      failure_reason: result?.failure_reason || null,
-      start_seconds: result?.start_seconds,
-      end_seconds: result?.end_seconds,
-      events: Array.isArray(result?.events) ? result.events : [],
-      cleaned_captions: Array.isArray(result?.cleaned_captions) ? result.cleaned_captions : [],
-      clean_captions: Array.isArray(result?.clean_captions) ? result.clean_captions : [],
-      clean_text: result?.clean_text || null,
-      cleaned_text: result?.cleaned_text || null,
-      words: Array.isArray(result?.words) ? result.words : [],
-      cached: result?.cached === true,
-    });
+        : (result?.cached === true ? 'audio_stt_cached' : 'audio_stt_live')),
+    confidence: Number.isFinite(Number(result?.confidence)) ? Number(result.confidence) : 0,
+    status: result?.status || 'error',
+    failure_reason: result?.failure_reason || null,
+    start_seconds: result?.start_seconds,
+    end_seconds: result?.end_seconds,
+    events: Array.isArray(result?.events) ? result.events : [],
+    cleaned_captions: Array.isArray(result?.cleaned_captions) ? result.cleaned_captions : [],
+    clean_captions: Array.isArray(result?.clean_captions) ? result.clean_captions : [],
+    clean_text: result?.clean_text || null,
+    cleaned_text: result?.cleaned_text || null,
+    words: Array.isArray(result?.words) ? result.words : [],
+    cached: result?.cached === true,
+  };
+
+  audioCaptionDebug.relayAttemptCount += 1;
+  console.log(AUDIO_DIAG_LOG, 'relay attempt', {
+    tabId,
+    source: relayMsg.source,
+    textLength: relayMsg.text.length,
+    textPreview: relayMsg.text.slice(0, 60),
+  });
+
+  const trySend = async (tid) => {
+    await chrome.tabs.sendMessage(tid, relayMsg);
+  };
+
+  try {
+    await trySend(tabId);
+    audioCaptionDebug.relaySuccessCount += 1;
+    audioCaptionDebug.updatedAt = Date.now();
+    console.log(AUDIO_DIAG_LOG, 'relay success', { tabId });
     return true;
-  } catch (_) {
+  } catch (err) {
+    const errText = String(err?.message || err || '');
+    const isNoReceiver = /receiving end does not exist|could not establish connection/i.test(errText);
+    if (isNoReceiver && chrome.scripting?.executeScript) {
+      // Content script not loaded — try to inject youtube_captions.js, then retry once.
+      try {
+        await chrome.scripting.executeScript({
+          target: { tabId },
+          files: ['youtube_captions.js'],
+        });
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        await trySend(tabId);
+        audioCaptionDebug.relaySuccessCount += 1;
+        audioCaptionDebug.updatedAt = Date.now();
+        console.log(AUDIO_DIAG_LOG, 'relay success after inject', { tabId });
+        return true;
+      } catch (retryErr) {
+        audioCaptionDebug.relayFailureCount += 1;
+        audioCaptionDebug.lastError = `relay_inject_failed: ${String(retryErr?.message || retryErr).slice(0, 80)}`;
+        audioCaptionDebug.updatedAt = Date.now();
+        console.warn(AUDIO_DIAG_LOG, 'relay failed', { reason: 'inject_and_retry_failed', tabId, err: audioCaptionDebug.lastError });
+        return false;
+      }
+    }
+    audioCaptionDebug.relayFailureCount += 1;
+    audioCaptionDebug.lastError = `relay_send_failed: ${errText.slice(0, 80)}`;
+    audioCaptionDebug.updatedAt = Date.now();
+    console.warn(AUDIO_DIAG_LOG, 'relay failed', { reason: errText.slice(0, 80), tabId });
     return false;
   }
 }
@@ -765,6 +816,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     handleCaptionRuntimeStatus().then(sendResponse);
     return true; // async
   } else if (message.type === 'isweep_start_audio_captions') {
+    audioCaptionDebug.ccStartCount += 1;
+    audioCaptionDebug.updatedAt = Date.now();
+    console.log(AUDIO_DIAG_LOG, 'cc start requested', { count: audioCaptionDebug.ccStartCount });
     handleStartTabAudioCaptions().then(sendResponse);
     return true; // async
   } else if (message.type === 'isweep_stop_audio_captions') {
@@ -787,14 +841,23 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     sendResponse({ ok: true });
     return;
   } else if (message.type === 'isweep_audio_caption_chunk') {
+    const bgChunkVideoId = String(message.video_id || activeTabAudioCapture?.videoId || '').trim();
+    audioCaptionDebug.bgChunkReceivedCount += 1;
+    audioCaptionDebug.lastVideoId = bgChunkVideoId || audioCaptionDebug.lastVideoId;
+    audioCaptionDebug.updatedAt = Date.now();
+    console.log(AUDIO_DIAG_LOG, 'background chunk received', {
+      videoId: bgChunkVideoId,
+      startSeconds: message.start_seconds,
+      endSeconds: message.end_seconds,
+      bgChunkReceivedCount: audioCaptionDebug.bgChunkReceivedCount,
+    });
     console.log(AUDIO_CAPTIONS_BG_LOG, 'chunk received from offscreen', {
-      videoId: String(message.video_id || activeTabAudioCapture?.videoId || '').trim(),
+      videoId: bgChunkVideoId,
       startSeconds: message.start_seconds,
       endSeconds: message.end_seconds,
     });
-    const targetVideoId = String(message.video_id || activeTabAudioCapture?.videoId || '').trim();
     handleAudioCaptionChunk(
-      targetVideoId,
+      bgChunkVideoId,
       message.audio_chunk,
       message.mime_type,
       message.start_seconds,
@@ -807,7 +870,34 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       sendResponse(result);
     });
     return true; // async
-  }
+  } else if (message.type === 'isweep_audio_diag') {
+    // Lifecycle updates from offscreen.js
+    const stage = message.stage || '';
+    if (stage === 'offscreen_loaded') {
+      console.log(AUDIO_DIAG_LOG, 'offscreen loaded');
+    } else if (stage === 'offscreen_start_received') {
+      console.log(AUDIO_DIAG_LOG, 'offscreen start sent', { videoId: message.videoId });
+    } else if (stage === 'offscreen_stream_ready') {
+      audioCaptionDebug.offscreenStreamReadyCount += 1;
+      audioCaptionDebug.updatedAt = Date.now();
+      console.log(AUDIO_DIAG_LOG, 'offscreen stream ready', { videoId: message.videoId });
+    } else if (stage === 'offscreen_worklet_loaded') {
+      audioCaptionDebug.offscreenWorkletLoadedCount += 1;
+      audioCaptionDebug.updatedAt = Date.now();
+      console.log(AUDIO_DIAG_LOG, 'offscreen worklet loaded');
+    } else if (stage === 'offscreen_chunk_emitted') {
+      audioCaptionDebug.offscreenChunkCount += 1;
+      audioCaptionDebug.updatedAt = Date.now();
+      console.log(AUDIO_DIAG_LOG, 'offscreen chunk emitted', {
+        chunkCount: message.chunkCount,
+        sampleCount: message.sampleCount,
+      });
+    }
+    sendResponse({ ok: true });
+    return;
+  } else if (message.type === 'isweep_get_audio_caption_debug') {
+    sendResponse({ ...audioCaptionDebug });
+    return true;
 
   sendResponse({ ok: false, error: 'unknown message' });
   return; // unknown message handled
@@ -1143,6 +1233,13 @@ async function handleAudioCaptionChunk(videoId, audioChunk, mimeType, startSecon
   let res;
   let responseBody = '';
   try {
+    audioCaptionDebug.transcribePostCount += 1;
+    audioCaptionDebug.lastBackendUrl = backendUrl;
+    audioCaptionDebug.updatedAt = Date.now();
+    console.log(AUDIO_DIAG_LOG, 'posting transcribe', {
+      videoId: cleanVideoId,
+      transcribePostCount: audioCaptionDebug.transcribePostCount,
+    });
     console.log(AUDIO_CAPTIONS_BG_LOG, 'posting /captions/transcribe (caption-only)', {
       videoId: cleanVideoId,
       startSeconds: normalizedStart,
@@ -1232,6 +1329,24 @@ async function handleAudioCaptionChunk(videoId, audioChunk, mimeType, startSecon
       textPreview: typeof result.text === 'string' ? result.text.slice(0, 80) : '',
       failure_reason: result.failure_reason || null,
     });
+    const resultText = result.text || result.clean_text || result.cleaned_text || '';
+    if (resultText) {
+      audioCaptionDebug.transcribeOkCount += 1;
+    } else {
+      audioCaptionDebug.transcribeEmptyCount += 1;
+    }
+    audioCaptionDebug.lastTranscribeStatus = result.status;
+    audioCaptionDebug.lastTranscribeSource = result.source;
+    audioCaptionDebug.lastTextLength = resultText.length;
+    audioCaptionDebug.lastTextPreview = resultText.slice(0, 60);
+    audioCaptionDebug.updatedAt = Date.now();
+    console.log(AUDIO_DIAG_LOG, 'transcribe result', {
+      status: result.status,
+      source: result.source,
+      textLength: resultText.length,
+      textPreview: resultText.slice(0, 60),
+      failure_reason: result.failure_reason || null,
+    });
     if (result.source === 'audio_stt_disabled' || result.failure_reason === 'stt_disabled') {
       console.warn(AUDIO_CAPTIONS_LOG, 'STT disabled', {
         videoId: cleanVideoId,
@@ -1244,6 +1359,10 @@ async function handleAudioCaptionChunk(videoId, audioChunk, mimeType, startSecon
     const failureReason = /Failed to fetch|NetworkError|fetch/i.test(errorText)
       ? 'backend_not_running'
       : 'analyze_exception';
+    audioCaptionDebug.transcribeErrorCount += 1;
+    audioCaptionDebug.lastError = errorText.slice(0, 80);
+    audioCaptionDebug.updatedAt = Date.now();
+    console.warn(AUDIO_DIAG_LOG, 'transcribe result', { status: 'error', failure_reason: failureReason, err: errorText.slice(0, 80) });
     return { status: 'error', source: null, events: [], failure_reason: failureReason };
   }
 }

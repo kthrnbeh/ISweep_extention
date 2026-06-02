@@ -7,11 +7,17 @@ and relays WAV chunks back to background for /captions/transcribe.
 */
 
 const LOG_PREFIX = '[ISWEEP][AUDIO_CAPTIONS][OFFSCREEN]';
+const AUDIO_DIAG_LOG = '[ISWEEP][AUDIO_DIAG]';
 const AUDIO_SAMPLE_RATE = 16000;
-const AUDIO_CHUNK_SEC = 1.0; // Reduced from 2.0 for lower latency
-const AUDIO_CHUNK_OVERLAP_SEC = 0.25; // Reduced from 0.5 for lower latency
+// 3-second chunks give faster-whisper enough context for stable transcription.
+// Overlap keeps words at chunk boundaries from being dropped.
+const AUDIO_CHUNK_SEC = 3.0;
+const AUDIO_CHUNK_OVERLAP_SEC = 0.5;
+
+let offscreenChunkEmitCount = 0;
 
 console.log(LOG_PREFIX, 'loaded');
+safeRuntimeSendMessage({ type: 'isweep_audio_diag', stage: 'offscreen_loaded' }).catch(() => {});
 
 function isExtensionContextInvalidatedError(error) {
   const text = String(error?.message || error || '').trim().toLowerCase();
@@ -129,11 +135,24 @@ async function flushAudioChunk() {
   const wavBuf = encodeWAV(bufs, sampleRate);
   const audioChunk = arrayBufferToBase64(wavBuf);
 
+  offscreenChunkEmitCount += 1;
   console.log(LOG_PREFIX, 'chunk emitted', {
     videoId: activeVideoId,
     start_seconds: startSec,
     end_seconds: endSec,
   });
+  console.log(AUDIO_DIAG_LOG, 'offscreen chunk emitted', {
+    videoId: activeVideoId,
+    chunkCount: offscreenChunkEmitCount,
+  });
+  if (offscreenChunkEmitCount % 10 === 0) {
+    safeRuntimeSendMessage({
+      type: 'isweep_audio_diag',
+      stage: 'offscreen_chunk_emitted',
+      chunkCount: offscreenChunkEmitCount,
+      sampleCount: bufs.reduce((n, b) => n + b.length, 0),
+    }).catch(() => {});
+  }
   await safeRuntimeSendMessage({
     type: 'isweep_audio_caption_chunk',
     video_id: activeVideoId,
@@ -173,6 +192,7 @@ async function startCapture(streamId, videoId) {
   await stopCapture('restart');
   activeVideoId = String(videoId || '').trim();
   console.log(LOG_PREFIX, 'start received', { videoId: activeVideoId });
+  safeRuntimeSendMessage({ type: 'isweep_audio_diag', stage: 'offscreen_start_received', videoId: activeVideoId }).catch(() => {});
 
   const stream = await navigator.mediaDevices.getUserMedia({
     audio: {
@@ -193,6 +213,7 @@ async function startCapture(streamId, videoId) {
     videoId: activeVideoId,
     tracks: tracks.length,
   });
+  safeRuntimeSendMessage({ type: 'isweep_audio_diag', stage: 'offscreen_stream_ready', videoId: activeVideoId }).catch(() => {});
 
   audioInputStream = stream;
   audioCtx = new AudioContext({ sampleRate: AUDIO_SAMPLE_RATE });
@@ -203,6 +224,7 @@ async function startCapture(streamId, videoId) {
   const workletUrl = chrome.runtime.getURL('audio_chunk_processor.js');
   await audioCtx.audioWorklet.addModule(workletUrl);
   console.log(LOG_PREFIX, 'worklet loaded');
+  safeRuntimeSendMessage({ type: 'isweep_audio_diag', stage: 'offscreen_worklet_loaded' }).catch(() => {});
 
   const source = audioCtx.createMediaStreamSource(stream);
   const workletNode = new AudioWorkletNode(audioCtx, 'audio-chunk-processor');

@@ -392,6 +392,17 @@ async function initCleanCaptionControls() {
   const store = await chrome.storage.local.get([STORAGE_KEYS.CLEAN_CAPTION_SETTINGS]);
   cleanCaptionSettingsCache = normalizeCleanCaptionSettings(store[STORAGE_KEYS.CLEAN_CAPTION_SETTINGS]);
   renderCleanCaptionControls();
+
+  // Keep runtime capture state aligned with persisted [CC] toggle.
+  // If the service worker restarted while [CC] stayed enabled, re-send start.
+  try {
+    await chrome.runtime.sendMessage({
+      type: 'isweep_caption_capture_control',
+      enabled: cleanCaptionSettingsCache.cleanCaptionsEnabled === true,
+    });
+  } catch (_) {
+    // Best effort. Popup still reflects current persisted settings.
+  }
 }
 
 function renderCleanCaptionControls() {

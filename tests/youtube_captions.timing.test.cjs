@@ -887,3 +887,79 @@ test('audio chunk timing contract exports chunk length 3.0 seconds with 0.5 over
   assert.equal(hooks.constants.AUDIO_CHUNK_SEC, 3.0);
   assert.equal(hooks.constants.AUDIO_CHUNK_OVERLAP_SEC, 0.5);
 });
+
+test('selected spoken word schedules mute windows from audio timestamps', () => {
+  const hooks = loadYoutubeTimingHooks();
+  const windows = hooks.buildSelectedWordMuteWindows(
+    [
+      { word: 'hello', start: 10.0, end: 10.2 },
+      { word: 'jerk', start: 10.22, end: 10.35 },
+      { word: 'friend', start: 10.4, end: 10.55 },
+    ],
+    ['jerk'],
+  );
+
+  assert.equal(windows.length, 1);
+  assert.equal(windows[0].start < 10.22, true);
+  assert.equal(windows[0].end > 10.35, true);
+  assert.equal(windows[0].start >= 0, true);
+});
+
+test('unselected spoken words do not schedule mute windows', () => {
+  const hooks = loadYoutubeTimingHooks();
+  const windows = hooks.buildSelectedWordMuteWindows(
+    [
+      { word: 'hello', start: 5.0, end: 5.2 },
+      { word: 'friend', start: 5.2, end: 5.4 },
+    ],
+    ['jerk'],
+  );
+
+  assert.equal(windows.length, 0);
+});
+
+test('display-only caption text without timestamps does not create mute windows', () => {
+  const hooks = loadYoutubeTimingHooks();
+  const timedWords = hooks.extractTimedWordsFromAudioPayload(
+    {
+      text: 'hello jerk friend',
+      clean_text: 'hello ___ friend',
+      words: [],
+      cleaned_captions: [],
+      clean_captions: [],
+    },
+    12.0,
+    12.8,
+  );
+
+  const windows = hooks.buildSelectedWordMuteWindows(timedWords, ['jerk']);
+  assert.equal(timedWords.length, 0);
+  assert.equal(windows.length, 0);
+});
+
+test('overlapping selected-word mute windows are merged', () => {
+  const hooks = loadYoutubeTimingHooks();
+  const windows = hooks.buildSelectedWordMuteWindows(
+    [
+      { word: 'jerk', start: 20.0, end: 20.2 },
+      { word: 'jerk', start: 20.18, end: 20.33 },
+    ],
+    ['jerk'],
+  );
+
+  assert.equal(windows.length, 1);
+  assert.equal(windows[0].start <= 19.92, true);
+  assert.equal(windows[0].end >= 20.45, true);
+});
+
+test('selected word mute mode flag defaults to captions only', () => {
+  const hooks = loadYoutubeTimingHooks();
+  assert.equal(hooks.isSelectedWordMuteModeEnabled({ cleanCaptionsEnabled: true }), false);
+  assert.equal(
+    hooks.isSelectedWordMuteModeEnabled({
+      cleanCaptionsEnabled: true,
+      cleanCaptionWordMuteMode: 'captions_selected_word_mute',
+    }),
+    true,
+  );
+});

@@ -104,3 +104,30 @@ test('background login success persists token for sync preferences', () => {
   assert.equal(bgSource.includes("[STORAGE_KEYS.USER_ID]: userId"), true);
   assert.equal(bgSource.includes('login success'), true);
 });
+
+test('popup exposes caption mode selector for captions-only and selected-word mute', () => {
+  const popupHtml = fs.readFileSync(path.join(extensionRoot, 'popup.html'), 'utf8');
+  const popupSource = fs.readFileSync(path.join(extensionRoot, 'popup.js'), 'utf8');
+
+  assert.equal(popupHtml.includes('id="cleanCaptionWordMuteMode"'), true);
+  assert.equal(popupHtml.includes('value="captions_only"'), true);
+  assert.equal(popupHtml.includes('value="captions_selected_word_mute"'), true);
+  assert.equal(popupSource.includes('cleanCaptionWordMuteMode'), true);
+});
+
+test('selected-word mute path does not invoke skip/fast-forward/playbackRate or /event hooks', () => {
+  const youtubeSource = fs.readFileSync(path.join(extensionRoot, 'youtube_captions.js'), 'utf8');
+  const marker = "applyMuteWindow(window.start, window.end, 'selected_spoken_word')";
+  const markerIndex = youtubeSource.indexOf(marker);
+  assert.equal(markerIndex >= 0, true);
+
+  const start = Math.max(0, markerIndex - 600);
+  const end = Math.min(youtubeSource.length, markerIndex + 600);
+  const snippet = youtubeSource.slice(start, end);
+
+  assert.equal(snippet.includes('playbackRate = 2.0'), false);
+  assert.equal(snippet.includes("action === 'skip'"), false);
+  assert.equal(snippet.includes("action === 'fast_forward'"), false);
+  assert.equal(snippet.includes('/event'), false);
+  assert.equal(snippet.includes('handleCaptionDecision'), false);
+});

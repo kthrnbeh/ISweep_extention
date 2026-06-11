@@ -259,6 +259,10 @@
       const targetMuted = shouldISweepUnmute(previousMuteState) ? false : true;
       setMutedState(targetMuted, `restore:${reason}`);
       console.log('[ISweep Timing] mute restored', { reason });
+      console.log('[ISWEEP][WORD_MUTE] mute end', {
+        reason,
+        restore_to_muted: targetMuted,
+      });
     }
     clearMuteState(reason);
   }
@@ -301,6 +305,8 @@
   const AUDIO_CHUNK_SEC = 3.0;
   const AUDIO_CHUNK_OVERLAP_SEC = 0.5;
   const AUDIO_SAMPLE_RATE = 16000;    // 16 kHz mono — standard for speech recognition
+  const WORD_MUTE_PRE_PAD_SEC = 0.08;
+  const WORD_MUTE_POST_PAD_SEC = 0.12;
   const MARKER_SCHEDULER_INTERVAL_MS = 100;
   const AUDIO_PREROLL_MS = 120;
   // Audio-derived mute markers already include backend pre-roll, so keep the
@@ -330,6 +336,7 @@
     cleanCaptionsEnabled: true,
     cleanCaptionStyle: 'transparent_white',
     cleanCaptionTextSize: 'medium',
+    cleanCaptionWordMuteMode: 'captions_only',
     cleanCaptionPosition: { x: 0.5, y: 0.8 },
   };
   let cleanCaptionSettings = { ...CLEAN_CAPTION_DEFAULTS };
@@ -1770,6 +1777,24 @@
           }
           updateCleanOverlay(lastCaptionText, findVideo()?.currentTime || 0);
         }
+
+        if (isSelectedWordMuteModeEnabled()) {
+          const selectedWords = getFilterWords().words || [];
+          const timedWords = extractTimedWordsFromAudioPayload(message, startSec, endSec);
+          if (!Array.isArray(timedWords) || timedWords.length === 0) {
+            console.log('[ISWEEP][WORD_MUTE] no timestamps available', {
+              source: nextSource,
+              start_seconds: startSec,
+              end_seconds: endSec,
+            });
+          } else {
+            const muteWindows = buildSelectedWordMuteWindows(timedWords, selectedWords);
+            muteWindows.forEach((window) => {
+              applyMuteWindow(window.start, window.end, 'selected_spoken_word');
+            });
+          }
+        }
+
         sendResponse({ ok: true });
         return true;
       }
@@ -1839,6 +1864,9 @@
     const textSize = ['small', 'medium', 'large'].includes(settings.cleanCaptionTextSize)
       ? settings.cleanCaptionTextSize
       : 'medium';
+    const wordMuteMode = settings.cleanCaptionWordMuteMode === 'captions_selected_word_mute'
+      ? 'captions_selected_word_mute'
+      : 'captions_only';
     const enabled = settings.cleanCaptionsEnabled !== false;
     let position = { ...CLEAN_CAPTION_DEFAULTS.cleanCaptionPosition };
     if (
@@ -1861,8 +1889,14 @@
       cleanCaptionsEnabled: enabled,
       cleanCaptionStyle: style,
       cleanCaptionTextSize: textSize,
+      cleanCaptionWordMuteMode: wordMuteMode,
       cleanCaptionPosition: position,
     };
+  }
+
+  function isSelectedWordMuteModeEnabled(settingsOverride) {
+    const settings = normalizeCleanCaptionSettings(settingsOverride || cleanCaptionSettings);
+    return settings.cleanCaptionsEnabled === true && settings.cleanCaptionWordMuteMode === 'captions_selected_word_mute';
   }
 
   function clampCaptionOverlayBounds(left, top, overlayWidth, overlayHeight) {
@@ -2444,6 +2478,94 @@
     return nowSec >= marker.start_seconds - earlyWindowSec;
   }
 
+  function extractTimedWordsFromAudioPayload(payload, fallbackStartSec, fallbackEndSec) {
+    const directWords = normalizeTimedWords(payload?.words);
+    if (directWords.length > 0) return directWords;
+
+    const captionEntries = [];
+    if (Array.isArray(payload?.cleaned_captions)) captionEntries.push(...payload.cleaned_captions);
+    if (Array.isArray(payload?.clean_captions)) captionEntries.push(...payload.clean_captions);
+
+    const captionWords = captionEntries.flatMap((entry) => normalizeTimedWords(entry?.words));
+    if (captionWords.length > 0) return captionWords;
+
+    const startSec = Number.isFinite(Number(fallbackStartSec)) ? Number(fallbackStartSec) : 0;
+    const endSec = Number.isFinite(Number(fallbackEndSec)) ? Number(fallbackEndSec) : startSec;
+    if (endSec <= startSec) return [];
+    return [];
+  }
+
+  function mergeOverlappingWordMuteWindows(windows) {
+    if (!Array.isArray(windows) || windows.length === 0) return [];
+    const sorted = windows
+      .filter((window) => window && Number.isFinite(Number(window.start)) && Number.isFinite(Number(window.end)))
+      .map((window) => ({
+        start: Math.max(Number(window.start), 0),
+        end: Math.max(Number(window.end), Math.max(Number(window.start), 0)),
+      }))
+      .sort((a, b) => a.start - b.start);
+    if (sorted.length === 0) return [];
+
+    const merged = [sorted[0]];
+    for (let index = 1; index < sorted.length; index += 1) {
+      const candidate = sorted[index];
+      const active = merged[merged.length - 1];
+      if (candidate.start <= active.end) {
+        active.end = Math.max(active.end, candidate.end);
+      } else {
+        merged.push({ ...candidate });
+      }
+    }
+    return merged;
+  }
+
+  function isSelectedSpokenWord(wordNorm, selectedWords) {
+    if (!wordNorm || !Array.isArray(selectedWords) || selectedWords.length === 0) return false;
+    return selectedWords.some((rawFilter) => {
+      const normalizedFilter = normalizeFilterWord(rawFilter);
+      if (!normalizedFilter || normalizedFilter.includes(' ')) return false;
+      const variants = expandWordFamily(normalizedFilter);
+      const regexes = [maskToRegex(normalizedFilter), buildStretchRegex(normalizedFilter)];
+      variants.forEach((variant) => {
+        if (variant !== normalizedFilter) regexes.push(maskToRegex(variant));
+      });
+      return regexes.some((regex) => regex.test(wordNorm));
+    });
+  }
+
+  function buildSelectedWordMuteWindows(timedWords, selectedWords) {
+    const windows = [];
+    (Array.isArray(timedWords) ? timedWords : []).forEach((entry) => {
+      const wordNorm = normalizeCaptionWord(entry?.word || '');
+      if (!wordNorm) return;
+
+      const startSec = Number(entry.start);
+      const endSec = Number(entry.end);
+      if (!Number.isFinite(startSec) || !Number.isFinite(endSec) || endSec < startSec) return;
+
+      if (!isSelectedSpokenWord(wordNorm, selectedWords)) {
+        console.log('[ISWEEP][WORD_MUTE] skipped unselected word', {
+          word: wordNorm,
+          start_seconds: startSec,
+          end_seconds: endSec,
+        });
+        return;
+      }
+
+      console.log('[ISWEEP][WORD_MUTE] selected word matched', {
+        word: wordNorm,
+        start_seconds: startSec,
+        end_seconds: endSec,
+      });
+      windows.push({
+        start: Math.max(startSec - WORD_MUTE_PRE_PAD_SEC, 0),
+        end: Math.max(endSec + WORD_MUTE_POST_PAD_SEC, Math.max(startSec - WORD_MUTE_PRE_PAD_SEC, 0)),
+      });
+    });
+
+    return mergeOverlappingWordMuteWindows(windows);
+  }
+
   function rescheduleMuteRestoreTimers(nowSec) {
     const remainingMs = Math.max((muteLockUntilSec - nowSec) * 1000, 0);
     if (restoreMuteTimeout) clearTimeout(restoreMuteTimeout);
@@ -2462,8 +2584,11 @@
     const video = findVideo();
     if (!video) return;
 
-    // Clamp mute windows to avoid over- or under-muting.
-    const clampedDurationSec = Math.min(Math.max(endSec - startSec, 0.3), 2.5);
+    const isSelectedWordMuteReason = String(reason || '').includes('selected_spoken_word');
+    // Keep legacy clamping for marker/fallback mutes; selected-word mutes use tighter windows.
+    const clampedDurationSec = isSelectedWordMuteReason
+      ? Math.max(endSec - startSec, 0.01)
+      : Math.min(Math.max(endSec - startSec, 0.3), 2.5);
     endSec = startSec + clampedDurationSec;
 
     const nowSec = video.currentTime || 0;
@@ -2526,6 +2651,11 @@
         endSec,
         durationMs,
         wasMuted: previousMuteState,
+        reason,
+      });
+      console.log('[ISWEEP][WORD_MUTE] mute start', {
+        start_seconds: startSec,
+        end_seconds: endSec,
         reason,
       });
       muteLockUntilSec = endSec;
@@ -3082,6 +3212,11 @@
       shouldFireMarker,
       shouldDedupAudioMarker,
       markerSourcePriority,
+      extractTimedWordsFromAudioPayload,
+      mergeOverlappingWordMuteWindows,
+      buildSelectedWordMuteWindows,
+      isSelectedSpokenWord,
+      isSelectedWordMuteModeEnabled,
       constants: {
         CLEAN_CAPTION_STALE_MS,
         CLEAN_CAPTION_LOOKAHEAD_SEC,
@@ -3099,6 +3234,8 @@
         AUDIO_CHUNK_OVERLAP_SEC,
         AUDIO_STT_HOLD_MS,
         AUDIO_PREROLL_MS,
+        WORD_MUTE_PRE_PAD_SEC,
+        WORD_MUTE_POST_PAD_SEC,
       },
       setCachedPreferences: (prefs) => {
         cachedPreferences = prefs || null;

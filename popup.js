@@ -27,6 +27,7 @@ const CLEAN_CAPTION_DEFAULTS = {
   cleanCaptionsEnabled: true,
   cleanCaptionStyle: 'transparent_white',
   cleanCaptionTextSize: 'medium',
+  cleanCaptionWordMuteMode: 'captions_only',
   cleanCaptionPosition: { x: 0.5, y: 0.8 },
 };
 
@@ -36,6 +37,9 @@ function normalizeCleanCaptionSettings(raw) {
   const textSize = ['small', 'medium', 'large'].includes(data.cleanCaptionTextSize)
     ? data.cleanCaptionTextSize
     : 'medium';
+  const wordMuteMode = data.cleanCaptionWordMuteMode === 'captions_selected_word_mute'
+    ? 'captions_selected_word_mute'
+    : 'captions_only';
   const enabled = data.cleanCaptionsEnabled !== false;
   const position = data.cleanCaptionPosition
     && Number.isFinite(Number(data.cleanCaptionPosition.x))
@@ -49,6 +53,7 @@ function normalizeCleanCaptionSettings(raw) {
     cleanCaptionsEnabled: enabled,
     cleanCaptionStyle: style,
     cleanCaptionTextSize: textSize,
+    cleanCaptionWordMuteMode: wordMuteMode,
     cleanCaptionPosition: position,
   };
 }
@@ -138,6 +143,7 @@ const captionSettingsPanel = document.getElementById('captionSettingsPanel');
 const captionRuntimeStatus = document.getElementById('captionRuntimeStatus');
 const cleanCaptionStyleSelect = document.getElementById('cleanCaptionStyle');
 const cleanCaptionTextSizeSelect = document.getElementById('cleanCaptionTextSize');
+const cleanCaptionWordMuteModeSelect = document.getElementById('cleanCaptionWordMuteMode');
 const btnResetCaptionPosition = document.getElementById('btnResetCaptionPosition');
 
 let cleanCaptionSettingsCache = { ...CLEAN_CAPTION_DEFAULTS };
@@ -364,6 +370,14 @@ function setupEventListeners() {
       });
     });
   }
+  if (cleanCaptionWordMuteModeSelect) {
+    cleanCaptionWordMuteModeSelect.addEventListener('change', async () => {
+      await saveCleanCaptionSettings({
+        ...cleanCaptionSettingsCache,
+        cleanCaptionWordMuteMode: cleanCaptionWordMuteModeSelect.value,
+      });
+    });
+  }
   if (btnResetCaptionPosition) {
     btnResetCaptionPosition.addEventListener('click', async () => {
       await saveCleanCaptionSettings({
@@ -420,6 +434,9 @@ function renderCleanCaptionControls() {
   }
   if (cleanCaptionTextSizeSelect) {
     cleanCaptionTextSizeSelect.value = cleanCaptionSettingsCache.cleanCaptionTextSize;
+  }
+  if (cleanCaptionWordMuteModeSelect) {
+    cleanCaptionWordMuteModeSelect.value = cleanCaptionSettingsCache.cleanCaptionWordMuteMode;
   }
 }
 

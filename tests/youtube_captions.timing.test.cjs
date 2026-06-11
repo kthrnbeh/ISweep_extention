@@ -958,8 +958,71 @@ test('selected word mute mode flag defaults to captions only', () => {
   assert.equal(
     hooks.isSelectedWordMuteModeEnabled({
       cleanCaptionsEnabled: true,
-      cleanCaptionWordMuteMode: 'captions_selected_word_mute',
+      cleanCaptionWordMuteMode: 'captions_word_mute',
     }),
     true,
   );
+});
+
+test('selected word Hell normalizes to hell and matches', () => {
+  const hooks = loadYoutubeTimingHooks();
+  const windows = hooks.buildSelectedWordMuteWindows(
+    [{ word: 'Hell', start: 1.0, end: 1.3 }],
+    ['Hell'],
+  );
+  assert.equal(windows.length, 1);
+});
+
+test('mode captions_only does not schedule selected-word mute windows', () => {
+  const hooks = loadYoutubeTimingHooks();
+  const windows = hooks.scheduleSelectedWordMutesFromAudioPayload(
+    {
+      source: 'audio_stt_live',
+      words: [{ word: 'hell', start: 2.0, end: 2.4 }],
+    },
+    {
+      settingsOverride: { cleanCaptionsEnabled: true, cleanCaptionWordMuteMode: 'captions_only' },
+      selectedWords: ['hell'],
+      startSec: 2.0,
+      endSec: 2.5,
+    },
+  );
+  assert.equal(windows.length, 0);
+});
+
+test('mode captions_word_mute schedules selected-word mute windows', () => {
+  const hooks = loadYoutubeTimingHooks();
+  const windows = hooks.scheduleSelectedWordMutesFromAudioPayload(
+    {
+      source: 'audio_stt_live',
+      words: [{ word: 'hell', start: 2.0, end: 2.4 }],
+    },
+    {
+      settingsOverride: { cleanCaptionsEnabled: true, cleanCaptionWordMuteMode: 'captions_word_mute' },
+      selectedWords: ['hell'],
+      startSec: 2.0,
+      endSec: 2.5,
+    },
+  );
+  assert.equal(windows.length, 1);
+});
+
+test('missing word timestamps does not schedule mute windows', () => {
+  const hooks = loadYoutubeTimingHooks();
+  const windows = hooks.scheduleSelectedWordMutesFromAudioPayload(
+    {
+      source: 'audio_stt_live',
+      text: 'go to hell now',
+      words: [],
+      cleaned_captions: [],
+      clean_captions: [],
+    },
+    {
+      settingsOverride: { cleanCaptionsEnabled: true, cleanCaptionWordMuteMode: 'captions_word_mute' },
+      selectedWords: ['hell'],
+      startSec: 3.0,
+      endSec: 4.0,
+    },
+  );
+  assert.equal(windows.length, 0);
 });

@@ -455,10 +455,27 @@ async function relayAudioCaptionResultToTab(result) {
     clean_captions: Array.isArray(result?.clean_captions) ? result.clean_captions : [],
     clean_text: result?.clean_text || null,
     cleaned_text: result?.cleaned_text || null,
-    words: Array.isArray(result?.words) ? result.words : [],
+    words: Array.isArray(result?.words)
+      ? result.words
+      : (Array.isArray(result?.word_timestamps) ? result.word_timestamps : []),
+    word_timestamps: Array.isArray(result?.word_timestamps)
+      ? result.word_timestamps
+      : (Array.isArray(result?.words) ? result.words : []),
     cached: result?.cached === true,
     latency: result?.latency && typeof result.latency === 'object' ? result.latency : null,
   };
+
+  console.log('[ISWEEP][WORD_MUTE] relay words', {
+    count: Array.isArray(relayMsg.words) ? relayMsg.words.length : 0,
+    preview: Array.isArray(relayMsg.words)
+      ? relayMsg.words.slice(0, 5).map((entry) => ({
+        word: String(entry?.word || '').trim().toLowerCase(),
+        start: entry?.start,
+        end: entry?.end,
+      }))
+      : [],
+    source: relayMsg.source,
+  });
 
   audioCaptionDebug.relayAttemptCount += 1;
   console.log(AUDIO_DIAG_LOG, 'relay attempt', {
@@ -1377,7 +1394,12 @@ async function handleAudioCaptionChunk(videoId, audioChunk, mimeType, startSecon
       clean_text: typeof payload.clean_text === 'string' ? payload.clean_text : null,
       cleaned_text: typeof payload.cleaned_text === 'string' ? payload.cleaned_text : null,
       caption_text: typeof payload.caption_text === 'string' ? payload.caption_text : null,
-      words: Array.isArray(payload.words) ? payload.words : [],
+      words: Array.isArray(payload.words)
+        ? payload.words
+        : (Array.isArray(payload.word_timestamps) ? payload.word_timestamps : []),
+      word_timestamps: Array.isArray(payload.word_timestamps)
+        ? payload.word_timestamps
+        : (Array.isArray(payload.words) ? payload.words : []),
       failure_reason: payload.failure_reason || payload.reason || null,
       cached: payload.cached === true,
       latency: {
@@ -1588,7 +1610,12 @@ async function handleAudioAhead(videoId, audioChunk, mimeType, startSeconds, end
       clean_text: typeof payload.clean_text === 'string' ? payload.clean_text : null,
       cleaned_text: typeof payload.cleaned_text === 'string' ? payload.cleaned_text : null,
       caption_text: typeof payload.caption_text === 'string' ? payload.caption_text : null,
-      words: Array.isArray(payload.words) ? payload.words : [],
+      words: Array.isArray(payload.words)
+        ? payload.words
+        : (Array.isArray(payload.word_timestamps) ? payload.word_timestamps : []),
+      word_timestamps: Array.isArray(payload.word_timestamps)
+        ? payload.word_timestamps
+        : (Array.isArray(payload.words) ? payload.words : []),
       failure_reason: payload.failure_reason || payload.reason || null,
       cached: payload.cached === true,
     };

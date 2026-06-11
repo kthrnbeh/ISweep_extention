@@ -1043,3 +1043,35 @@ test('relay fails with reason when no active tab can be recovered', async () => 
   assert.equal(debug.lastError, 'relay_no_tab_id');
   assert.equal(debug.relayFailureCount > 0, true);
 });
+
+test('relay includes word timestamps for selected-word mute scheduling', async () => {
+  const bg = loadBackgroundContext();
+  const sent = [];
+  bg.chrome.tabs.query = async () => ([{ id: 66, url: 'https://www.youtube.com/watch?v=wordrelay' }]);
+  bg.chrome.tabs.sendMessage = async (tabId, payload) => {
+    sent.push(payload);
+    return { ok: true };
+  };
+
+  const ok = await bg.relayAudioCaptionResultToTab({
+    status: 'ready',
+    source: 'audio_stt',
+    text: 'go to hell now',
+    words: [
+      { word: 'go', start: 0.0, end: 0.2 },
+      { word: 'to', start: 0.2, end: 0.3 },
+      { word: 'hell', start: 0.3, end: 0.7 },
+      { word: 'now', start: 0.7, end: 1.0 },
+    ],
+    events: [],
+  });
+
+  assert.equal(ok, true);
+  const message = sent.find((entry) => entry.type === 'isweep_audio_caption_text');
+  assert.equal(Boolean(message), true);
+  assert.equal(Array.isArray(message.words), true);
+  assert.equal(message.words.length, 4);
+  assert.equal(Array.isArray(message.word_timestamps), true);
+  assert.equal(message.word_timestamps.length, 4);
+  assert.equal(message.source, 'audio_stt_live');
+});

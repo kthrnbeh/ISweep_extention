@@ -37,8 +37,9 @@ function normalizeCleanCaptionSettings(raw) {
   const textSize = ['small', 'medium', 'large'].includes(data.cleanCaptionTextSize)
     ? data.cleanCaptionTextSize
     : 'medium';
-  const wordMuteMode = data.cleanCaptionWordMuteMode === 'captions_selected_word_mute'
-    ? 'captions_selected_word_mute'
+  const wordMuteMode = (data.cleanCaptionWordMuteMode === 'captions_word_mute'
+    || data.cleanCaptionWordMuteMode === 'captions_selected_word_mute')
+    ? 'captions_word_mute'
     : 'captions_only';
   const enabled = data.cleanCaptionsEnabled !== false;
   const position = data.cleanCaptionPosition

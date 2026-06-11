@@ -111,7 +111,7 @@ test('popup exposes caption mode selector for captions-only and selected-word mu
 
   assert.equal(popupHtml.includes('id="cleanCaptionWordMuteMode"'), true);
   assert.equal(popupHtml.includes('value="captions_only"'), true);
-  assert.equal(popupHtml.includes('value="captions_selected_word_mute"'), true);
+  assert.equal(popupHtml.includes('value="captions_word_mute"'), true);
   assert.equal(popupSource.includes('cleanCaptionWordMuteMode'), true);
 });
 

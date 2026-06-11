@@ -360,6 +360,7 @@
   let lastAudioCaptionText = '';
   let lastAudioCaptionReceivedAtMs = 0;
   let lastAudioCaptionFailureReason = null;
+  let lastSelectedWordsLogSignature = '';
 
 
   // Audio watch-ahead state.
@@ -1739,7 +1740,9 @@
           text: message.text,
           clean_text: dedupedText,
           cleaned_text: dedupedText,
-          words: message.words,
+          words: Array.isArray(message.words)
+            ? message.words
+            : (Array.isArray(message.word_timestamps) ? message.word_timestamps : []),
           cached: message.cached === true,
         }, startSec, endSec);
         if (normalizedAudioCaptions.length > 0) {
@@ -1778,22 +1781,11 @@
           updateCleanOverlay(lastCaptionText, findVideo()?.currentTime || 0);
         }
 
-        if (isSelectedWordMuteModeEnabled()) {
-          const selectedWords = getFilterWords().words || [];
-          const timedWords = extractTimedWordsFromAudioPayload(message, startSec, endSec);
-          if (!Array.isArray(timedWords) || timedWords.length === 0) {
-            console.log('[ISWEEP][WORD_MUTE] no timestamps available', {
-              source: nextSource,
-              start_seconds: startSec,
-              end_seconds: endSec,
-            });
-          } else {
-            const muteWindows = buildSelectedWordMuteWindows(timedWords, selectedWords);
-            muteWindows.forEach((window) => {
-              applyMuteWindow(window.start, window.end, 'selected_spoken_word');
-            });
-          }
-        }
+        scheduleSelectedWordMutesFromAudioPayload(message, {
+          startSec,
+          endSec,
+          source: nextSource,
+        });
 
         sendResponse({ ok: true });
         return true;
@@ -1840,6 +1832,14 @@
     );
 
     if (combined.length) {
+      const signature = combined.join('|');
+      if (signature !== lastSelectedWordsLogSignature) {
+        lastSelectedWordsLogSignature = signature;
+        console.log('[ISWEEP][WORD_MUTE] selected words loaded', {
+          count: combined.length,
+          wordsPreview: combined.slice(0, 10),
+        });
+      }
       console.log('[ISWEEP][FILTERS]', {
         source: 'prefs',
         count: combined.length,
@@ -1847,6 +1847,13 @@
         categoryCount,
       });
       return { words: combined, source: 'prefs', customCount, categoryCount };
+    }
+    if (lastSelectedWordsLogSignature !== '') {
+      lastSelectedWordsLogSignature = '';
+      console.log('[ISWEEP][WORD_MUTE] selected words loaded', {
+        count: 0,
+        wordsPreview: [],
+      });
     }
     console.log('[ISWEEP][FILTERS]', {
       source: 'prefs_missing',
@@ -1864,8 +1871,9 @@
     const textSize = ['small', 'medium', 'large'].includes(settings.cleanCaptionTextSize)
       ? settings.cleanCaptionTextSize
       : 'medium';
-    const wordMuteMode = settings.cleanCaptionWordMuteMode === 'captions_selected_word_mute'
-      ? 'captions_selected_word_mute'
+    const wordMuteMode = (settings.cleanCaptionWordMuteMode === 'captions_word_mute'
+      || settings.cleanCaptionWordMuteMode === 'captions_selected_word_mute')
+      ? 'captions_word_mute'
       : 'captions_only';
     const enabled = settings.cleanCaptionsEnabled !== false;
     let position = { ...CLEAN_CAPTION_DEFAULTS.cleanCaptionPosition };
@@ -1896,7 +1904,7 @@
 
   function isSelectedWordMuteModeEnabled(settingsOverride) {
     const settings = normalizeCleanCaptionSettings(settingsOverride || cleanCaptionSettings);
-    return settings.cleanCaptionsEnabled === true && settings.cleanCaptionWordMuteMode === 'captions_selected_word_mute';
+    return settings.cleanCaptionsEnabled === true && settings.cleanCaptionWordMuteMode === 'captions_word_mute';
   }
 
   function clampCaptionOverlayBounds(left, top, overlayWidth, overlayHeight) {
@@ -2479,7 +2487,11 @@
   }
 
   function extractTimedWordsFromAudioPayload(payload, fallbackStartSec, fallbackEndSec) {
-    const directWords = normalizeTimedWords(payload?.words);
+    const directWords = normalizeTimedWords(
+      Array.isArray(payload?.words)
+        ? payload.words
+        : (Array.isArray(payload?.word_timestamps) ? payload.word_timestamps : [])
+    );
     if (directWords.length > 0) return directWords;
 
     const captionEntries = [];
@@ -2564,6 +2576,39 @@
     });
 
     return mergeOverlappingWordMuteWindows(windows);
+  }
+
+  function scheduleSelectedWordMutesFromAudioPayload(payload, options = {}) {
+    const mode = normalizeCleanCaptionSettings(options.settingsOverride || cleanCaptionSettings).cleanCaptionWordMuteMode;
+    const modeEnabled = isSelectedWordMuteModeEnabled(options.settingsOverride);
+    console.log('[ISWEEP][WORD_MUTE] mode status', {
+      mode,
+      enabled: modeEnabled,
+    });
+    if (!modeEnabled) return [];
+
+    const selectedWords = Array.isArray(options.selectedWords)
+      ? options.selectedWords
+      : (getFilterWords().words || []);
+    const startSec = Number.isFinite(Number(options.startSec)) ? Number(options.startSec) : 0;
+    const endSec = Number.isFinite(Number(options.endSec)) ? Number(options.endSec) : startSec;
+    const source = String(options.source || payload?.source || 'audio_stt_live');
+
+    const timedWords = extractTimedWordsFromAudioPayload(payload, startSec, endSec);
+    if (!Array.isArray(timedWords) || timedWords.length === 0) {
+      console.log('[ISWEEP][WORD_MUTE] no timestamps available', {
+        source,
+        start_seconds: startSec,
+        end_seconds: endSec,
+      });
+      return [];
+    }
+
+    const muteWindows = buildSelectedWordMuteWindows(timedWords, selectedWords);
+    muteWindows.forEach((window) => {
+      applyMuteWindow(window.start, window.end, 'selected_spoken_word');
+    });
+    return muteWindows;
   }
 
   function rescheduleMuteRestoreTimers(nowSec) {
@@ -3187,6 +3232,45 @@
     return segments.map((el) => el.textContent.trim()).join(' ').trim(); // Join segments into full line
   }
 
+  if (typeof globalThis !== 'undefined') {
+    globalThis.isweepSimulateWordMuteFromAudioPayload = function isweepSimulateWordMuteFromAudioPayload(payload = {}, options = {}) {
+      const simulatedPayload = {
+        text: payload.text || 'go to hell now',
+        clean_text: payload.clean_text || payload.text || 'go to hell now',
+        source: payload.source || 'audio_stt_live',
+        words: Array.isArray(payload.words) && payload.words.length
+          ? payload.words
+          : [
+            { word: 'go', start: 0.0, end: 0.2 },
+            { word: 'to', start: 0.2, end: 0.3 },
+            { word: 'hell', start: 0.3, end: 0.7 },
+            { word: 'now', start: 0.7, end: 1.0 },
+          ],
+      };
+      const startSec = Number.isFinite(Number(options.startSec)) ? Number(options.startSec) : 0;
+      const endSec = Number.isFinite(Number(options.endSec)) ? Number(options.endSec) : 1.0;
+      const selectedWords = Array.isArray(options.selectedWords) ? options.selectedWords : ['hell'];
+      const settingsOverride = {
+        ...cleanCaptionSettings,
+        cleanCaptionsEnabled: true,
+        cleanCaptionWordMuteMode: options.mode || cleanCaptionSettings.cleanCaptionWordMuteMode || 'captions_word_mute',
+      };
+
+      const windows = scheduleSelectedWordMutesFromAudioPayload(simulatedPayload, {
+        startSec,
+        endSec,
+        source: simulatedPayload.source,
+        selectedWords,
+        settingsOverride,
+      });
+      return {
+        mode: settingsOverride.cleanCaptionWordMuteMode,
+        selectedWords,
+        windows,
+      };
+    };
+  }
+
   if (typeof globalThis !== 'undefined' && globalThis.__ISWEEP_TEST_MODE__) {
     globalThis.__ISWEEP_YT_TEST_HOOKS__ = {
       estimatePlaceholderMuteWindow,
@@ -3215,6 +3299,7 @@
       extractTimedWordsFromAudioPayload,
       mergeOverlappingWordMuteWindows,
       buildSelectedWordMuteWindows,
+      scheduleSelectedWordMutesFromAudioPayload,
       isSelectedSpokenWord,
       isSelectedWordMuteModeEnabled,
       constants: {

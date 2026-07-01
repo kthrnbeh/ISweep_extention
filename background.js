@@ -18,6 +18,7 @@ const STORAGE_KEYS = {
   USER_ID: 'isweepUserId',
   PREFS: 'isweepPreferences',
   BACKEND_URL: 'isweepBackendUrl',
+  CLEAN_CAPTION_SETTINGS: 'isweepCleanCaptionSettings',
   DEV_LOCAL_AUTH: 'devLocalAuthEnabled'
 };
 
@@ -33,6 +34,21 @@ const DEFAULT_BACKEND = 'http://127.0.0.1:5000';
 const OFFSCREEN_DOCUMENT_PATH = 'offscreen.html';
 const LOCAL_DEV_CAPTION_EMAIL = 'local-captions@isweep.dev';
 const LOCAL_DEV_CAPTION_PASSWORD = 'LocalCaption1089!';
+const CAPTION_HEALTH_TIMEOUT_MS = 2500;
+
+const CLEAN_CAPTION_DEFAULTS = {
+  cleanCaptionsEnabled: true,
+  cleanCaptionWordMuteMode: 'captions_only',
+};
+
+const captionReadinessState = {
+  lastCaptionAt: null,
+  lastCaptionLatencyMs: null,
+  lastError: null,
+  lastFailureReason: null,
+  lastSttStatus: 'unknown',
+  lastSttError: null,
+};
 
 const markerCacheByVideoId = new Map();
 const AUDIO_CAPTION_DEDUPE_WINDOW_MS = 1600;
@@ -88,6 +104,65 @@ const audioCaptionDebug = {
 
 function normalizeCaptionTextForDedupe(text) {
   return String(text || '').toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+function normalizeCleanCaptionSettings(raw) {
+  const data = raw && typeof raw === 'object' ? raw : {};
+  const wordMuteMode = (data.cleanCaptionWordMuteMode === 'captions_word_mute'
+    || data.cleanCaptionWordMuteMode === 'captions_selected_word_mute')
+    ? 'captions_word_mute'
+    : 'captions_only';
+  return {
+    cleanCaptionsEnabled: data.cleanCaptionsEnabled !== false,
+    cleanCaptionWordMuteMode: wordMuteMode,
+  };
+}
+
+function sanitizeBodyPreview(rawBody, maxLen = 300) {
+  const body = String(rawBody || '').replace(/\s+/g, ' ').trim();
+  if (!body) return '';
+  return body.slice(0, maxLen);
+}
+
+function buildHealthCheckUrl(backendUrl) {
+  return `${String(backendUrl || '').replace(/\/+$/, '')}/health`;
+}
+
+function classifyFetchFailure(error) {
+  const name = String(error?.name || 'Error');
+  const message = String(error?.message || error || 'unknown error');
+  const lower = `${name} ${message}`.toLowerCase();
+  if (name === 'AbortError') {
+    return {
+      reasonCode: 'backend_unreachable',
+      category: 'timeout',
+      name,
+      message,
+    };
+  }
+  if (lower.includes('cors')) {
+    return {
+      reasonCode: 'CORS_error',
+      category: 'cors',
+      name,
+      message,
+    };
+  }
+  return {
+    reasonCode: 'backend_unreachable',
+    category: 'network',
+    name,
+    message,
+  };
+}
+
+function summarizeLaunchDiagnostic(body) {
+  const startup = body && typeof body.startup_diagnostic === 'object' ? body.startup_diagnostic : {};
+  return {
+    launchSource: String(startup.launch_source || 'unknown'),
+    expectedWindowsAutostartSource: String(startup.expected_windows_autostart_source || 'windows_startup'),
+    matchesExpected: startup.matches_expected === true,
+  };
 }
 
 function shouldSuppressDuplicateCaption(text, source, windowMs = AUDIO_CAPTION_DEDUPE_WINDOW_MS) {
@@ -182,34 +257,169 @@ async function logBackendHealthOnce() {
 
 async function getCaptionBackendStatus() {
   const backendUrl = await getBackendUrl();
+  const healthUrl = buildHealthCheckUrl(backendUrl);
+  const stored = await chrome.storage.local.get([STORAGE_KEYS.BACKEND_URL]);
+  const configuredBackendUrl = String(stored[STORAGE_KEYS.BACKEND_URL] || '').trim() || backendUrl;
+
   try {
-    const res = await fetch(`${backendUrl}/health`);
+    // Validate configured URL separately so popup can report invalid settings directly.
+    // The backend URL getter still normalizes to local default for runtime safety.
+    new URL(configuredBackendUrl);
+  } catch (error) {
+    const info = classifyFetchFailure(error);
+    return {
+      state: 'backend_offline',
+      ok: false,
+      ready: false,
+      backendOnline: false,
+      sttEnabled: false,
+      stt_enabled: false,
+      backendUrl,
+      healthUrl,
+      timeoutMs: CAPTION_HEALTH_TIMEOUT_MS,
+      reasonCode: 'invalid_backend_url',
+      failure_reason: 'invalid_backend_url',
+      errorName: info.name,
+      errorMessage: info.message,
+      sttStatus: 'unknown',
+      launchDiagnostic: summarizeLaunchDiagnostic(null),
+    };
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), CAPTION_HEALTH_TIMEOUT_MS);
+  try {
+    const res = await fetch(healthUrl, { signal: controller.signal });
+    clearTimeout(timeout);
+    const bodyText = await res.text().catch(() => '');
+    let body = {};
+    try {
+      body = bodyText ? JSON.parse(bodyText) : {};
+    } catch (_) {
+      body = {};
+    }
+
+    const launchDiagnostic = summarizeLaunchDiagnostic(body);
+
+    if (res.status === 401 || res.status === 403) {
+      return {
+        state: 'backend_offline',
+        ok: false,
+        ready: false,
+        backendOnline: false,
+        sttEnabled: false,
+        stt_enabled: false,
+        backendUrl,
+        healthUrl,
+        timeoutMs: CAPTION_HEALTH_TIMEOUT_MS,
+        httpStatus: res.status,
+        responseBodyPreview: sanitizeBodyPreview(bodyText),
+        reasonCode: 'authentication_required',
+        failure_reason: 'authentication_required',
+        sttStatus: 'unknown',
+        launchDiagnostic,
+      };
+    }
+
     if (!res.ok) {
       return {
         state: 'backend_offline',
         ok: false,
+        ready: false,
         backendOnline: false,
         sttEnabled: false,
         stt_enabled: false,
+        backendUrl,
+        healthUrl,
+        timeoutMs: CAPTION_HEALTH_TIMEOUT_MS,
+        httpStatus: res.status,
+        responseBodyPreview: sanitizeBodyPreview(bodyText),
+        reasonCode: 'health_failed',
+        failure_reason: 'health_failed',
+        sttStatus: 'unknown',
+        launchDiagnostic,
       };
     }
-    const body = await res.json().catch(() => ({}));
+
+    if (body?.authentication_required === true) {
+      return {
+        state: 'backend_offline',
+        ok: false,
+        ready: false,
+        backendOnline: false,
+        sttEnabled: false,
+        stt_enabled: false,
+        backendUrl,
+        healthUrl,
+        timeoutMs: CAPTION_HEALTH_TIMEOUT_MS,
+        httpStatus: res.status,
+        responseBodyPreview: sanitizeBodyPreview(bodyText),
+        reasonCode: 'authentication_required',
+        failure_reason: 'authentication_required',
+        sttStatus: 'unknown',
+        launchDiagnostic,
+      };
+    }
+
+    const sttStatus = String(body?.stt_status || '').trim().toLowerCase();
+    if (sttStatus === 'model_unavailable') {
+      return {
+        state: 'stt_disabled',
+        ok: true,
+        ready: false,
+        backendOnline: true,
+        sttEnabled: false,
+        stt_enabled: false,
+        backendUrl,
+        healthUrl,
+        timeoutMs: CAPTION_HEALTH_TIMEOUT_MS,
+        httpStatus: res.status,
+        responseBodyPreview: sanitizeBodyPreview(bodyText),
+        reasonCode: 'model_unavailable',
+        failure_reason: 'model_unavailable',
+        sttStatus: 'model_unavailable',
+        launchDiagnostic,
+      };
+    }
+
     const sttEnabled = body?.stt_enabled === true;
     return {
       state: sttEnabled ? 'ready' : 'stt_disabled',
       ok: true,
+      ready: sttEnabled,
       backendOnline: true,
       sttEnabled,
       stt_enabled: sttEnabled,
+      backendUrl,
+      healthUrl,
+      timeoutMs: CAPTION_HEALTH_TIMEOUT_MS,
+      httpStatus: res.status,
+      responseBodyPreview: sanitizeBodyPreview(bodyText),
+      reasonCode: sttEnabled ? null : 'STT_disabled',
+      failure_reason: sttEnabled ? null : 'STT_disabled',
+      sttStatus: sttEnabled ? 'ok' : 'disabled',
+      launchDiagnostic,
     };
   } catch (err) {
+    clearTimeout(timeout);
+    const info = classifyFetchFailure(err);
     return {
       state: 'backend_offline',
       ok: false,
+      ready: false,
       backendOnline: false,
       sttEnabled: false,
       stt_enabled: false,
-      error: err?.message || String(err),
+      backendUrl,
+      healthUrl,
+      timeoutMs: CAPTION_HEALTH_TIMEOUT_MS,
+      reasonCode: info.reasonCode,
+      failure_reason: info.reasonCode,
+      error: info.message,
+      errorName: info.name,
+      errorMessage: info.message,
+      sttStatus: 'unknown',
+      launchDiagnostic: summarizeLaunchDiagnostic(null),
     };
   }
 }
@@ -225,9 +435,62 @@ async function getActiveTabCaptionRuntimeStatus() {
   }
 }
 
+async function getCaptionModeSnapshot() {
+  const store = await chrome.storage.local.get([STORAGE_KEYS.CLEAN_CAPTION_SETTINGS, STORAGE_KEYS.PREFS]);
+  const settings = normalizeCleanCaptionSettings(store[STORAGE_KEYS.CLEAN_CAPTION_SETTINGS] || CLEAN_CAPTION_DEFAULTS);
+  const prefs = normalizePreferences(store[STORAGE_KEYS.PREFS] || {});
+  const words = Array.isArray(prefs?.blocklist?.items) ? prefs.blocklist.items : [];
+  return {
+    cleanCaptionsEnabled: settings.cleanCaptionsEnabled === true,
+    mode: settings.cleanCaptionWordMuteMode,
+    modeLabel: settings.cleanCaptionWordMuteMode === 'captions_word_mute'
+      ? 'Captions + Selected Word Mute'
+      : 'Captions Only',
+    selectedWordCount: words.length,
+    selectedWordPreview: words.slice(0, 10),
+  };
+}
+
+async function getSignedInSnapshot() {
+  const token = await getAuthToken();
+  const devContext = await getDevLocalAuthContext();
+  return {
+    signedIn: Boolean(token) || devContext.enabled === true,
+    hasToken: Boolean(token),
+    devLocalAuthEnabled: devContext.enabled === true,
+  };
+}
+
+async function buildCaptionReadinessStatus() {
+  const [backend, tabStatus, modeSnapshot, authSnapshot] = await Promise.all([
+    getCaptionBackendStatus(),
+    getActiveTabCaptionRuntimeStatus(),
+    getCaptionModeSnapshot(),
+    getSignedInSnapshot(),
+  ]);
+
+  return {
+    backend,
+    tabStatus,
+    auth: authSnapshot,
+    captionMode: modeSnapshot.mode,
+    captionModeLabel: modeSnapshot.modeLabel,
+    selectedWordCount: modeSnapshot.selectedWordCount,
+    selectedWordPreview: modeSnapshot.selectedWordPreview,
+    cleanCaptionsEnabled: modeSnapshot.cleanCaptionsEnabled,
+    sttStatus: captionReadinessState.lastSttStatus,
+    sttError: captionReadinessState.lastSttError,
+    lastFailureReason: captionReadinessState.lastFailureReason,
+    lastError: captionReadinessState.lastError,
+    lastSuccessfulCaptionAt: captionReadinessState.lastCaptionAt,
+    lastCaptionLatencyMs: captionReadinessState.lastCaptionLatencyMs,
+  };
+}
+
 async function handleCaptionRuntimeStatus() {
-  const backend = await getCaptionBackendStatus();
-  const tabStatus = await getActiveTabCaptionRuntimeStatus();
+  const readiness = await buildCaptionReadinessStatus();
+  const backend = readiness.backend;
+  const tabStatus = readiness.tabStatus;
 
   let state = backend.state || 'backend_offline';
   let label = 'Audio captions: Backend offline';
@@ -235,8 +498,9 @@ async function handleCaptionRuntimeStatus() {
   let source = 'backend_offline';
 
   const youtubeFallbackEnabled = tabStatus?.youtubeDomFallbackEnabled === true;
+  const backendReady = backend?.ready === true;
 
-  if (tabStatus?.usingAudioStt) {
+  if (tabStatus?.usingAudioStt && backendReady) {
     state = 'ready';
     source = tabStatus?.overlaySource === 'audio_stt_cached' ? 'audio_stt_cached' : 'audio_stt_live';
     label = source === 'audio_stt_cached' ? 'Audio captions: Audio STT Cached' : 'Audio captions: Audio STT Live';
@@ -263,10 +527,23 @@ async function handleCaptionRuntimeStatus() {
     label,
     source,
     sourceLabel,
+    reasonCode: backend?.reasonCode || null,
     backend,
     backendOnline: backend?.backendOnline === true,
     sttEnabled: backend?.sttEnabled === true,
     tabStatus,
+    readiness,
+    captionMode: readiness.captionMode,
+    captionModeLabel: readiness.captionModeLabel,
+    selectedWordCount: readiness.selectedWordCount,
+    selectedWordPreview: readiness.selectedWordPreview,
+    signedIn: readiness.auth?.signedIn === true,
+    sttStatus: readiness.sttStatus,
+    sttError: readiness.sttError,
+    lastFailureReason: readiness.lastFailureReason,
+    lastError: readiness.lastError,
+    lastSuccessfulCaptionAt: readiness.lastSuccessfulCaptionAt,
+    lastCaptionLatencyMs: readiness.lastCaptionLatencyMs,
   };
   console.log(CAPTION_LOG_PREFIX, 'popup runtime status', response);
   return response;
@@ -941,6 +1218,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   } else if (message.type === 'isweep_get_caption_runtime_status') {
     handleCaptionRuntimeStatus().then(sendResponse);
     return true; // async
+  } else if (message.type === 'isweep_get_caption_readiness_status') {
+    buildCaptionReadinessStatus().then(sendResponse);
+    return true; // async
   } else if (message.type === 'isweep_start_audio_captions') {
     audioCaptionDebug.ccStartCount += 1;
     audioCaptionDebug.captureStartedAt = null;
@@ -1293,6 +1573,17 @@ async function handleMarkerAnalyze(videoId, forceRefresh = false) {
     return { status: 'error', source: null, events: [], failure_reason: 'missing_video_id' };
   }
 
+  const modeSnapshot = await getCaptionModeSnapshot();
+  if (modeSnapshot.cleanCaptionsEnabled) {
+    return {
+      status: 'unavailable',
+      source: null,
+      events: [],
+      failure_reason: 'caption_mode_no_markers',
+      mode: modeSnapshot.mode,
+    };
+  }
+
   if (!forceRefresh && markerCacheByVideoId.has(cleanVideoId)) {
     const cached = markerCacheByVideoId.get(cleanVideoId);
     console.log(MARKER_LOG_PREFIX, 'cache hit', { videoId: cleanVideoId, status: cached.status, events: cached.events?.length || 0 });
@@ -1312,8 +1603,9 @@ async function handleMarkerAnalyze(videoId, forceRefresh = false) {
   let res;
   let responseBody = '';
   try {
+    const requestUrl = `${backendUrl}/videos/analyze`;
     console.log(MARKER_LOG_PREFIX, 'analyze start', { videoId: cleanVideoId });
-    res = await fetch(`${backendUrl}/videos/analyze`, {
+    res = await fetch(requestUrl, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -1333,6 +1625,7 @@ async function handleMarkerAnalyze(videoId, forceRefresh = false) {
       const failureReason = res.status === 404 ? 'videos_analyze_missing' : 'backend_http_error';
       console.warn(MARKER_LOG_PREFIX, 'analyze failed', {
         videoId: cleanVideoId,
+        requestUrl,
         status: res.status,
         failureReason,
         body: (responseBody || '').slice(0, 200),
@@ -1373,13 +1666,17 @@ async function handleMarkerAnalyze(videoId, forceRefresh = false) {
     const failureReason = /Failed to fetch|NetworkError|fetch/i.test(errorText)
       ? 'backend_not_running'
       : 'analyze_exception';
-    console.error(MARKER_LOG_PREFIX, 'analyze exception', {
+    const requestUrl = `${backendUrl}/videos/analyze`;
+    const markerErrorMeta = {
       videoId: cleanVideoId,
+      requestUrl,
       status: res?.status,
-      body: (responseBody || '').slice(0, 200),
+      responseBodyPreview: (responseBody || '').slice(0, 200),
       failureReason,
-      error: errorText,
-    });
+      exceptionName: String(err?.name || 'Error'),
+      exceptionMessage: String(err?.message || err || 'unknown error'),
+    };
+    console.error(`${MARKER_LOG_PREFIX} analyze exception ${JSON.stringify(markerErrorMeta)}`, markerErrorMeta);
     return { status: 'error', source: null, events: [], failure_reason: failureReason };
   }
 }
@@ -1418,6 +1715,10 @@ async function handleAudioCaptionChunk(videoId, audioChunk, mimeType, startSecon
     token = await ensureLocalDevCaptionToken(backendUrl);
   }
   if (!token) {
+    captionReadinessState.lastError = 'missing_token';
+    captionReadinessState.lastFailureReason = 'missing_token';
+    captionReadinessState.lastSttStatus = 'authentication_required';
+    captionReadinessState.lastSttError = 'missing_token';
     return { status: 'unavailable', events: [], failure_reason: 'missing_token' };
   }
 
@@ -1482,6 +1783,12 @@ async function handleAudioCaptionChunk(videoId, audioChunk, mimeType, startSecon
             : (typeof parsed.error === 'string' ? parsed.error : null);
         }
       } catch (_) {}
+      captionReadinessState.lastError = backendFailureReason || `http_${res.status}`;
+      captionReadinessState.lastFailureReason = backendFailureReason || 'analyze_exception';
+      captionReadinessState.lastSttStatus = backendFailureReason === 'stt_disabled'
+        ? 'disabled'
+        : (backendFailureReason === 'transcription_unavailable' ? 'model_unavailable' : 'transcription_error');
+      captionReadinessState.lastSttError = backendFailureReason || null;
       return {
         status: 'error',
         events: [],
@@ -1544,6 +1851,8 @@ async function handleAudioCaptionChunk(videoId, audioChunk, mimeType, startSecon
       cached: payload.cached === true,
       is_partial: payload.is_partial === true,
       stable_text: typeof payload.stable_text === 'string' ? payload.stable_text : '',
+      stt_status: typeof payload.stt_status === 'string' ? payload.stt_status : null,
+      stt_error: typeof payload.stt_error === 'string' ? payload.stt_error : null,
       latency: {
         captureStartedAt: captureStartedAtOut,
         chunkStartedAt,
@@ -1580,12 +1889,21 @@ async function handleAudioCaptionChunk(videoId, audioChunk, mimeType, startSecon
       failure_reason: result.failure_reason || null,
     });
     const resultText = result.text || result.clean_text || result.cleaned_text || '';
+    captionReadinessState.lastFailureReason = result.failure_reason || null;
+    captionReadinessState.lastSttStatus = String(result.stt_status || (result.failure_reason ? 'transcription_error' : 'ok'));
+    captionReadinessState.lastSttError = result.stt_error || null;
+    captionReadinessState.lastCaptionLatencyMs = Number.isFinite(Number(result?.latency?.totalLatencyMs))
+      ? Number(result.latency.totalLatencyMs)
+      : captionReadinessState.lastCaptionLatencyMs;
     if (result.status === 'ready' && resultText) {
       audioCaptionDebug.transcribeOkCount += 1;
+      captionReadinessState.lastCaptionAt = Date.now();
+      captionReadinessState.lastError = null;
     } else if (!resultText) {
       audioCaptionDebug.transcribeEmptyCount += 1;
     } else {
       audioCaptionDebug.transcribeErrorCount += 1;
+      captionReadinessState.lastError = result.failure_reason || 'transcription_error';
     }
     audioCaptionDebug.lastTranscribeStatus = result.status;
     audioCaptionDebug.lastTranscribeSource = result.source;
@@ -1630,6 +1948,10 @@ async function handleAudioCaptionChunk(videoId, audioChunk, mimeType, startSecon
     audioCaptionDebug.transcribeErrorCount += 1;
     audioCaptionDebug.lastError = errorText.slice(0, 80);
     audioCaptionDebug.updatedAt = Date.now();
+    captionReadinessState.lastError = errorText.slice(0, 120);
+    captionReadinessState.lastFailureReason = failureReason;
+    captionReadinessState.lastSttStatus = failureReason === 'backend_not_running' ? 'backend_unreachable' : 'transcription_error';
+    captionReadinessState.lastSttError = errorText.slice(0, 120);
     console.warn(AUDIO_DIAG_LOG, 'transcribe result', { status: 'error', failure_reason: failureReason, err: errorText.slice(0, 80) });
     return { status: 'error', source: null, events: [], failure_reason: failureReason };
   }

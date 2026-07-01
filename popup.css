@@ -192,6 +192,35 @@ body {
   color: #b91c1c;
 }
 
+.caption-readiness-panel {
+  margin-top: 8px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 8px;
+  display: grid;
+  gap: 6px;
+}
+
+.caption-readiness-row {
+  display: grid;
+  grid-template-columns: 104px 1fr;
+  gap: 8px;
+  align-items: start;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.caption-readiness-row .k {
+  color: var(--color-text-secondary);
+  font-weight: 600;
+}
+
+.caption-readiness-row .v {
+  color: var(--color-text-primary);
+  word-break: break-word;
+}
+
 .btn-cc {
   min-width: 56px;
   padding: 8px 12px;

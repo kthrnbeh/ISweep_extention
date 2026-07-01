@@ -142,6 +142,14 @@ const btnCleanCaptionsToggle = document.getElementById('btnCleanCaptionsToggle')
 const btnCaptionAppearance = document.getElementById('btnCaptionAppearance');
 const captionSettingsPanel = document.getElementById('captionSettingsPanel');
 const captionRuntimeStatus = document.getElementById('captionRuntimeStatus');
+const backendStateValue = document.getElementById('backendStateValue');
+const backendUrlValue = document.getElementById('backendUrlValue');
+const backendLastErrorValue = document.getElementById('backendLastErrorValue');
+const backendSttStatusValue = document.getElementById('backendSttStatusValue');
+const backendLastSuccessCaptionValue = document.getElementById('backendLastSuccessCaptionValue');
+const captionModeValue = document.getElementById('captionModeValue');
+const selectedWordsCountValue = document.getElementById('selectedWordsCountValue');
+const selectedWordsPreviewValue = document.getElementById('selectedWordsPreviewValue');
 const cleanCaptionStyleSelect = document.getElementById('cleanCaptionStyle');
 const cleanCaptionTextSizeSelect = document.getElementById('cleanCaptionTextSize');
 const cleanCaptionWordMuteModeSelect = document.getElementById('cleanCaptionWordMuteMode');
@@ -168,10 +176,64 @@ function renderCaptionRuntimeStatus(status) {
   captionRuntimeStatus.dataset.state = state;
 }
 
+function toRelativeTimeLabel(epochMs) {
+  const value = Number(epochMs);
+  if (!Number.isFinite(value) || value <= 0) return 'never';
+  const deltaSec = Math.max(Math.floor((Date.now() - value) / 1000), 0);
+  if (deltaSec < 1) return 'just now';
+  if (deltaSec < 60) return `${deltaSec}s ago`;
+  const min = Math.floor(deltaSec / 60);
+  if (min < 60) return `${min}m ago`;
+  const hrs = Math.floor(min / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  const days = Math.floor(hrs / 24);
+  return `${days}d ago`;
+}
+
+function renderCaptionReadiness(status) {
+  const readiness = status?.readiness && typeof status.readiness === 'object' ? status.readiness : status;
+  const backend = readiness?.backend && typeof readiness.backend === 'object' ? readiness.backend : {};
+
+  if (backendStateValue) {
+    backendStateValue.textContent = backend.ready === true ? 'Ready' : 'Offline';
+  }
+  if (backendUrlValue) {
+    backendUrlValue.textContent = String(backend.backendUrl || DEFAULT_BACKEND);
+  }
+  if (backendLastErrorValue) {
+    const reasonCode = String(backend.reasonCode || status?.reasonCode || readiness?.lastFailureReason || '').trim();
+    const detail = String(backend.errorMessage || readiness?.lastError || '').trim();
+    backendLastErrorValue.textContent = reasonCode || detail ? `${reasonCode || 'error'}${detail ? ` (${detail})` : ''}` : 'none';
+  }
+  if (backendSttStatusValue) {
+    const sttStatus = String(readiness?.sttStatus || backend.sttStatus || 'unknown');
+    const sttError = String(readiness?.sttError || '').trim();
+    backendSttStatusValue.textContent = sttError ? `${sttStatus} (${sttError})` : sttStatus;
+  }
+  if (backendLastSuccessCaptionValue) {
+    const since = toRelativeTimeLabel(readiness?.lastSuccessfulCaptionAt);
+    const latency = Number.isFinite(Number(readiness?.lastCaptionLatencyMs))
+      ? `, ${Math.round(Number(readiness.lastCaptionLatencyMs))}ms`
+      : '';
+    backendLastSuccessCaptionValue.textContent = `${since}${latency}`;
+  }
+  if (captionModeValue) {
+    captionModeValue.textContent = String(readiness?.captionModeLabel || 'Captions Only');
+  }
+  if (selectedWordsCountValue) {
+    selectedWordsCountValue.textContent = String(Number(readiness?.selectedWordCount || 0));
+  }
+  if (selectedWordsPreviewValue) {
+    const preview = Array.isArray(readiness?.selectedWordPreview) ? readiness.selectedWordPreview : [];
+    selectedWordsPreviewValue.textContent = preview.length ? preview.slice(0, 8).join(', ') : '(none)';
+  }
+}
+
 async function refreshCaptionRuntimeStatus() {
   try {
     const status = await chrome.runtime.sendMessage({ type: 'isweep_get_caption_runtime_status' });
     renderCaptionRuntimeStatus(status);
+    renderCaptionReadiness(status);
     const backendOk = status?.backend?.ok === true || status?.backendOnline === true;
     const sttEnabled = status?.backend?.stt_enabled === true || status?.sttEnabled === true;
     const captionSource = String(status?.source || status?.sourceLabel || status?.state || 'unknown');
@@ -183,6 +245,14 @@ async function refreshCaptionRuntimeStatus() {
     console.log('[ISWEEP][CAPTIONS]', 'popup status refreshed', status);
   } catch (error) {
     renderCaptionRuntimeStatus({ state: 'backend_offline', label: 'Audio captions: Backend offline' });
+    renderCaptionReadiness({
+      backend: {
+        ready: false,
+        backendUrl: DEFAULT_BACKEND,
+        reasonCode: 'backend_unreachable',
+      },
+      sttStatus: 'unknown',
+    });
     console.log('[ISWEEP][CAPTIONS]', 'popup status refresh failed', error?.message || error);
   }
 }

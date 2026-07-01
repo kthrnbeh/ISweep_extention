@@ -10,12 +10,13 @@ const LOG_PREFIX = '[ISWEEP][AUDIO_CAPTIONS][OFFSCREEN]';
 const AUDIO_DIAG_LOG = '[ISWEEP][AUDIO_DIAG]';
 const CAPTION_LATENCY_LOG = '[ISWEEP][CAPTION_LATENCY]';
 const AUDIO_SAMPLE_RATE = 16000;
-const AUDIO_CAPTION_CHUNK_SEC = 3.0;
-const AUDIO_CAPTION_OVERLAP_SEC = 0.5;
-const AUDIO_CAPTION_MIN_SEND_SEC = 2.0;
+const AUDIO_CAPTION_CHUNK_SEC = 0.35;
+const AUDIO_CAPTION_OVERLAP_SEC = 0.05;
+const AUDIO_CAPTION_MIN_SEND_SEC = 0.30;
 
 let offscreenChunkEmitCount = 0;
 let audioChunkStartedAtMs = 0;
+let captureStartedAtMs = 0;
 
 console.log(LOG_PREFIX, 'loaded');
 safeRuntimeSendMessage({ type: 'isweep_audio_diag', stage: 'offscreen_loaded' }).catch(() => {});
@@ -184,8 +185,10 @@ async function flushAudioChunk(options = {}) {
     mime_type: 'audio/wav',
     start_seconds: startSec,
     end_seconds: endSec,
+    capture_started_at: captureStartedAtMs,
     chunk_started_at: chunkStartedAt,
     chunk_flushed_at: chunkFlushedAt,
+    chunk_emitted_at: chunkFlushedAt,
     chunk_window_sec: AUDIO_CAPTION_CHUNK_SEC,
     chunk_overlap_sec: AUDIO_CAPTION_OVERLAP_SEC,
   }).catch(() => {});
@@ -218,6 +221,7 @@ async function stopCapture(reason = 'stopped') {
   audioChunkWarm = false;
   audioChunkStartSec = 0;
   audioChunkStartedAtMs = 0;
+  captureStartedAtMs = 0;
   activeVideoId = '';
   console.log(LOG_PREFIX, 'tab capture stopped', { reason });
 }
@@ -295,6 +299,7 @@ async function startCapture(streamId, videoId) {
   audioProcessor = workletNode;
   running = true;
   audioChunkStartSec = 0;
+  captureStartedAtMs = Date.now();
   audioChunkStartedAtMs = Date.now();
   audioChunkWarm = false;
   audioSampleBufs = [];

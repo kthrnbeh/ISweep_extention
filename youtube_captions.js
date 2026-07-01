@@ -1755,25 +1755,34 @@
           if (!message.cached) {
             const overlayRenderedAt = Date.now();
             const latency = message.latency && typeof message.latency === 'object' ? { ...message.latency } : {};
+            latency.contentScriptReceivedAt = Date.now();
+            latency.content_script_received_at = latency.contentScriptReceivedAt;
             latency.overlayRenderedAt = overlayRenderedAt;
-            latency.totalLatencyMs = Number.isFinite(Number(latency.chunkStartedAt))
-              ? Math.max(overlayRenderedAt - Number(latency.chunkStartedAt), 0)
+            latency.overlay_rendered_at = overlayRenderedAt;
+            latency.totalLatencyMs = Number.isFinite(Number(latency.captureStartedAt || latency.capture_started_at))
+              ? Math.max(overlayRenderedAt - Number(latency.captureStartedAt || latency.capture_started_at), 0)
               : null;
+            latency.total_latency_ms = latency.totalLatencyMs;
             console.log('[ISWEEP][AUDIO_DIAG]', 'overlay rendered audio_stt_live', { textLength: lastAudioCaptionText.length });
             console.log(CAPTION_LATENCY_LOG, 'overlay rendered', {
               source: nextSource,
               textLength: lastAudioCaptionText.length,
+              captureStartedAt: latency.captureStartedAt || latency.capture_started_at || null,
               chunkStartedAt: latency.chunkStartedAt || null,
               chunkFlushedAt: latency.chunkFlushedAt || null,
+              chunkEmittedAt: latency.chunkEmittedAt || latency.chunk_emitted_at || null,
+              backendReceivedAt: latency.backendReceivedAt || latency.backend_received_at || null,
               transcribeStartedAt: latency.transcribeStartedAt || null,
               transcribeFinishedAt: latency.transcribeFinishedAt || null,
               relaySentAt: latency.relaySentAt || null,
+              contentScriptReceivedAt: latency.contentScriptReceivedAt || null,
               overlayRenderedAt,
               totalLatencyMs: latency.totalLatencyMs,
             });
             safeRuntimeSendMessage({
               type: 'isweep_audio_diag',
               stage: 'overlay_rendered',
+              contentScriptReceivedAt: latency.contentScriptReceivedAt,
               overlayRenderedAt,
               totalLatencyMs: latency.totalLatencyMs,
             }).catch(() => {});

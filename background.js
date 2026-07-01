@@ -39,8 +39,10 @@ const AUDIO_CAPTION_DEDUPE_WINDOW_MS = 1600;
 const AUDIO_CAPTION_FILTER_ACTIONS_ENABLED = false; // Caption-only mode: keep false until filtering is intentionally re-enabled
 const recentCaptionByText = new Map();
 const tabCaptureSessionByTabId = new Map();
+const captionTranscribeQueueByTabId = new Map();
 let activeTabAudioCapture = null;
 let didLogBackendUrl = false;
+const CAPTION_TRANSCRIBE_INTERVAL_MS = 750;
 
 const AUDIO_DIAG_LOG = '[ISWEEP][AUDIO_DIAG]';
 
@@ -69,11 +71,15 @@ const audioCaptionDebug = {
   lastTextLength: 0,
   lastTextPreview: '',
   lastError: null,
+  captureStartedAt: null,
   chunkStartedAt: null,
   chunkFlushedAt: null,
+  chunkEmittedAt: null,
+  backendReceivedAt: null,
   transcribeStartedAt: null,
   transcribeFinishedAt: null,
   relaySentAt: null,
+  contentScriptReceivedAt: null,
   overlayRenderedAt: null,
   totalLatencyMs: null,
   chunkWindowSec: null,
@@ -415,6 +421,80 @@ async function stopTabAudioCapture(reason = 'captions_disabled') {
   return { ok: true };
 }
 
+function getCaptionTranscribeQueueState(tabId) {
+  const key = Number(tabId);
+  if (!captionTranscribeQueueByTabId.has(key)) {
+    captionTranscribeQueueByTabId.set(key, {
+      busy: false,
+      pending: null,
+      lastStartedAt: 0,
+      replacedCount: 0,
+    });
+  }
+  return captionTranscribeQueueByTabId.get(key);
+}
+
+function clearCaptionTranscribeQueue(tabId) {
+  const key = Number(tabId);
+  captionTranscribeQueueByTabId.delete(key);
+}
+
+async function processCaptionTranscribeQueueForTab(tabId) {
+  const state = getCaptionTranscribeQueueState(tabId);
+  if (state.busy) return;
+  state.busy = true;
+  try {
+    while (state.pending) {
+      const job = state.pending;
+      state.pending = null;
+
+      const waitMs = Math.max((state.lastStartedAt + CAPTION_TRANSCRIBE_INTERVAL_MS) - Date.now(), 0);
+      if (waitMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, waitMs));
+      }
+      state.lastStartedAt = Date.now();
+
+      const result = await handleAudioCaptionChunk(
+        job.videoId,
+        job.audioChunk,
+        job.mimeType,
+        job.startSeconds,
+        job.endSeconds,
+        job.audioSamples,
+        job.sampleRate,
+        job.channels,
+        job.chunkMeta,
+      );
+      await relayAudioCaptionResultToTab(result);
+    }
+  } finally {
+    state.busy = false;
+  }
+}
+
+function enqueueCaptionTranscribeJob(tabId, job) {
+  const state = getCaptionTranscribeQueueState(tabId);
+  if (state.pending) {
+    state.replacedCount += 1;
+    console.log(AUDIO_DIAG_LOG, 'replaced stale pending transcription chunk', {
+      tabId,
+      replacedCount: state.replacedCount,
+      oldStartSeconds: state.pending.startSeconds,
+      oldEndSeconds: state.pending.endSeconds,
+      newStartSeconds: job.startSeconds,
+      newEndSeconds: job.endSeconds,
+    });
+  }
+  state.pending = job;
+  processCaptionTranscribeQueueForTab(tabId).catch((err) => {
+    console.warn(AUDIO_DIAG_LOG, 'caption transcribe queue failure', {
+      tabId,
+      error: String(err?.message || err).slice(0, 120),
+    });
+    state.busy = false;
+  });
+}
+
 async function relayAudioCaptionResultToTab(result) {
   let tabId = Number(activeTabAudioCapture?.tabId);
   // If the service worker restarted and lost in-memory state, the tabId will be
@@ -492,8 +572,17 @@ async function relayAudioCaptionResultToTab(result) {
   try {
     await trySend(tabId);
     audioCaptionDebug.relaySentAt = Date.now();
+    audioCaptionDebug.contentScriptReceivedAt = audioCaptionDebug.relaySentAt;
     if (result?.latency && typeof result.latency === 'object') {
       result.latency.relaySentAt = audioCaptionDebug.relaySentAt;
+      result.latency.contentScriptReceivedAt = audioCaptionDebug.relaySentAt;
+      result.latency.content_script_received_at = audioCaptionDebug.relaySentAt;
+      result.latency.totalLatencyMs = Number.isFinite(Number(result.latency.captureStartedAt))
+        ? Math.max(audioCaptionDebug.relaySentAt - Number(result.latency.captureStartedAt), 0)
+        : result.latency.totalLatencyMs;
+      result.latency.total_latency_ms = Number.isFinite(Number(result.latency.capture_started_at))
+        ? Math.max(audioCaptionDebug.relaySentAt - Number(result.latency.capture_started_at), 0)
+        : result.latency.total_latency_ms;
     }
     audioCaptionDebug.relaySuccessCount += 1;
     audioCaptionDebug.updatedAt = Date.now();
@@ -551,6 +640,7 @@ async function handleStartTabAudioCaptions() {
   }
   const tabId = Number(activeTab.id);
   const videoId = getYouTubeVideoIdFromUrl(activeTab.url);
+  clearCaptionTranscribeQueue(tabId);
   await postTabCaptureStatusToTab(tabId, 'starting', null);
 
   const start = await startTabAudioCapture(tabId, videoId);
@@ -564,6 +654,9 @@ async function handleStartTabAudioCaptions() {
 }
 
 async function handleStopTabAudioCaptions() {
+  if (Number.isFinite(Number(activeTabAudioCapture?.tabId))) {
+    clearCaptionTranscribeQueue(Number(activeTabAudioCapture.tabId));
+  }
   await stopTabAudioCapture('captions_disabled');
   return { ok: true };
 }
@@ -848,11 +941,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true; // async
   } else if (message.type === 'isweep_start_audio_captions') {
     audioCaptionDebug.ccStartCount += 1;
+    audioCaptionDebug.captureStartedAt = null;
     audioCaptionDebug.chunkStartedAt = null;
     audioCaptionDebug.chunkFlushedAt = null;
+    audioCaptionDebug.chunkEmittedAt = null;
+    audioCaptionDebug.backendReceivedAt = null;
     audioCaptionDebug.transcribeStartedAt = null;
     audioCaptionDebug.transcribeFinishedAt = null;
     audioCaptionDebug.relaySentAt = null;
+    audioCaptionDebug.contentScriptReceivedAt = null;
     audioCaptionDebug.overlayRenderedAt = null;
     audioCaptionDebug.totalLatencyMs = null;
     audioCaptionDebug.updatedAt = Date.now();
@@ -879,13 +976,20 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     sendResponse({ ok: true });
     return;
   } else if (message.type === 'isweep_audio_caption_chunk') {
+    const tabId = Number(activeTabAudioCapture?.tabId || sender?.tab?.id);
     const bgChunkVideoId = String(message.video_id || activeTabAudioCapture?.videoId || '').trim();
     const chunkStartedAt = Number.isFinite(Number(message.chunk_started_at)) ? Number(message.chunk_started_at) : null;
     const chunkFlushedAt = Number.isFinite(Number(message.chunk_flushed_at)) ? Number(message.chunk_flushed_at) : null;
+    const captureStartedAt = Number.isFinite(Number(message.capture_started_at)) ? Number(message.capture_started_at) : chunkStartedAt;
+    const chunkEmittedAt = Number.isFinite(Number(message.chunk_emitted_at)) ? Number(message.chunk_emitted_at) : chunkFlushedAt;
+    const backendReceivedAt = Date.now();
     audioCaptionDebug.bgChunkReceivedCount += 1;
     audioCaptionDebug.lastVideoId = bgChunkVideoId || audioCaptionDebug.lastVideoId;
+    audioCaptionDebug.captureStartedAt = captureStartedAt;
     audioCaptionDebug.chunkStartedAt = chunkStartedAt;
     audioCaptionDebug.chunkFlushedAt = chunkFlushedAt;
+    audioCaptionDebug.chunkEmittedAt = chunkEmittedAt;
+    audioCaptionDebug.backendReceivedAt = backendReceivedAt;
     audioCaptionDebug.chunkWindowSec = Number.isFinite(Number(message.chunk_window_sec)) ? Number(message.chunk_window_sec) : audioCaptionDebug.chunkWindowSec;
     audioCaptionDebug.lastChunkBytes = typeof message.audio_chunk === 'string' ? message.audio_chunk.length : 0;
     audioCaptionDebug.updatedAt = Date.now();
@@ -900,24 +1004,32 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       startSeconds: message.start_seconds,
       endSeconds: message.end_seconds,
     });
-    handleAudioCaptionChunk(
-      bgChunkVideoId,
-      message.audio_chunk,
-      message.mime_type,
-      message.start_seconds,
-      message.end_seconds,
-      message.audio,
-      message.sampleRate,
-      message.channels,
-      {
+
+    if (!Number.isFinite(tabId)) {
+      sendResponse({ status: 'error', events: [], failure_reason: 'missing_tab_id' });
+      return;
+    }
+
+    enqueueCaptionTranscribeJob(tabId, {
+      tabId,
+      videoId: bgChunkVideoId,
+      audioChunk: message.audio_chunk,
+      mimeType: message.mime_type,
+      startSeconds: message.start_seconds,
+      endSeconds: message.end_seconds,
+      audioSamples: message.audio,
+      sampleRate: message.sampleRate,
+      channels: message.channels,
+      chunkMeta: {
+        captureStartedAt,
         chunkStartedAt,
         chunkFlushedAt,
+        chunkEmittedAt,
+        backendReceivedAt,
         chunkWindowSec: audioCaptionDebug.chunkWindowSec,
-      }
-    ).then(async (result) => {
-      await relayAudioCaptionResultToTab(result);
-      sendResponse(result);
+      },
     });
+    sendResponse({ ok: true, queued: true });
     return true; // async
   } else if (message.type === 'isweep_audio_diag') {
     // Lifecycle updates from offscreen.js
@@ -954,10 +1066,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       audioCaptionDebug.overlayRenderedAt = Number.isFinite(Number(message.overlayRenderedAt))
         ? Number(message.overlayRenderedAt)
         : Date.now();
+      audioCaptionDebug.contentScriptReceivedAt = Number.isFinite(Number(message.contentScriptReceivedAt))
+        ? Number(message.contentScriptReceivedAt)
+        : audioCaptionDebug.contentScriptReceivedAt;
       audioCaptionDebug.totalLatencyMs = Number.isFinite(Number(message.totalLatencyMs))
         ? Number(message.totalLatencyMs)
-        : (Number.isFinite(Number(audioCaptionDebug.chunkStartedAt))
-          ? Math.max(audioCaptionDebug.overlayRenderedAt - Number(audioCaptionDebug.chunkStartedAt), 0)
+        : (Number.isFinite(Number(audioCaptionDebug.captureStartedAt))
+          ? Math.max(audioCaptionDebug.overlayRenderedAt - Number(audioCaptionDebug.captureStartedAt), 0)
           : null);
       audioCaptionDebug.updatedAt = Date.now();
     }
@@ -1289,8 +1404,11 @@ async function handleAudioCaptionChunk(videoId, audioChunk, mimeType, startSecon
   const normalizedEnd = Number.isFinite(Number(endSeconds))
     ? Math.max(Number(endSeconds), normalizedStart)
     : normalizedStart;
+  const captureStartedAt = Number.isFinite(Number(chunkMeta?.captureStartedAt)) ? Number(chunkMeta.captureStartedAt) : null;
   const chunkStartedAt = Number.isFinite(Number(chunkMeta?.chunkStartedAt)) ? Number(chunkMeta.chunkStartedAt) : null;
   const chunkFlushedAt = Number.isFinite(Number(chunkMeta?.chunkFlushedAt)) ? Number(chunkMeta.chunkFlushedAt) : null;
+  const chunkEmittedAt = Number.isFinite(Number(chunkMeta?.chunkEmittedAt)) ? Number(chunkMeta.chunkEmittedAt) : chunkFlushedAt;
+  const backendReceivedAt = Number.isFinite(Number(chunkMeta?.backendReceivedAt)) ? Number(chunkMeta.backendReceivedAt) : Date.now();
 
   const backendUrl = await getBackendUrl();
   let token = await getAuthToken();
@@ -1334,6 +1452,9 @@ async function handleAudioCaptionChunk(videoId, audioChunk, mimeType, startSecon
         mime_type: mimeType || 'audio/wav',
         chunk_start_seconds: normalizedStart,
         chunk_end_seconds: normalizedEnd,
+        capture_started_at: captureStartedAt,
+        chunk_emitted_at: chunkEmittedAt,
+        backend_received_at: backendReceivedAt,
         chunk_started_at: chunkStartedAt,
         chunk_flushed_at: chunkFlushedAt,
         start_seconds: normalizedStart,
@@ -1382,6 +1503,23 @@ async function handleAudioCaptionChunk(videoId, audioChunk, mimeType, startSecon
       || (Array.isArray(payload.words) && payload.words.length)
     );
     const normalizedStatus = payload.status || (hasDisplayPayload ? 'ready' : 'error');
+    const backendLatency = payload?.latency && typeof payload.latency === 'object' ? payload.latency : {};
+    const captureStartedAtOut = Number.isFinite(Number(backendLatency.capture_started_at))
+      ? Number(backendLatency.capture_started_at)
+      : captureStartedAt;
+    const chunkEmittedAtOut = Number.isFinite(Number(backendLatency.chunk_emitted_at))
+      ? Number(backendLatency.chunk_emitted_at)
+      : chunkEmittedAt;
+    const backendReceivedAtOut = Number.isFinite(Number(backendLatency.backend_received_at))
+      ? Number(backendLatency.backend_received_at)
+      : backendReceivedAt;
+    const transcribeStartedAtOut = Number.isFinite(Number(backendLatency.transcribe_started_at))
+      ? Number(backendLatency.transcribe_started_at)
+      : transcribeStartedAt;
+    const transcribeFinishedAtOut = Number.isFinite(Number(backendLatency.transcribe_finished_at))
+      ? Number(backendLatency.transcribe_finished_at)
+      : transcribeFinishedAt;
+
     const result = {
       status: normalizedStatus,
       source: payload.source || 'audio',
@@ -1402,15 +1540,33 @@ async function handleAudioCaptionChunk(videoId, audioChunk, mimeType, startSecon
         : (Array.isArray(payload.words) ? payload.words : []),
       failure_reason: payload.failure_reason || payload.reason || null,
       cached: payload.cached === true,
+      is_partial: payload.is_partial === true,
+      stable_text: typeof payload.stable_text === 'string' ? payload.stable_text : '',
       latency: {
+        captureStartedAt: captureStartedAtOut,
         chunkStartedAt,
         chunkFlushedAt,
-        transcribeStartedAt,
-        transcribeFinishedAt,
+        chunkEmittedAt: chunkEmittedAtOut,
+        backendReceivedAt: backendReceivedAtOut,
+        transcribeStartedAt: transcribeStartedAtOut,
+        transcribeFinishedAt: transcribeFinishedAtOut,
+        capture_started_at: captureStartedAtOut,
+        chunk_started_at: chunkStartedAt,
+        chunk_flushed_at: chunkFlushedAt,
+        chunk_emitted_at: chunkEmittedAtOut,
+        backend_received_at: backendReceivedAtOut,
+        transcribe_started_at: transcribeStartedAtOut,
+        transcribe_finished_at: transcribeFinishedAtOut,
         relaySentAt: null,
         overlayRenderedAt: null,
-        totalLatencyMs: Number.isFinite(Number(chunkStartedAt))
-          ? Math.max(transcribeFinishedAt - Number(chunkStartedAt), 0)
+        contentScriptReceivedAt: null,
+        content_script_received_at: null,
+        overlay_rendered_at: null,
+        totalLatencyMs: Number.isFinite(Number(captureStartedAtOut))
+          ? Math.max(transcribeFinishedAtOut - Number(captureStartedAtOut), 0)
+          : null,
+        total_latency_ms: Number.isFinite(Number(captureStartedAtOut))
+          ? Math.max(transcribeFinishedAtOut - Number(captureStartedAtOut), 0)
           : null,
       },
     };
@@ -1447,10 +1603,13 @@ async function handleAudioCaptionChunk(videoId, audioChunk, mimeType, startSecon
     });
     console.log(CAPTION_LATENCY_LOG, 'transcribe complete', {
       videoId: cleanVideoId,
+      captureStartedAt: captureStartedAtOut,
       chunkStartedAt,
       chunkFlushedAt,
-      transcribeStartedAt,
-      transcribeFinishedAt,
+      chunkEmittedAt: chunkEmittedAtOut,
+      backendReceivedAt: backendReceivedAtOut,
+      transcribeStartedAt: transcribeStartedAtOut,
+      transcribeFinishedAt: transcribeFinishedAtOut,
       totalLatencyMs: result.latency.totalLatencyMs,
       textLength: resultText.length,
     });

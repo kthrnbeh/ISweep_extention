@@ -1652,55 +1652,13 @@ async function handleAudioAhead(videoId, audioChunk, mimeType, startSeconds, end
     }
 
     if (result.status === 'ready' && result.events.length === 0 && transcriptEligible) {
-      const captionDurationSeconds = Math.max(normalizedEnd - normalizedStart, 0);
-      const decision = await handleCaptionDecision(result.text, captionDurationSeconds, {
-        source: 'audio_stt',
-        dedupeWindowMs: AUDIO_CAPTION_DEDUPE_WINDOW_MS,
+      // Selected-word mute mode is driven solely by /captions/transcribe word timestamps
+      // in the content script. Do not call /event or handleCaptionDecision here.
+      console.log('[ISWEEP][WORD_MUTE] skipping /event decision; using STT word timestamps only', {
+        videoId: cleanVideoId,
+        source: result.source,
+        textLength: typeof result.text === 'string' ? result.text.length : 0,
       });
-      if (shouldApplyFilterDecision(decision, result.text, result.source)) {
-        // Additional strict check for mute: require matched word/phrase, not just category.
-        if (decision.action === 'mute' && !shouldApplyWordMute(decision, result.text, result.source)) {
-          // Mute was gated; skip event creation.
-          console.log('[ISWEEP][AUDIO_AHEAD] chunk handled without mute', {
-            videoId: cleanVideoId,
-            reason: 'no matched word/phrase',
-            matched_category: decision.matched_category || null,
-          });
-        } else if (decision.action === 'mute' && shouldApplyWordMute(decision, result.text, result.source)) {
-          // Mute is authorized; create the event.
-          const matchedText = getMatchedFilterText(decision);
-          result.events = [{
-            id: `audio-stt-${cleanVideoId}-${normalizedStart}-${decision.action}`,
-            action: decision.action,
-            start_seconds: normalizedStart,
-            end_seconds: normalizedEnd,
-            duration_seconds: captionDurationSeconds,
-            matched_category: decision.matched_category || null,
-            matched_word: matchedText,
-            reason: decision.reason || 'audio stt /event decision',
-            source: 'audio_stt',
-          }];
-          console.log('[ISWEEP][WORD_MUTE] applying mute for matched filtered word', {
-            videoId: cleanVideoId,
-            word: matchedText,
-            category: decision.matched_category || null,
-            startSeconds: normalizedStart,
-            endSeconds: normalizedEnd,
-          });
-        } else if (decision.action !== 'mute') {
-          // Non-mute action (skip, fast_forward, etc.); apply directly.
-          result.events = [{
-            id: `audio-stt-${cleanVideoId}-${normalizedStart}-${decision.action}`,
-            action: decision.action,
-            start_seconds: normalizedStart,
-            end_seconds: normalizedEnd,
-            duration_seconds: captionDurationSeconds,
-            matched_category: decision.matched_category || null,
-            reason: decision.reason || 'audio stt /event decision',
-            source: 'audio_stt',
-          }];
-        }
-      }
     }
     console.log(AUDIO_LOG, 'chunk result', {
       videoId: cleanVideoId,

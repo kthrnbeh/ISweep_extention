@@ -7,10 +7,25 @@ const vm = require('node:vm');
 function loadYoutubeTimingHooks() {
   const filePath = path.resolve(__dirname, '..', 'youtube_captions.js');
   const source = fs.readFileSync(filePath, 'utf8');
+  const fakeVideo = {
+    currentTime: 0,
+    muted: false,
+    volume: 1,
+    paused: false,
+  };
   const context = {
     console: { log() {}, warn() {}, error() {} },
     globalThis: {},
     window: { innerWidth: 1280, innerHeight: 720 },
+    document: {
+      querySelector(selector) {
+        if (selector === 'video') return fakeVideo;
+        return null;
+      },
+      getElementById() {
+        return null;
+      },
+    },
     __ISWEEP_TEST_MODE__: true,
     setTimeout,
     clearTimeout,

@@ -1705,7 +1705,10 @@
       }
       if (message?.type === 'isweep_audio_caption_text') {
         const nextSource = message.cached === true ? 'audio_stt_cached' : (message.source || 'audio_stt_live');
-        const dedupedText = String(message.clean_text || message.cleaned_text || message.text || '').trim();
+        const isPartial = message.is_partial === true;
+        const stableText = String(message.stable_text || '').trim();
+        const incomingText = String(message.clean_text || message.cleaned_text || message.text || '').trim();
+        const dedupedText = (!isPartial && stableText) ? stableText : incomingText;
         lastAudioCaptionFailureReason = message.failure_reason || null;
         if (dedupedText) {
           lastAudioCaptionSource = nextSource;

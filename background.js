@@ -535,6 +535,8 @@ async function relayAudioCaptionResultToTab(result) {
     clean_captions: Array.isArray(result?.clean_captions) ? result.clean_captions : [],
     clean_text: result?.clean_text || null,
     cleaned_text: result?.cleaned_text || null,
+    is_partial: result?.is_partial === true,
+    stable_text: typeof result?.stable_text === 'string' ? result.stable_text : '',
     words: Array.isArray(result?.words)
       ? result.words
       : (Array.isArray(result?.word_timestamps) ? result.word_timestamps : []),

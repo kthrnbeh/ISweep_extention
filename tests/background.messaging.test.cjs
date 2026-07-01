@@ -1005,3 +1005,127 @@ test('relay includes word timestamps for selected-word mute scheduling', async (
   assert.equal(message.word_timestamps.length, 4);
   assert.equal(message.source, 'audio_stt_live');
 });
+
+test('latest-only queue keeps one pending chunk and replaces stale pending work', async () => {
+  const bg = loadBackgroundContext();
+  const tabId = 101;
+  const state = bg.getCaptionTranscribeQueueState(tabId);
+  state.busy = true;
+
+  for (let i = 0; i < 8; i += 1) {
+    bg.enqueueCaptionTranscribeJob(tabId, {
+      tabId,
+      videoId: 'latest-only',
+      audioChunk: 'ZmFrZQ==',
+      mimeType: 'audio/wav',
+      startSeconds: i * 0.35,
+      endSeconds: (i * 0.35) + 0.35,
+      audioSamples: null,
+      sampleRate: 16000,
+      channels: 1,
+      chunkMeta: {},
+    });
+  }
+
+  assert.equal(Boolean(state.pending), true);
+  assert.equal(state.pending.startSeconds > 2.4 && state.pending.startSeconds < 2.5, true);
+  assert.equal(state.replacedCount >= 7, true);
+});
+
+test('processCaptionTranscribeQueueForTab runs at most one stale replacement after busy work', async () => {
+  const bg = loadBackgroundContext();
+  const tabId = 102;
+  const calls = [];
+
+  bg.handleAudioCaptionChunk = async (videoId, audioChunk, mimeType, startSeconds, endSeconds) => {
+    calls.push({ startSeconds, endSeconds });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    return {
+      status: 'ready',
+      source: 'audio_stt_live',
+      text: `chunk ${startSeconds.toFixed(2)}`,
+      events: [],
+    };
+  };
+  bg.relayAudioCaptionResultToTab = async () => true;
+
+  bg.enqueueCaptionTranscribeJob(tabId, {
+    tabId,
+    videoId: 'queue-run',
+    audioChunk: 'ZmFrZQ==',
+    mimeType: 'audio/wav',
+    startSeconds: 0,
+    endSeconds: 0.35,
+    chunkMeta: {},
+  });
+  bg.enqueueCaptionTranscribeJob(tabId, {
+    tabId,
+    videoId: 'queue-run',
+    audioChunk: 'ZmFrZQ==',
+    mimeType: 'audio/wav',
+    startSeconds: 0.35,
+    endSeconds: 0.7,
+    chunkMeta: {},
+  });
+  bg.enqueueCaptionTranscribeJob(tabId, {
+    tabId,
+    videoId: 'queue-run',
+    audioChunk: 'ZmFrZQ==',
+    mimeType: 'audio/wav',
+    startSeconds: 0.7,
+    endSeconds: 1.05,
+    chunkMeta: {},
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].startSeconds, 0);
+
+  const queueState = bg.getCaptionTranscribeQueueState(tabId);
+  assert.equal(queueState.busy, true);
+  assert.equal(queueState.replacedCount >= 1, true);
+});
+
+test('handleAudioCaptionChunk includes latency diagnostics from capture to transcribe finish', async () => {
+  const bg = loadBackgroundContext();
+  bg.getAuthToken = async () => 'token';
+  bg.getBackendUrl = async () => 'http://127.0.0.1:5000';
+
+  bg.fetch = async () => ({
+    ok: true,
+    status: 200,
+    text: async () => JSON.stringify({
+      status: 'ready',
+      source: 'audio_stt_live',
+      text: 'hello there',
+      words: [{ word: 'hello', start: 1.0, end: 1.2 }],
+      word_timestamps: [{ word: 'hello', start: 1.0, end: 1.2 }],
+      is_partial: true,
+      stable_text: 'hello',
+      latency: {
+        capture_started_at: 1000,
+        chunk_emitted_at: 1200,
+        backend_received_at: 1220,
+        transcribe_started_at: 1230,
+        transcribe_finished_at: 1400,
+      },
+    }),
+  });
+
+  const result = await bg.handleAudioCaptionChunk('lat-1', 'ZmFrZQ==', 'audio/wav', 1.0, 1.35, null, null, null, {
+    captureStartedAt: 1000,
+    chunkStartedAt: 1050,
+    chunkFlushedAt: 1200,
+    chunkEmittedAt: 1200,
+    backendReceivedAt: 1220,
+  });
+
+  assert.equal(result.status, 'ready');
+  assert.equal(result.is_partial, true);
+  assert.equal(result.stable_text, 'hello');
+  assert.equal(typeof result.latency, 'object');
+  assert.equal(result.latency.capture_started_at, 1000);
+  assert.equal(result.latency.backend_received_at, 1220);
+  assert.equal(result.latency.transcribe_finished_at, 1400);
+  assert.equal(result.latency.total_latency_ms >= 400, true);
+});

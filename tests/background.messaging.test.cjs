@@ -109,7 +109,11 @@ test('caption runtime status prefers YouTube fallback when active tab reports li
 
 test('caption runtime status reports listening when health has stt_enabled true and no transcript yet', async () => {
   const bg = loadBackgroundContext();
-  bg.fetch = async () => ({ ok: true, status: 200, json: async () => ({ status: 'ok', stt_enabled: true }) });
+  bg.fetch = async () => ({
+    ok: true,
+    status: 200,
+    text: async () => JSON.stringify({ status: 'ok', stt_enabled: true }),
+  });
   bg.chrome.tabs.query = async () => ([{ id: 7 }]);
   bg.chrome.tabs.sendMessage = async () => ({
     usingYoutubeFallback: false,
@@ -127,7 +131,11 @@ test('caption runtime status reports listening when health has stt_enabled true 
 
 test('caption runtime status stays listening until audio STT has real text', async () => {
   const bg = loadBackgroundContext();
-  bg.fetch = async () => ({ ok: true, status: 200, json: async () => ({ status: 'ok', stt_enabled: true }) });
+  bg.fetch = async () => ({
+    ok: true,
+    status: 200,
+    text: async () => JSON.stringify({ status: 'ok', stt_enabled: true }),
+  });
   bg.chrome.tabs.query = async () => ([{ id: 11 }]);
   bg.chrome.tabs.sendMessage = async () => ({
     usingYoutubeFallback: false,
@@ -145,7 +153,11 @@ test('caption runtime status stays listening until audio STT has real text', asy
 
 test('caption runtime status reports audio STT live only after real text is present', async () => {
   const bg = loadBackgroundContext();
-  bg.fetch = async () => ({ ok: true, status: 200, json: async () => ({ status: 'ok', stt_enabled: true }) });
+  bg.fetch = async () => ({
+    ok: true,
+    status: 200,
+    text: async () => JSON.stringify({ status: 'ok', stt_enabled: true }),
+  });
   bg.chrome.tabs.query = async () => ([{ id: 12 }]);
   bg.chrome.tabs.sendMessage = async () => ({
     usingYoutubeFallback: false,
@@ -163,7 +175,11 @@ test('caption runtime status reports audio STT live only after real text is pres
 
 test('caption runtime status reports stt_disabled only when health stt_enabled is false', async () => {
   const bg = loadBackgroundContext();
-  bg.fetch = async () => ({ ok: true, status: 200, json: async () => ({ status: 'ok', stt_enabled: false }) });
+  bg.fetch = async () => ({
+    ok: true,
+    status: 200,
+    text: async () => JSON.stringify({ status: 'ok', stt_enabled: false }),
+  });
   bg.chrome.tabs.query = async () => ([{ id: 7 }]);
   bg.chrome.tabs.sendMessage = async () => ({
     usingYoutubeFallback: false,

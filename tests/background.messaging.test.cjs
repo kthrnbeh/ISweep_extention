@@ -1193,3 +1193,93 @@ test('handleAudioCaptionChunk includes latency diagnostics from capture to trans
   assert.equal(result.latency.transcribe_finished_at, 1400);
   assert.equal(result.latency.total_latency_ms >= 400, true);
 });
+
+test('relay drops stale audio window result and does not send to content script', async () => {
+  const bg = loadBackgroundContext();
+  const sent = [];
+  bg.chrome.tabs.query = async () => ([{ id: 77, url: 'https://www.youtube.com/watch?v=stale77' }]);
+  bg.chrome.tabs.sendMessage = async (tabId, payload) => {
+    sent.push({ tabId, payload });
+    return { ok: true };
+  };
+
+  const timeline = bg.getCaptionTimelineState(77);
+  timeline.lastAudioWindowEndMs = 5000;
+
+  const ok = await bg.relayAudioCaptionResultToTab({
+    status: 'ready',
+    source: 'audio_stt',
+    text: 'older text',
+    tab_id: 77,
+    audio_window_end_ms: 4200,
+    chunk_id: 'old-1',
+    events: [],
+  });
+
+  assert.equal(ok, true);
+  assert.equal(sent.length, 0);
+  assert.equal(timeline.lastDroppedReason, 'old_audio_window');
+});
+
+test('background forwards offscreen VAD state updates to the active tab', async () => {
+  const bg = loadBackgroundContext();
+  const sent = [];
+  bg.chrome.tabs.sendMessage = async (tabId, payload) => {
+    sent.push({ tabId, payload });
+    return { ok: true };
+  };
+
+  const response = await bg.__sendRuntimeMessage({
+    type: 'isweep_audio_vad_state',
+    tab_id: 22,
+    video_id: 'vad-video',
+    session_id: 'vad-session',
+    speech_active: false,
+    reason: 'test',
+  });
+
+  assert.equal(response.ok, true);
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].payload.type, 'isweep_audio_vad_state');
+  assert.equal(sent[0].payload.speech_active, false);
+});
+
+test('reference lookup interface runs once per stable video and uses short-lived cache', async () => {
+  const bg = loadBackgroundContext();
+  let calls = 0;
+  bg.registerReferenceProvider({
+    name: 'unit_provider',
+    lookup: async () => {
+      calls += 1;
+      return [{
+        source_name: 'unit_provider',
+        source_url: 'https://example.test/ref',
+        title_match_score: 0.9,
+        duration_match_score: 0.8,
+        text: 'candidate text',
+        license_or_permission_status: 'allowed',
+        timing_available: false,
+        candidate_confidence: 0.72,
+      }];
+    },
+  });
+
+  const first = await bg.lookupReferenceCandidatesOnce({
+    video_id: 'stable-video-1',
+    title: 'Some title',
+    channel: 'Some channel',
+    duration_seconds: 123,
+  });
+  const second = await bg.lookupReferenceCandidatesOnce({
+    video_id: 'stable-video-1',
+    title: 'Some title',
+    channel: 'Some channel',
+    duration_seconds: 123,
+  });
+
+  assert.equal(first.cached, false);
+  assert.equal(second.cached, true);
+  assert.equal(calls, 1);
+  assert.equal(Array.isArray(first.candidates), true);
+  assert.equal(first.candidates.length, 1);
+});

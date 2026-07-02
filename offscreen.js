@@ -13,10 +13,18 @@ const AUDIO_SAMPLE_RATE = 16000;
 const AUDIO_CAPTION_CHUNK_SEC = 0.35;
 const AUDIO_CAPTION_OVERLAP_SEC = 0.05;
 const AUDIO_CAPTION_MIN_SEND_SEC = 0.30;
+const VAD_RMS_THRESHOLD = 0.012;
+const VAD_SPEECH_END_HOLD_MS = 380;
 
 let offscreenChunkEmitCount = 0;
 let audioChunkStartedAtMs = 0;
 let captureStartedAtMs = 0;
+let activeTabId = null;
+let captureSessionId = '';
+let captureSequenceNumber = 0;
+let vadSpeechActive = false;
+let vadLastSpeechAtMs = 0;
+let vadLastSentAtMs = 0;
 
 console.log(LOG_PREFIX, 'loaded');
 safeRuntimeSendMessage({ type: 'isweep_audio_diag', stage: 'offscreen_loaded' }).catch(() => {});
@@ -52,6 +60,12 @@ let audioChunkWarm = false;
 let audioChunkStartSec = 0;
 let running = false;
 let activeVideoId = '';
+
+function buildCaptureSessionId(tabId, videoId) {
+  const safeTab = Number.isFinite(Number(tabId)) ? Number(tabId) : 0;
+  const safeVideo = String(videoId || '').trim() || 'unknown_video';
+  return `${safeTab}:${safeVideo}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
+}
 
 function encodeWAV(sampleBufs, sampleRate) {
   const totalSamples = sampleBufs.reduce((n, b) => n + b.length, 0);
@@ -147,8 +161,17 @@ async function flushAudioChunk(options = {}) {
   const audioChunk = arrayBufferToBase64(wavBuf);
 
   offscreenChunkEmitCount += 1;
+  captureSequenceNumber += 1;
+  const sequenceNumber = captureSequenceNumber;
+  const chunkId = `${captureSessionId || 'session'}:${sequenceNumber}`;
+  const audioWindowStartMs = Math.max(Math.round(startSec * 1000), 0);
+  const audioWindowEndMs = Math.max(Math.round(endSec * 1000), audioWindowStartMs);
   console.log(LOG_PREFIX, 'chunk emitted', {
     videoId: activeVideoId,
+    tabId: activeTabId,
+    sessionId: captureSessionId,
+    sequenceNumber,
+    chunkId,
     start_seconds: startSec,
     end_seconds: endSec,
   });
@@ -178,7 +201,11 @@ async function flushAudioChunk(options = {}) {
   }
   await safeRuntimeSendMessage({
     type: 'isweep_audio_caption_chunk',
+    tab_id: Number.isFinite(Number(activeTabId)) ? Number(activeTabId) : null,
     video_id: activeVideoId,
+    session_id: captureSessionId,
+    sequence_number: sequenceNumber,
+    chunk_id: chunkId,
     sampleRate,
     channels: 1,
     audio_chunk: audioChunk,
@@ -189,9 +216,53 @@ async function flushAudioChunk(options = {}) {
     chunk_started_at: chunkStartedAt,
     chunk_flushed_at: chunkFlushedAt,
     chunk_emitted_at: chunkFlushedAt,
+    audio_window_start_ms: audioWindowStartMs,
+    audio_window_end_ms: audioWindowEndMs,
     chunk_window_sec: AUDIO_CAPTION_CHUNK_SEC,
     chunk_overlap_sec: AUDIO_CAPTION_OVERLAP_SEC,
   }).catch(() => {});
+}
+
+function computeFrameRms(samples) {
+  const frame = Array.isArray(samples) || samples instanceof Float32Array ? samples : [];
+  if (!frame.length) return 0;
+  let sum = 0;
+  for (let i = 0; i < frame.length; i += 1) {
+    const value = Number(frame[i]) || 0;
+    sum += value * value;
+  }
+  return Math.sqrt(sum / frame.length);
+}
+
+function maybeSendVadState(speechActive, reason = 'frame') {
+  const now = Date.now();
+  const changed = speechActive !== vadSpeechActive;
+  const periodic = (now - vadLastSentAtMs) >= 600;
+  if (!changed && !periodic) return;
+  vadSpeechActive = speechActive;
+  vadLastSentAtMs = now;
+  safeRuntimeSendMessage({
+    type: 'isweep_audio_vad_state',
+    tab_id: Number.isFinite(Number(activeTabId)) ? Number(activeTabId) : null,
+    video_id: activeVideoId || null,
+    session_id: captureSessionId || null,
+    speech_active: speechActive === true,
+    reason,
+    observed_at: now,
+  }).catch(() => {});
+}
+
+function updateVadFromFrame(samples) {
+  const now = Date.now();
+  const rms = computeFrameRms(samples);
+  if (rms >= VAD_RMS_THRESHOLD) {
+    vadLastSpeechAtMs = now;
+    maybeSendVadState(true, 'rms_active');
+    return;
+  }
+  if ((now - vadLastSpeechAtMs) >= VAD_SPEECH_END_HOLD_MS) {
+    maybeSendVadState(false, 'rms_speech_end');
+  }
 }
 
 async function stopCapture(reason = 'stopped') {
@@ -222,13 +293,22 @@ async function stopCapture(reason = 'stopped') {
   audioChunkStartSec = 0;
   audioChunkStartedAtMs = 0;
   captureStartedAtMs = 0;
+  captureSequenceNumber = 0;
+  vadSpeechActive = false;
+  vadLastSpeechAtMs = 0;
+  vadLastSentAtMs = 0;
+  captureSessionId = '';
+  activeTabId = null;
   activeVideoId = '';
   console.log(LOG_PREFIX, 'tab capture stopped', { reason });
 }
 
-async function startCapture(streamId, videoId) {
+async function startCapture(streamId, videoId, tabId) {
   await stopCapture('restart');
   activeVideoId = String(videoId || '').trim();
+  activeTabId = Number.isFinite(Number(tabId)) ? Number(tabId) : null;
+  captureSessionId = buildCaptureSessionId(activeTabId, activeVideoId);
+  captureSequenceNumber = 0;
   console.log(LOG_PREFIX, 'start received', { videoId: activeVideoId });
   safeRuntimeSendMessage({ type: 'isweep_audio_diag', stage: 'offscreen_start_received', videoId: activeVideoId }).catch(() => {});
 
@@ -275,6 +355,7 @@ async function startCapture(streamId, videoId) {
 
   workletNode.port.onmessage = (event) => {
     if (!running || !audioCtx) return;
+    updateVadFromFrame(event.data);
     if (!audioSampleBufs.length) {
       audioChunkStartedAtMs = Date.now();
     }
@@ -303,6 +384,8 @@ async function startCapture(streamId, videoId) {
   audioChunkStartedAtMs = Date.now();
   audioChunkWarm = false;
   audioSampleBufs = [];
+  vadLastSpeechAtMs = Date.now();
+  maybeSendVadState(false, 'capture_started');
 }
 
 function classifyCaptureError(error) {
@@ -318,7 +401,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     console.log(LOG_PREFIX, 'start received', {
       videoId: String(message.video_id || '').trim(),
     });
-    startCapture(message.stream_id, message.video_id)
+    startCapture(message.stream_id, message.video_id, message.tab_id)
       .then(() => sendResponse({ ok: true }))
       .catch((error) => sendResponse({ ok: false, failure_reason: classifyCaptureError(error) }));
     return true;

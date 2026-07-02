@@ -63,6 +63,139 @@ const CAPTION_TRANSCRIBE_INTERVAL_MS = 750;
 const AUDIO_RELAY_DEDUPE_WINDOW_MS = 1200;
 
 const AUDIO_DIAG_LOG = '[ISWEEP][AUDIO_DIAG]';
+const CAPTION_STATE_LOG = '[ISWEEP][CAPTION_STATE]';
+
+const captionTimelineByTabId = new Map();
+const referenceProviderRegistry = [];
+const referenceLookupCacheByVideoId = new Map();
+const REFERENCE_CACHE_TTL_MS = 10 * 60 * 1000;
+
+function getCaptionTimelineState(tabId) {
+  const key = Number(tabId);
+  if (!Number.isFinite(key)) return null;
+  if (!captionTimelineByTabId.has(key)) {
+    captionTimelineByTabId.set(key, {
+      tabId: key,
+      sessionId: null,
+      videoId: null,
+      lastSequenceNumber: 0,
+      lastAudioWindowEndMs: -1,
+      lastChunkId: null,
+      lastDroppedReason: null,
+      updatedAt: Date.now(),
+    });
+  }
+  return captionTimelineByTabId.get(key);
+}
+
+function resetCaptionTimelineForTab(tabId, reason = 'reset') {
+  const key = Number(tabId);
+  if (!Number.isFinite(key)) return;
+  captionTimelineByTabId.delete(key);
+  recentRelayByTabId.delete(key);
+  console.log(CAPTION_STATE_LOG, 'timeline reset', { tabId: key, reason });
+  if (chrome.tabs?.sendMessage) {
+    chrome.tabs.sendMessage(key, {
+      type: 'isweep_caption_state_reset',
+      reason,
+    }).catch(() => {});
+  }
+}
+
+function registerReferenceProvider(provider) {
+  if (!provider || typeof provider.lookup !== 'function') return;
+  const name = String(provider.name || '').trim() || 'unnamed_provider';
+  referenceProviderRegistry.push({
+    name,
+    lookup: provider.lookup,
+  });
+}
+
+function normalizeReferenceCandidate(raw, sourceName) {
+  const data = raw && typeof raw === 'object' ? raw : {};
+  return {
+    source_name: String(data.source_name || sourceName || 'unknown_source'),
+    source_url: String(data.source_url || '').trim(),
+    title_match_score: Number.isFinite(Number(data.title_match_score)) ? Number(data.title_match_score) : 0,
+    duration_match_score: Number.isFinite(Number(data.duration_match_score)) ? Number(data.duration_match_score) : 0,
+    text: String(data.text || '').trim(),
+    license_or_permission_status: String(data.license_or_permission_status || 'unknown'),
+    timing_available: data.timing_available === true,
+    candidate_confidence: Number.isFinite(Number(data.candidate_confidence)) ? Number(data.candidate_confidence) : 0,
+  };
+}
+
+function getReferenceLookupCache(videoId) {
+  const key = String(videoId || '').trim();
+  if (!key) return null;
+  const cached = referenceLookupCacheByVideoId.get(key);
+  if (!cached) return null;
+  if ((Date.now() - Number(cached.cachedAt || 0)) > REFERENCE_CACHE_TTL_MS) {
+    referenceLookupCacheByVideoId.delete(key);
+    return null;
+  }
+  return cached;
+}
+
+async function lookupReferenceCandidatesOnce(videoMeta = {}) {
+  const stableVideoId = String(videoMeta.video_id || '').trim();
+  if (!stableVideoId) {
+    return { video_id: '', cached: false, candidates: [] };
+  }
+
+  const cached = getReferenceLookupCache(stableVideoId);
+  if (cached) {
+    return {
+      video_id: stableVideoId,
+      cached: true,
+      candidates: Array.isArray(cached.candidates) ? cached.candidates : [],
+      looked_up_at: Number(cached.cachedAt || Date.now()),
+    };
+  }
+
+  const candidates = [];
+  for (const provider of referenceProviderRegistry) {
+    try {
+      const result = await provider.lookup({
+        video_id: stableVideoId,
+        title: String(videoMeta.title || '').trim(),
+        channel: String(videoMeta.channel || '').trim(),
+        duration_seconds: Number.isFinite(Number(videoMeta.duration_seconds)) ? Number(videoMeta.duration_seconds) : null,
+      });
+      const entries = Array.isArray(result) ? result : [];
+      entries.forEach((candidate) => {
+        candidates.push(normalizeReferenceCandidate(candidate, provider.name));
+      });
+    } catch (err) {
+      console.warn('[ISWEEP][EVIDENCE] reference provider failed', {
+        provider: provider.name,
+        error: String(err?.message || err).slice(0, 120),
+      });
+    }
+  }
+
+  const payload = {
+    cachedAt: Date.now(),
+    candidates: candidates.map((item) => ({
+      source_name: item.source_name,
+      source_url: item.source_url,
+      title_match_score: item.title_match_score,
+      duration_match_score: item.duration_match_score,
+      license_or_permission_status: item.license_or_permission_status,
+      timing_available: item.timing_available,
+      candidate_confidence: item.candidate_confidence,
+      // Keep only short-lived metadata by default; raw third-party text is not persisted.
+      text_preview: item.text.slice(0, 120),
+    })),
+  };
+  referenceLookupCacheByVideoId.set(stableVideoId, payload);
+  return {
+    video_id: stableVideoId,
+    cached: false,
+    candidates,
+    looked_up_at: payload.cachedAt,
+  };
+}
 
 // In-memory diagnostic counters covering every stage of the audio caption pipeline.
 // Reset each time [CC] starts. Query via isweep_get_audio_caption_debug message.
@@ -566,6 +699,20 @@ async function handleCaptionRuntimeStatus() {
     lastError: readiness.lastError,
     lastSuccessfulCaptionAt: readiness.lastSuccessfulCaptionAt,
     lastCaptionLatencyMs: readiness.lastCaptionLatencyMs,
+    captionState: String(tabStatus?.captionState || 'Listening'),
+    currentChunkId: tabStatus?.currentChunkId || null,
+    lastAcceptedWindowEndMs: Number.isFinite(Number(tabStatus?.lastAcceptedWindowEndMs))
+      ? Number(tabStatus.lastAcceptedWindowEndMs)
+      : null,
+    lastDroppedReason: tabStatus?.lastDroppedReason || null,
+    pageTextAssistSource: String(tabStatus?.pageTextAssistSource || 'none'),
+    pageTextAssistState: String(tabStatus?.pageTextAssistState || 'unavailable'),
+    sttPageAgreement: String(tabStatus?.sttPageAgreement || 'unavailable'),
+    evidenceAssist: tabStatus?.evidenceAssist && typeof tabStatus.evidenceAssist === 'object'
+      ? tabStatus.evidenceAssist
+      : null,
+    sourceHierarchy: Array.isArray(tabStatus?.sourceHierarchy) ? tabStatus.sourceHierarchy : [],
+    currentVadState: String(tabStatus?.currentVadState || 'unknown'),
   };
   console.log(CAPTION_LOG_PREFIX, 'popup runtime status', response);
   return response;
@@ -692,6 +839,7 @@ async function startTabAudioCapture(tabId, videoId) {
     videoId,
     startedAt: Date.now(),
   };
+  resetCaptionTimelineForTab(tabId, 'capture_started');
   console.log('[ISWEEP][AUDIO_CAPTIONS] tab capture stream ready', { tabId, videoId });
   return { ok: true, tabId, videoId };
 }
@@ -737,6 +885,7 @@ function clearCaptionTranscribeQueue(tabId) {
   const key = Number(tabId);
   captionTranscribeQueueByTabId.delete(key);
   recentRelayByTabId.delete(key);
+  resetCaptionTimelineForTab(key, 'queue_cleared');
 }
 
 function shouldSuppressDuplicateRelay(tabId, relayMsg, windowMs = AUDIO_RELAY_DEDUPE_WINDOW_MS) {
@@ -805,6 +954,7 @@ async function processCaptionTranscribeQueueForTab(tabId) {
         job.sampleRate,
         job.channels,
         job.chunkMeta,
+        job.tabId,
       );
       await relayAudioCaptionResultToTab(result);
     }
@@ -860,6 +1010,19 @@ async function relayAudioCaptionResultToTab(result) {
 
   const relayMsg = {
     type: 'isweep_audio_caption_text',
+    tab_id: Number.isFinite(Number(result?.tab_id)) ? Number(result.tab_id) : tabId,
+    video_id: String(result?.video_id || activeTabAudioCapture?.videoId || '').trim() || null,
+    session_id: String(result?.session_id || '').trim() || null,
+    chunk_id: String(result?.chunk_id || '').trim() || null,
+    sequence_number: Number.isFinite(Number(result?.sequence_number)) ? Number(result.sequence_number) : null,
+    chunk_started_at: Number.isFinite(Number(result?.latency?.chunkStartedAt || result?.latency?.chunk_started_at))
+      ? Number(result?.latency?.chunkStartedAt || result?.latency?.chunk_started_at)
+      : null,
+    chunk_flushed_at: Number.isFinite(Number(result?.latency?.chunkFlushedAt || result?.latency?.chunk_flushed_at))
+      ? Number(result?.latency?.chunkFlushedAt || result?.latency?.chunk_flushed_at)
+      : null,
+    audio_window_start_ms: Number.isFinite(Number(result?.audio_window_start_ms)) ? Number(result.audio_window_start_ms) : null,
+    audio_window_end_ms: Number.isFinite(Number(result?.audio_window_end_ms)) ? Number(result.audio_window_end_ms) : null,
     text: result?.text || result?.clean_text || result?.cleaned_text || '',
     source: result?.source === 'audio_stt_disabled'
       ? 'audio_stt_disabled'
@@ -888,7 +1051,46 @@ async function relayAudioCaptionResultToTab(result) {
     latency: result?.latency && typeof result.latency === 'object' ? result.latency : null,
   };
 
+  const timeline = getCaptionTimelineState(tabId);
+  if (timeline) {
+    const incomingWindowEnd = Number.isFinite(Number(relayMsg.audio_window_end_ms))
+      ? Number(relayMsg.audio_window_end_ms)
+      : -1;
+    if (incomingWindowEnd >= 0 && incomingWindowEnd < Number(timeline.lastAudioWindowEndMs || -1)) {
+      timeline.lastDroppedReason = 'old_audio_window';
+      timeline.updatedAt = Date.now();
+      console.log(CAPTION_STATE_LOG, 'stale result dropped', {
+        tab_id: tabId,
+        chunk_id: relayMsg.chunk_id,
+        audio_window_end_ms: incomingWindowEnd,
+        latest_audio_window_end_ms: timeline.lastAudioWindowEndMs,
+      });
+      return true;
+    }
+    const isSilence = String(relayMsg.source || '').toLowerCase() === 'silence';
+    if (isSilence && incomingWindowEnd >= 0 && timeline.lastAudioWindowEndMs >= incomingWindowEnd) {
+      timeline.lastDroppedReason = 'silence_older_than_latest';
+      timeline.updatedAt = Date.now();
+      console.log(CAPTION_STATE_LOG, 'stale result dropped', {
+        tab_id: tabId,
+        chunk_id: relayMsg.chunk_id,
+        reason: 'silence_older_than_latest',
+      });
+      return true;
+    }
+  }
+
   if (shouldSuppressDuplicateRelay(tabId, relayMsg)) {
+    const state = getCaptionTimelineState(tabId);
+    if (state) {
+      state.lastDroppedReason = 'duplicate_suppressed';
+      state.updatedAt = Date.now();
+    }
+    console.log(CAPTION_STATE_LOG, 'duplicate suppressed', {
+      tab_id: tabId,
+      chunk_id: relayMsg.chunk_id,
+      audio_window_end_ms: relayMsg.audio_window_end_ms,
+    });
     console.log(AUDIO_DIAG_LOG, 'relay duplicate suppressed', {
       tabId,
       source: relayMsg.source,
@@ -924,6 +1126,19 @@ async function relayAudioCaptionResultToTab(result) {
 
   try {
     await trySend(tabId);
+    if (timeline) {
+      timeline.sessionId = relayMsg.session_id || timeline.sessionId;
+      timeline.videoId = relayMsg.video_id || timeline.videoId;
+      timeline.lastChunkId = relayMsg.chunk_id || timeline.lastChunkId;
+      if (Number.isFinite(Number(relayMsg.sequence_number))) {
+        timeline.lastSequenceNumber = Math.max(timeline.lastSequenceNumber || 0, Number(relayMsg.sequence_number));
+      }
+      if (Number.isFinite(Number(relayMsg.audio_window_end_ms))) {
+        timeline.lastAudioWindowEndMs = Math.max(Number(timeline.lastAudioWindowEndMs || -1), Number(relayMsg.audio_window_end_ms));
+      }
+      timeline.lastDroppedReason = null;
+      timeline.updatedAt = Date.now();
+    }
     audioCaptionDebug.relaySentAt = Date.now();
     audioCaptionDebug.contentScriptReceivedAt = audioCaptionDebug.relaySentAt;
     if (result?.latency && typeof result.latency === 'object') {
@@ -978,6 +1193,7 @@ function releaseTabCaptureSession(tabId, reason = 'released') {
   if (tabCaptureSessionByTabId.has(tabId)) {
     tabCaptureSessionByTabId.delete(tabId);
     recentRelayByTabId.delete(Number(tabId));
+    resetCaptionTimelineForTab(Number(tabId), reason || 'tab_capture_session_released');
     console.log('[ISWEEP][AUDIO_CAPTIONS] tab capture session released', { tabId, reason });
   }
 }
@@ -1219,6 +1435,7 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
 if (chrome.tabs?.onRemoved?.addListener) {
   chrome.tabs.onRemoved.addListener((tabId) => {
     releaseTabCaptureSession(tabId, 'tab_removed');
+    resetCaptionTimelineForTab(tabId, 'tab_closed');
     if (activeTabAudioCapture && Number(activeTabAudioCapture.tabId) === Number(tabId)) {
       stopTabAudioCapture('tab_removed').catch(() => {});
     }
@@ -1337,6 +1554,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const bgChunkVideoId = String(message.video_id || activeTabAudioCapture?.videoId || '').trim();
     const chunkStartedAt = Number.isFinite(Number(message.chunk_started_at)) ? Number(message.chunk_started_at) : null;
     const chunkFlushedAt = Number.isFinite(Number(message.chunk_flushed_at)) ? Number(message.chunk_flushed_at) : null;
+    const sessionId = String(message.session_id || '').trim() || null;
+    const sequenceNumber = Number.isFinite(Number(message.sequence_number)) ? Number(message.sequence_number) : 0;
+    const chunkId = String(message.chunk_id || '').trim() || null;
+    const audioWindowStartMs = Number.isFinite(Number(message.audio_window_start_ms))
+      ? Number(message.audio_window_start_ms)
+      : (Number.isFinite(Number(message.start_seconds)) ? Math.max(Math.round(Number(message.start_seconds) * 1000), 0) : null);
+    const audioWindowEndMs = Number.isFinite(Number(message.audio_window_end_ms))
+      ? Number(message.audio_window_end_ms)
+      : (Number.isFinite(Number(message.end_seconds)) ? Math.max(Math.round(Number(message.end_seconds) * 1000), Number(audioWindowStartMs || 0)) : null);
     const captureStartedAt = Number.isFinite(Number(chunkStartedAt))
       ? Number(chunkStartedAt)
       : (Number.isFinite(Number(message.capture_started_at)) ? Number(message.capture_started_at) : null);
@@ -1369,6 +1595,26 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return;
     }
 
+    const timeline = getCaptionTimelineState(tabId);
+    if (timeline) {
+      const incomingVideoId = String(bgChunkVideoId || '').trim() || null;
+      if (timeline.videoId && incomingVideoId && timeline.videoId !== incomingVideoId) {
+        resetCaptionTimelineForTab(tabId, 'video_changed');
+      }
+      const refreshed = getCaptionTimelineState(tabId);
+      if (refreshed && refreshed.sessionId && sessionId && refreshed.sessionId !== sessionId) {
+        resetCaptionTimelineForTab(tabId, 'session_changed');
+      }
+      const active = getCaptionTimelineState(tabId);
+      if (active) {
+        active.sessionId = sessionId || active.sessionId;
+        active.videoId = incomingVideoId || active.videoId;
+        active.lastSequenceNumber = Math.max(active.lastSequenceNumber || 0, sequenceNumber || 0);
+        active.lastChunkId = chunkId || active.lastChunkId;
+        active.updatedAt = Date.now();
+      }
+    }
+
     enqueueCaptionTranscribeJob(tabId, {
       tabId,
       videoId: bgChunkVideoId,
@@ -1384,6 +1630,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         chunkStartedAt,
         chunkFlushedAt,
         chunkEmittedAt,
+        sessionId,
+        sequenceNumber,
+        chunkId,
+        audioWindowStartMs,
+        audioWindowEndMs,
         backendReceivedAt,
         chunkWindowSec: audioCaptionDebug.chunkWindowSec,
       },
@@ -1437,8 +1688,33 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
     sendResponse({ ok: true });
     return;
+  } else if (message.type === 'isweep_audio_vad_state') {
+    const tabId = Number.isFinite(Number(message.tab_id))
+      ? Number(message.tab_id)
+      : Number(activeTabAudioCapture?.tabId);
+    if (Number.isFinite(tabId)) {
+      chrome.tabs.sendMessage(tabId, {
+        type: 'isweep_audio_vad_state',
+        tab_id: tabId,
+        video_id: String(message.video_id || activeTabAudioCapture?.videoId || '').trim() || null,
+        session_id: String(message.session_id || '').trim() || null,
+        speech_active: message.speech_active === true,
+        reason: String(message.reason || 'offscreen_vad'),
+        observed_at: Number.isFinite(Number(message.observed_at)) ? Number(message.observed_at) : Date.now(),
+      }).catch(() => {});
+    }
+    sendResponse({ ok: true });
+    return;
   } else if (message.type === 'isweep_get_audio_caption_debug') {
     sendResponse({ ...audioCaptionDebug });
+    return true;
+  } else if (message.type === 'isweep_lookup_reference_candidates') {
+    lookupReferenceCandidatesOnce({
+      video_id: message.video_id,
+      title: message.title,
+      channel: message.channel,
+      duration_seconds: message.duration_seconds,
+    }).then(sendResponse);
     return true;
   }
 
@@ -1761,7 +2037,7 @@ async function handleMarkerAnalyze(videoId, forceRefresh = false) {
 // Caption-only audio transcription. Posts to /captions/transcribe and forwards transcript text.
 // Never calls handleCaptionDecision, never calls /event, never creates filter events.
 // Guard: AUDIO_CAPTION_FILTER_ACTIONS_ENABLED must remain false until filtering is intentionally re-enabled.
-async function handleAudioCaptionChunk(videoId, audioChunk, mimeType, startSeconds, endSeconds, audioSamples = null, sampleRate = null, channels = null, chunkMeta = null) {
+async function handleAudioCaptionChunk(videoId, audioChunk, mimeType, startSeconds, endSeconds, audioSamples = null, sampleRate = null, channels = null, chunkMeta = null, tabId = null) {
   if (!AUDIO_CAPTION_FILTER_ACTIONS_ENABLED) {
     // captions only; never call /event here
   }
@@ -1784,6 +2060,15 @@ async function handleAudioCaptionChunk(videoId, audioChunk, mimeType, startSecon
   const chunkStartedAt = Number.isFinite(Number(chunkMeta?.chunkStartedAt)) ? Number(chunkMeta.chunkStartedAt) : null;
   const chunkFlushedAt = Number.isFinite(Number(chunkMeta?.chunkFlushedAt)) ? Number(chunkMeta.chunkFlushedAt) : null;
   const chunkEmittedAt = Number.isFinite(Number(chunkMeta?.chunkEmittedAt)) ? Number(chunkMeta.chunkEmittedAt) : chunkFlushedAt;
+  const sessionId = String(chunkMeta?.sessionId || '').trim() || null;
+  const sequenceNumber = Number.isFinite(Number(chunkMeta?.sequenceNumber)) ? Number(chunkMeta.sequenceNumber) : null;
+  const chunkId = String(chunkMeta?.chunkId || '').trim() || null;
+  const audioWindowStartMs = Number.isFinite(Number(chunkMeta?.audioWindowStartMs))
+    ? Number(chunkMeta.audioWindowStartMs)
+    : Math.max(Math.round(normalizedStart * 1000), 0);
+  const audioWindowEndMs = Number.isFinite(Number(chunkMeta?.audioWindowEndMs))
+    ? Number(chunkMeta.audioWindowEndMs)
+    : Math.max(Math.round(normalizedEnd * 1000), audioWindowStartMs);
   const backendReceivedAt = Number.isFinite(Number(chunkMeta?.backendReceivedAt)) ? Number(chunkMeta.backendReceivedAt) : Date.now();
 
   const backendUrl = await getBackendUrl();
@@ -1837,6 +2122,11 @@ async function handleAudioCaptionChunk(videoId, audioChunk, mimeType, startSecon
         backend_received_at: backendReceivedAt,
         chunk_started_at: chunkStartedAt,
         chunk_flushed_at: chunkFlushedAt,
+        session_id: sessionId,
+        chunk_id: chunkId,
+        sequence_number: sequenceNumber,
+        audio_window_start_ms: audioWindowStartMs,
+        audio_window_end_ms: audioWindowEndMs,
         start_seconds: normalizedStart,
         end_seconds: normalizedEnd,
         audio: hasSampleArray ? audioSamples : undefined,
@@ -1909,6 +2199,13 @@ async function handleAudioCaptionChunk(videoId, audioChunk, mimeType, startSecon
     const result = {
       status: normalizedStatus,
       source: payload.source || 'audio',
+      tab_id: Number.isFinite(Number(tabId)) ? Number(tabId) : (Number.isFinite(Number(activeTabAudioCapture?.tabId)) ? Number(activeTabAudioCapture.tabId) : null),
+      video_id: cleanVideoId,
+      session_id: sessionId,
+      chunk_id: chunkId,
+      sequence_number: sequenceNumber,
+      audio_window_start_ms: audioWindowStartMs,
+      audio_window_end_ms: audioWindowEndMs,
       start_seconds: normalizedStart,
       end_seconds: normalizedEnd,
       events: [],  // caption-only: never return filter events
@@ -2015,6 +2312,22 @@ async function handleAudioCaptionChunk(videoId, audioChunk, mimeType, startSecon
         videoId: cleanVideoId,
         failure_reason: result.failure_reason,
       });
+    }
+    if (String(result.source || '').toLowerCase() === 'silence') {
+      const invalidSilenceText = String(result.text || result.clean_text || result.cleaned_text || '').trim();
+      if (invalidSilenceText) {
+        console.warn(CAPTION_STATE_LOG, 'invalid silence text dropped', {
+          tab_id: result.tab_id,
+          video_id: result.video_id,
+          session_id: result.session_id,
+          chunk_id: result.chunk_id,
+          textPreview: invalidSilenceText.slice(0, 80),
+        });
+        result.text = '';
+        result.clean_text = '';
+        result.cleaned_text = '';
+        result.stable_text = '';
+      }
     }
     return result;
   } catch (err) {

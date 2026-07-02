@@ -147,6 +147,12 @@ const backendUrlValue = document.getElementById('backendUrlValue');
 const backendLastErrorValue = document.getElementById('backendLastErrorValue');
 const backendSttStatusValue = document.getElementById('backendSttStatusValue');
 const backendLastSuccessCaptionValue = document.getElementById('backendLastSuccessCaptionValue');
+const captionStateValue = document.getElementById('captionStateValue');
+const currentChunkIdValue = document.getElementById('currentChunkIdValue');
+const lastAcceptedWindowValue = document.getElementById('lastAcceptedWindowValue');
+const lastDropReasonValue = document.getElementById('lastDropReasonValue');
+const pageTextAssistSourceValue = document.getElementById('pageTextAssistSourceValue');
+const sttPageAgreementValue = document.getElementById('sttPageAgreementValue');
 const captionModeValue = document.getElementById('captionModeValue');
 const selectedWordsCountValue = document.getElementById('selectedWordsCountValue');
 const selectedWordsPreviewValue = document.getElementById('selectedWordsPreviewValue');
@@ -223,6 +229,27 @@ function renderCaptionReadiness(status) {
       ? `, ${Math.round(Number(readiness.lastCaptionLatencyMs))}ms`
       : '';
     backendLastSuccessCaptionValue.textContent = `${since}${latency}`;
+  }
+  if (captionStateValue) {
+    captionStateValue.textContent = String(status?.captionState || readiness?.captionState || 'Listening');
+  }
+  if (currentChunkIdValue) {
+    currentChunkIdValue.textContent = String(status?.currentChunkId || readiness?.currentChunkId || 'none');
+  }
+  if (lastAcceptedWindowValue) {
+    const endMs = Number(status?.lastAcceptedWindowEndMs ?? readiness?.lastAcceptedWindowEndMs);
+    lastAcceptedWindowValue.textContent = Number.isFinite(endMs) && endMs >= 0 ? `${endMs}ms` : 'none';
+  }
+  if (lastDropReasonValue) {
+    lastDropReasonValue.textContent = String(status?.lastDroppedReason || readiness?.lastDroppedReason || 'none');
+  }
+  if (pageTextAssistSourceValue) {
+    const source = String(status?.pageTextAssistSource || readiness?.pageTextAssistSource || 'none');
+    const assistState = String(status?.pageTextAssistState || readiness?.pageTextAssistState || '').trim();
+    pageTextAssistSourceValue.textContent = assistState ? `${source} (${assistState})` : source;
+  }
+  if (sttPageAgreementValue) {
+    sttPageAgreementValue.textContent = String(status?.sttPageAgreement || readiness?.sttPageAgreement || 'unavailable');
   }
   if (captionModeValue) {
     captionModeValue.textContent = String(readiness?.captionModeLabel || 'Captions Only');

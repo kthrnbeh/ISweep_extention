@@ -46,3 +46,35 @@ The extension expects these pages to be available at your frontend URL:
 3. Click "Log in with Email" - it should open your frontend Account page
 4. After logging in (use quick login for dev), click "Open Settings" - it should open your frontend Settings page
 5. If pages don't open correctly, verify your `WEB_BASE_URL` is correct and the frontend is running
+
+## Optional Full-Word Protection Plan (Design)
+
+This section documents a future optional local delay-buffer design. It is not active by default.
+
+### Goals
+
+- Keep playback natural: no `playbackRate` changes, no skip, no fast-forward, no video edits.
+- Analyze captured tab audio before delayed speaker output reaches the user.
+- Preserve user-muted state exactly as today.
+
+### Proposed Pipeline
+
+1. Capture active-tab audio frames (never microphone).
+2. Write frames into a local ring buffer (target output delay: 800-1200 ms).
+3. Run Fast Guard + VAD on incoming frames immediately.
+4. If Fast Guard sees possible selected-word onset with audio evidence, request early mute window.
+5. Release delayed audio to speakers only after the delay horizon.
+6. End mute windows using VAD speech-end and stable STT boundaries.
+
+### Safety Constraints
+
+- Audio-STT timestamps remain the only mute trigger source.
+- Page text/transcript/script/lyrics/search evidence can improve display text only.
+- Evidence cannot create selected words or mute windows.
+- User-initiated mute always wins.
+
+### Integration Notes
+
+- Keep this feature behind an explicit feature flag.
+- Reuse existing mute ownership (`isweep` vs user) logic.
+- Reuse current stale-drop timeline logic to avoid post-speech ghost captions.

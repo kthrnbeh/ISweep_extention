@@ -361,9 +361,97 @@
   let lastAudioCaptionReceivedAtMs = 0;
   let lastAudioCaptionFailureReason = null;
   let lastSelectedWordsLogSignature = '';
+  const CAPTION_STATE_LOG = '[ISWEEP][CAPTION_STATE]';
+  const EVIDENCE_LOG = '[ISWEEP][EVIDENCE]';
+  const FAST_GUARD_LOG = '[ISWEEP][FAST_GUARD]';
+  const SPEECH_END_CLEAR_DELAY_MS = 420;
+  let speechEndedClearTimer = null;
+  let currentVadState = 'unknown';
+  let pageTextAssistLastState = 'unavailable';
+  let lastSttPageAgreement = 'unavailable';
+  const captionTimelineState = {
+    sessionId: null,
+    tabId: null,
+    videoId: null,
+    lastAcceptedAudioWindowEndMs: -1,
+    lastAcceptedWindowKey: '',
+    lastAcceptedTextNormByWindow: new Map(),
+    currentChunkId: null,
+    sequenceNumber: 0,
+    lastDroppedReason: null,
+    speechEndedAtMs: 0,
+    captionState: 'Listening',
+    assist: {
+      source: 'none',
+      text: '',
+      cue_start_seconds: null,
+      cue_end_seconds: null,
+      observed_video_time: 0,
+      confidence: 'context_only',
+    },
+  };
   let lastAudioRelaySignature = '';
   let lastAudioRelayAtMs = 0;
   const AUDIO_RELAY_DEDUPE_WINDOW_MS = 1200;
+
+  function normalizeCaptionStateText(text) {
+    return String(text || '').toLowerCase().replace(/\s+/g, ' ').trim();
+  }
+
+  function clearSpeechEndTimer() {
+    if (speechEndedClearTimer) {
+      clearTimeout(speechEndedClearTimer);
+      speechEndedClearTimer = null;
+    }
+  }
+
+  function resetCaptionTimelineState(reason = 'reset') {
+    clearSpeechEndTimer();
+    captionTimelineState.sessionId = null;
+    captionTimelineState.tabId = null;
+    captionTimelineState.videoId = null;
+    captionTimelineState.lastAcceptedAudioWindowEndMs = -1;
+    captionTimelineState.lastAcceptedWindowKey = '';
+    captionTimelineState.lastAcceptedTextNormByWindow = new Map();
+    captionTimelineState.currentChunkId = null;
+    captionTimelineState.sequenceNumber = 0;
+    captionTimelineState.lastDroppedReason = reason;
+    captionTimelineState.speechEndedAtMs = 0;
+    captionTimelineState.captionState = 'Listening';
+    lastAudioCaptionSource = null;
+    lastAudioCaptionText = '';
+    lastAudioCaptionReceivedAtMs = 0;
+    lastAudioRelaySignature = '';
+    lastAudioRelayAtMs = 0;
+    updateCleanOverlay('', findVideo()?.currentTime || 0);
+    console.log(CAPTION_STATE_LOG, 'state reset', { reason, videoId: activeVideoId });
+  }
+
+  function scheduleSpeechEndedOverlayClear(reason = 'speech_ended') {
+    clearSpeechEndTimer();
+    speechEndedClearTimer = setTimeout(() => {
+      lastAudioCaptionText = '';
+      lastAudioCaptionSource = 'silence';
+      captionTimelineState.speechEndedAtMs = Date.now();
+      captionTimelineState.captionState = 'Speech ended';
+      captionTimelineState.lastDroppedReason = reason;
+      updateCleanOverlay('', findVideo()?.currentTime || 0);
+      console.log(CAPTION_STATE_LOG, 'speech ended; overlay cleared', {
+        reason,
+        chunk_id: captionTimelineState.currentChunkId,
+      });
+    }, SPEECH_END_CLEAR_DELAY_MS);
+  }
+
+  function markCaptionStateListening() {
+    captionTimelineState.captionState = 'Listening';
+    captionTimelineState.speechEndedAtMs = 0;
+  }
+
+  function markCaptionStateLiveStt() {
+    captionTimelineState.captionState = 'Live STT';
+    captionTimelineState.speechEndedAtMs = 0;
+  }
 
 
   // Audio watch-ahead state.
@@ -379,6 +467,7 @@
   let audioCaptureSource = null;
   let tabAudioCaptureState = 'idle'; // idle|starting|ready|unavailable|stopped
   let audioFilteringEnabled = true;
+  let lastKnownVideoTimeSec = 0;
 
   function getAudioCaptionMode() {
     const disabledReasons = new Set([
@@ -1685,6 +1774,7 @@
       if (message?.type === 'isweep_get_caption_runtime_status') {
         const overlaySource = String(lastRenderedOverlaySource || 'none');
         const selectedWordSnapshot = getFilterWords();
+        const assistSnapshot = captionTimelineState.assist || {};
         const status = {
           ok: true,
           cleanCaptionsEnabled: cleanCaptionSettings.cleanCaptionsEnabled !== false,
@@ -1699,6 +1789,18 @@
           selectedWordCount: Array.isArray(selectedWordSnapshot.words) ? selectedWordSnapshot.words.length : 0,
           selectedWordPreview: Array.isArray(selectedWordSnapshot.words) ? selectedWordSnapshot.words.slice(0, 10) : [],
           selectedWordSource: selectedWordSnapshot.source || 'prefs_missing',
+          captionState: captionTimelineState.captionState || 'Listening',
+          lastAcceptedWindowEndMs: Number.isFinite(Number(captionTimelineState.lastAcceptedAudioWindowEndMs))
+            ? Number(captionTimelineState.lastAcceptedAudioWindowEndMs)
+            : null,
+          lastDroppedReason: captionTimelineState.lastDroppedReason || null,
+          currentChunkId: captionTimelineState.currentChunkId || null,
+          pageTextAssistSource: String(assistSnapshot.source || 'none'),
+          pageTextAssistState: pageTextAssistLastState,
+          sttPageAgreement: lastSttPageAgreement,
+          evidenceAssist: assistSnapshot,
+          sourceHierarchy: getSourceHierarchy(),
+          currentVadState,
         };
         console.log(CLEAN_CC_LOG_PREFIX, 'runtime status reported', status);
         sendResponse(status);
@@ -1707,12 +1809,14 @@
       if (message?.type === 'isweep_caption_capture_start') {
         audioCapturePermissionDenied = false;
         tabAudioCaptureState = 'starting';
+        resetCaptionTimelineState('capture_start');
         sendResponse({ ok: true });
         return true;
       }
       if (message?.type === 'isweep_caption_capture_stop') {
         tabAudioCaptureState = 'stopped';
         stopAudioCapture('captions_disabled');
+        resetCaptionTimelineState('capture_stop');
         sendResponse({ ok: true });
         return true;
       }
@@ -1722,13 +1826,34 @@
         if (state === 'ready') {
           stopAudioCapture('tab_capture_external_ready');
           lastAudioCaptionFailureReason = null;
+          markCaptionStateListening();
         } else if (state === 'unavailable') {
           lastAudioCaptionFailureReason = message.failure_reason || 'audio_capture_unavailable';
+          resetCaptionTimelineState('capture_unavailable');
           if (ISWEEP_CONTENT_SCRIPT_AUDIO_AHEAD_ENABLED && activeVideoId && cleanCaptionSettings.cleanCaptionsEnabled && !audioAheadActive && !audioCapturePermissionDenied) {
             startAudioCapture();
           }
         } else if (state === 'stopped') {
           stopAudioCapture('captions_disabled');
+          resetCaptionTimelineState('capture_stopped');
+        }
+        sendResponse({ ok: true });
+        return true;
+      }
+      if (message?.type === 'isweep_caption_state_reset') {
+        resetCaptionTimelineState(String(message.reason || 'background_reset'));
+        sendResponse({ ok: true });
+        return true;
+      }
+      if (message?.type === 'isweep_audio_vad_state') {
+        currentVadState = message?.speech_active === true ? 'speech_active' : 'speech_ended';
+        if (currentVadState === 'speech_ended') {
+          scheduleSpeechEndedOverlayClear('vad_speech_end');
+        } else {
+          clearSpeechEndTimer();
+          if (captionTimelineState.captionState === 'Speech ended') {
+            markCaptionStateListening();
+          }
         }
         sendResponse({ ok: true });
         return true;
@@ -1736,13 +1861,77 @@
       if (message?.type === 'isweep_audio_caption_text') {
         const nextSource = message.cached === true ? 'audio_stt_cached' : (message.source || 'audio_stt_live');
         const isPartial = message.is_partial === true;
+        const incomingSessionId = String(message.session_id || '').trim() || null;
+        const incomingTabId = Number.isFinite(Number(message.tab_id)) ? Number(message.tab_id) : null;
+        const incomingVideoId = String(message.video_id || activeVideoId || '').trim() || null;
+        const incomingChunkId = String(message.chunk_id || '').trim() || null;
+        const incomingSequence = Number.isFinite(Number(message.sequence_number)) ? Number(message.sequence_number) : null;
+        const incomingWindowEndMs = Number.isFinite(Number(message.audio_window_end_ms))
+          ? Number(message.audio_window_end_ms)
+          : (Number.isFinite(Number(message.end_seconds)) ? Math.max(Math.round(Number(message.end_seconds) * 1000), 0) : -1);
+        const incomingWindowKey = Number.isFinite(Number(incomingWindowEndMs)) && incomingWindowEndMs >= 0
+          ? `w:${incomingWindowEndMs}`
+          : `c:${incomingChunkId || 'unknown'}`;
         const stableText = String(message.stable_text || '').trim();
         const incomingText = String(message.clean_text || message.cleaned_text || message.text || '').trim();
         const dedupedText = (!isPartial && stableText) ? stableText : incomingText;
+        const normalizedIncomingText = normalizeCaptionStateText(dedupedText);
+        const normalizedSource = String(nextSource || '').trim().toLowerCase();
+        const isSilence = normalizedSource === 'silence';
+
+        if (captionTimelineState.sessionId && incomingSessionId && captionTimelineState.sessionId !== incomingSessionId) {
+          captionTimelineState.lastDroppedReason = 'stale_session';
+          console.log(CAPTION_STATE_LOG, 'stale result dropped', {
+            reason: 'stale_session',
+            prev_session_id: captionTimelineState.sessionId,
+            incoming_session_id: incomingSessionId,
+            chunk_id: incomingChunkId,
+          });
+          sendResponse({ ok: true, dropped: 'stale_session' });
+          return true;
+        }
+        if (captionTimelineState.videoId && incomingVideoId && captionTimelineState.videoId !== incomingVideoId) {
+          resetCaptionTimelineState('video_changed');
+        }
+        if (incomingWindowEndMs >= 0 && incomingWindowEndMs < Number(captionTimelineState.lastAcceptedAudioWindowEndMs || -1)) {
+          captionTimelineState.lastDroppedReason = 'old_audio_window';
+          console.log(CAPTION_STATE_LOG, 'stale result dropped', {
+            reason: 'old_audio_window',
+            incoming_window_end_ms: incomingWindowEndMs,
+            latest_window_end_ms: captionTimelineState.lastAcceptedAudioWindowEndMs,
+            chunk_id: incomingChunkId,
+          });
+          sendResponse({ ok: true, dropped: 'old_audio_window' });
+          return true;
+        }
+        if (incomingWindowKey === captionTimelineState.lastAcceptedWindowKey) {
+          const prevWindowText = captionTimelineState.lastAcceptedTextNormByWindow.get(incomingWindowKey) || '';
+          if (normalizedIncomingText && prevWindowText === normalizedIncomingText) {
+            captionTimelineState.lastDroppedReason = 'duplicate_same_window';
+            console.log(CAPTION_STATE_LOG, 'duplicate suppressed', {
+              reason: 'duplicate_same_window',
+              audio_window_key: incomingWindowKey,
+              chunk_id: incomingChunkId,
+            });
+            sendResponse({ ok: true, deduped: true });
+            return true;
+          }
+        }
+
+        captionTimelineState.sessionId = incomingSessionId || captionTimelineState.sessionId;
+        captionTimelineState.tabId = incomingTabId || captionTimelineState.tabId;
+        captionTimelineState.videoId = incomingVideoId || captionTimelineState.videoId || activeVideoId || null;
+        captionTimelineState.currentChunkId = incomingChunkId || captionTimelineState.currentChunkId;
+        captionTimelineState.lastAcceptedWindowKey = incomingWindowKey;
+        if (Number.isFinite(Number(incomingSequence))) {
+          captionTimelineState.sequenceNumber = Math.max(Number(captionTimelineState.sequenceNumber || 0), Number(incomingSequence));
+        }
+
         const relaySignature = [
           String(nextSource || '').trim().toLowerCase(),
           String(message.status || 'ready').trim().toLowerCase(),
           isPartial ? 'partial' : 'final',
+          incomingWindowKey,
           normalizeCaptionText(dedupedText),
         ].join('|');
         const relayNowMs = Date.now();
@@ -1758,10 +1947,58 @@
         lastAudioRelaySignature = relaySignature;
         lastAudioRelayAtMs = relayNowMs;
         lastAudioCaptionFailureReason = message.failure_reason || null;
+        if (isSilence && normalizedIncomingText) {
+          captionTimelineState.lastDroppedReason = 'invalid_silence_text';
+          console.log(CAPTION_STATE_LOG, 'invalid silence text dropped', {
+            chunk_id: incomingChunkId,
+            textPreview: dedupedText.slice(0, 80),
+          });
+          sendResponse({ ok: true, dropped: 'invalid_silence_text' });
+          return true;
+        }
+
+        if (isSilence) {
+          scheduleSpeechEndedOverlayClear('silence');
+          sendResponse({ ok: true, silence: true });
+          return true;
+        }
+
         if (dedupedText) {
+          clearSpeechEndTimer();
           lastAudioCaptionSource = nextSource;
           lastAudioCaptionText = dedupedText;
           lastAudioCaptionReceivedAtMs = Date.now();
+          markCaptionStateLiveStt();
+          if (incomingWindowEndMs >= 0) {
+            captionTimelineState.lastAcceptedAudioWindowEndMs = Math.max(
+              Number(captionTimelineState.lastAcceptedAudioWindowEndMs || -1),
+              incomingWindowEndMs
+            );
+          }
+          captionTimelineState.lastAcceptedTextNormByWindow.set(incomingWindowKey, normalizedIncomingText);
+          captionTimelineState.lastDroppedReason = null;
+
+          const video = findVideo();
+          const assist = buildEvidenceItem(
+            readPageTextAssist(video),
+            captionTimelineState.sessionId,
+            captionTimelineState.videoId || activeVideoId
+          );
+          captionTimelineState.assist = assist;
+          pageTextAssistLastState = getAssistStateLabel(assist);
+          const fused = fuseCaptionWithEvidence(dedupedText, assist, Number(message.start_seconds), Number(message.end_seconds));
+          if (fused.usedEvidence && fused.text) {
+            lastAudioCaptionText = fused.text;
+            lastAudioCaptionSource = `audio_stt_live+${assist.source}`;
+          }
+          lastSttPageAgreement = getSttPageAgreement(dedupedText, assist);
+          console.log(CAPTION_STATE_LOG, 'accepted result', {
+            session_id: captionTimelineState.sessionId,
+            chunk_id: captionTimelineState.currentChunkId,
+            audio_window_end_ms: incomingWindowEndMs,
+            assist_source: assist.source,
+            agreement: lastSttPageAgreement,
+          });
         }
         console.log(CLEAN_CC_LOG_PREFIX, 'audio_stt message received', {
           source: nextSource,
@@ -1780,6 +2017,7 @@
         if (!dedupedText) {
           // Empty STT text: do not clear or update the overlay.
           console.log(CLEAN_CC_LOG_PREFIX, 'ignored empty audio_stt message');
+          markCaptionStateListening();
           sendResponse({ ok: true });
           return true;
         }
@@ -1789,8 +2027,8 @@
           cleaned_captions: message.cleaned_captions,
           clean_captions: message.clean_captions,
           text: message.text,
-          clean_text: dedupedText,
-          cleaned_text: dedupedText,
+          clean_text: lastAudioCaptionText || dedupedText,
+          cleaned_text: lastAudioCaptionText || dedupedText,
           words: Array.isArray(message.words)
             ? message.words
             : (Array.isArray(message.word_timestamps) ? message.word_timestamps : []),
@@ -1838,7 +2076,7 @@
               totalLatencyMs: latency.totalLatencyMs,
             }).catch(() => {});
           }
-          updateCleanOverlay(lastCaptionText, findVideo()?.currentTime || 0);
+          updateCleanOverlay(lastAudioCaptionText, findVideo()?.currentTime || 0);
         }
 
         scheduleSelectedWordMutesFromAudioPayload(message, {
@@ -2645,6 +2883,41 @@
     return mergeOverlappingWordMuteWindows(windows);
   }
 
+  function runFastGuardFromTimedWords(timedWords, selectedWords, source, startSec, endSec) {
+    if (!Array.isArray(timedWords) || timedWords.length === 0 || !Array.isArray(selectedWords) || selectedWords.length === 0) {
+      console.log(FAST_GUARD_LOG, 'audio evidence insufficient', {
+        reason: 'missing_timed_words_or_selected_words',
+        source,
+      });
+      return [];
+    }
+    const earliest = timedWords.find((entry) => {
+      const wordNorm = normalizeCaptionWord(entry?.word || '');
+      return isSelectedSpokenWord(wordNorm, selectedWords);
+    });
+    if (!earliest) {
+      console.log(FAST_GUARD_LOG, 'audio evidence insufficient', {
+        reason: 'no_selected_word_match',
+        source,
+        start_seconds: startSec,
+        end_seconds: endSec,
+      });
+      return [];
+    }
+
+    const onsetSec = Number.isFinite(Number(earliest.start)) ? Number(earliest.start) : startSec;
+    const offsetSec = Number.isFinite(Number(earliest.end)) ? Number(earliest.end) : Math.max(onsetSec + 0.05, endSec);
+    console.log(FAST_GUARD_LOG, 'possible selected word', {
+      source,
+      word: String(earliest.word || '').trim().toLowerCase(),
+      onset_seconds: onsetSec,
+      end_seconds: offsetSec,
+    });
+    return buildSelectedWordMuteWindows([
+      { word: earliest.word, start: onsetSec, end: offsetSec },
+    ], selectedWords);
+  }
+
   function scheduleSelectedWordMutesFromAudioPayload(payload, options = {}) {
     const mode = normalizeCleanCaptionSettings(options.settingsOverride || cleanCaptionSettings).cleanCaptionWordMuteMode;
     const modeEnabled = isSelectedWordMuteModeEnabled(options.settingsOverride);
@@ -2671,11 +2944,13 @@
       return [];
     }
 
+    const fastGuardWindows = runFastGuardFromTimedWords(timedWords, selectedWords, source, startSec, endSec);
     const muteWindows = buildSelectedWordMuteWindows(timedWords, selectedWords);
-    muteWindows.forEach((window) => {
+    const mergedWindows = mergeOverlappingWordMuteWindows([...(fastGuardWindows || []), ...(muteWindows || [])]);
+    mergedWindows.forEach((window) => {
       applyMuteWindow(window.start, window.end, 'selected_spoken_word');
     });
-    return muteWindows;
+    return mergedWindows;
   }
 
   function rescheduleMuteRestoreTimers(nowSec) {
@@ -3299,6 +3574,220 @@
     return segments.map((el) => el.textContent.trim()).join(' ').trim(); // Join segments into full line
   }
 
+  function tokenizeTextForAgreement(text) {
+    return normalizeCaptionStateText(text)
+      .split(' ')
+      .map((token) => token.trim())
+      .filter(Boolean);
+  }
+
+  function textAgreementScore(left, right) {
+    const leftTokens = tokenizeTextForAgreement(left);
+    const rightTokens = tokenizeTextForAgreement(right);
+    if (!leftTokens.length || !rightTokens.length) return 0;
+    const rightSet = new Set(rightTokens);
+    const leftSet = new Set(leftTokens);
+    let overlap = 0;
+    leftSet.forEach((token) => {
+      if (rightSet.has(token)) overlap += 1;
+    });
+    return overlap / Math.max(Math.min(leftSet.size, rightSet.size), 1);
+  }
+
+  function buildEvidenceItem(base, sessionId, videoId) {
+    return {
+      source: String(base?.source || 'none'),
+      text: String(base?.text || '').trim(),
+      observed_video_time: Number.isFinite(Number(base?.observed_video_time)) ? Number(base.observed_video_time) : 0,
+      cue_start_seconds: Number.isFinite(Number(base?.cue_start_seconds)) ? Number(base.cue_start_seconds) : null,
+      cue_end_seconds: Number.isFinite(Number(base?.cue_end_seconds)) ? Number(base.cue_end_seconds) : null,
+      confidence: String(base?.confidence || 'context_only'),
+      session_id: String(sessionId || '').trim() || null,
+      video_id: String(videoId || '').trim() || null,
+    };
+  }
+
+  function isTimedEvidenceAligned(assist, startSec, endSec) {
+    if (!assist) return false;
+    const cueStart = Number(assist.cue_start_seconds);
+    const cueEnd = Number(assist.cue_end_seconds);
+    if (!Number.isFinite(cueStart) || !Number.isFinite(cueEnd)) return false;
+    const s = Number.isFinite(Number(startSec)) ? Number(startSec) : cueStart;
+    const e = Number.isFinite(Number(endSec)) ? Number(endSec) : Math.max(s, cueEnd);
+    return e >= cueStart && s <= cueEnd;
+  }
+
+  function fuseCaptionWithEvidence(sttText, assist, startSec, endSec) {
+    const baseText = String(sttText || '').trim();
+    const assistText = String(assist?.text || '').trim();
+    if (!assistText || !baseText) {
+      return { text: baseText, source: 'audio_stt_only', usedEvidence: false };
+    }
+
+    if (assist?.confidence === 'timed' && isTimedEvidenceAligned(assist, startSec, endSec)) {
+      console.log(EVIDENCE_LOG, 'aligned with STT', {
+        source: assist.source,
+        confidence: assist.confidence,
+        start_seconds: startSec,
+        end_seconds: endSec,
+      });
+      return { text: assistText, source: `${assist.source}_aligned`, usedEvidence: true };
+    }
+
+    if (assist?.confidence === 'current_visible') {
+      const agreement = textAgreementScore(baseText, assistText);
+      if (agreement >= 0.45) {
+        console.log(EVIDENCE_LOG, 'aligned with STT', {
+          source: assist.source,
+          confidence: assist.confidence,
+          agreement,
+        });
+        return { text: assistText, source: `${assist.source}_supported`, usedEvidence: true };
+      }
+      console.log(EVIDENCE_LOG, 'disagreement ignored', {
+        source: assist.source,
+        confidence: assist.confidence,
+        agreement,
+      });
+      return { text: baseText, source: 'audio_stt_only', usedEvidence: false };
+    }
+
+    console.log(EVIDENCE_LOG, 'disagreement ignored', {
+      source: assist?.source || 'none',
+      confidence: assist?.confidence || 'context_only',
+      reason: 'context_only_evidence',
+    });
+    return { text: baseText, source: 'audio_stt_only', usedEvidence: false };
+  }
+
+  function getSourceHierarchy() {
+    return [
+      { source: 'audio_stt', class: 'timed', role: 'primary' },
+      { source: 'text_track', class: 'timed', role: 'assist_if_aligned' },
+      { source: 'page_caption_dom', class: 'current_visible', role: 'assist_if_similar' },
+      { source: 'visible_transcript', class: 'context_only', role: 'context_only' },
+      { source: 'external_reference_candidate', class: 'context_only', role: 'future_provider_only' },
+    ];
+  }
+
+  function readTextTrackAssist(video) {
+    if (!video || !video.textTracks) return null;
+    const now = Number(video.currentTime || 0);
+    const tracks = Array.from(video.textTracks || []);
+    for (const track of tracks) {
+      const activeCues = track && track.activeCues ? Array.from(track.activeCues) : [];
+      if (!activeCues.length) continue;
+      const cue = activeCues[0];
+      const cueText = activeCues
+        .map((entry) => String(entry?.text || '').trim())
+        .filter(Boolean)
+        .join(' ')
+        .trim();
+      if (!cueText) continue;
+      return {
+        source: 'text_track',
+        text: cueText,
+        cue_start_seconds: Number.isFinite(Number(cue?.startTime)) ? Number(cue.startTime) : null,
+        cue_end_seconds: Number.isFinite(Number(cue?.endTime)) ? Number(cue.endTime) : null,
+        observed_video_time: now,
+        confidence: 'timed',
+      };
+    }
+    return null;
+  }
+
+  function readVisibleCaptionDomAssist(video) {
+    const now = Number(video?.currentTime || 0);
+    const container = document.querySelector('.ytp-caption-window-container');
+    if (!container) return null;
+    const style = window.getComputedStyle(container);
+    if (!style || style.display === 'none' || style.visibility === 'hidden') return null;
+    const text = extractCaptionText();
+    if (!text) return null;
+    return {
+      source: 'page_caption_dom',
+      text,
+      cue_start_seconds: null,
+      cue_end_seconds: null,
+      observed_video_time: now,
+      confidence: 'current_visible',
+    };
+  }
+
+  function isElementVisiblyRendered(node) {
+    if (!node || typeof node.getBoundingClientRect !== 'function') return false;
+    const style = window.getComputedStyle(node);
+    if (!style || style.display === 'none' || style.visibility === 'hidden') return false;
+    const rect = node.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  }
+
+  function readVisibleTranscriptAssist(video) {
+    const now = Number(video?.currentTime || 0);
+    const transcriptPanel = document.querySelector(
+      'ytd-engagement-panel-section-list-renderer[target-id*="transcript"], ytd-transcript-search-panel-renderer'
+    );
+    if (!isElementVisiblyRendered(transcriptPanel)) return null;
+
+    const currentCueNode = transcriptPanel.querySelector('[aria-current="true"] #cue, [aria-current="true"] .segment-text');
+    const fallbackNode = transcriptPanel.querySelector('#cue, .segment-text');
+    const text = String((currentCueNode || fallbackNode)?.textContent || '').trim();
+    if (!text) return null;
+
+    return {
+      source: 'visible_transcript',
+      text,
+      cue_start_seconds: null,
+      cue_end_seconds: null,
+      observed_video_time: now,
+      confidence: 'context_only',
+    };
+  }
+
+  function readPageTextAssist(video) {
+    const trackAssist = readTextTrackAssist(video);
+    if (trackAssist) {
+      console.log(EVIDENCE_LOG, 'source observed', { source: trackAssist.source, confidence: trackAssist.confidence });
+      return trackAssist;
+    }
+    const domAssist = readVisibleCaptionDomAssist(video);
+    if (domAssist) {
+      console.log(EVIDENCE_LOG, 'source observed', { source: domAssist.source, confidence: domAssist.confidence });
+      return domAssist;
+    }
+    const transcriptAssist = readVisibleTranscriptAssist(video);
+    if (transcriptAssist) {
+      console.log(EVIDENCE_LOG, 'source observed', { source: transcriptAssist.source, confidence: transcriptAssist.confidence });
+      return transcriptAssist;
+    }
+    return {
+      source: 'none',
+      text: '',
+      cue_start_seconds: null,
+      cue_end_seconds: null,
+      observed_video_time: Number(video?.currentTime || 0),
+      confidence: 'context_only',
+    };
+  }
+
+  function getAssistStateLabel(assist) {
+    const source = String(assist?.source || 'none');
+    if (source === 'text_track') return 'timed cue';
+    if (source === 'page_caption_dom') return 'visible page caption';
+    if (source === 'visible_transcript') return 'transcript context';
+    return 'unavailable';
+  }
+
+  function getSttPageAgreement(sttText, assist) {
+    const assistSource = String(assist?.source || 'none');
+    const assistText = String(assist?.text || '').trim();
+    if (!assistText || assistSource === 'none' || assistSource === 'visible_transcript') {
+      return 'unavailable';
+    }
+    const score = textAgreementScore(sttText, assistText);
+    return score >= 0.45 ? 'agree' : 'differ';
+  }
+
   if (typeof globalThis !== 'undefined') {
     globalThis.isweepSimulateWordMuteFromAudioPayload = function isweepSimulateWordMuteFromAudioPayload(payload = {}, options = {}) {
       const simulatedPayload = {
@@ -3367,8 +3856,14 @@
       mergeOverlappingWordMuteWindows,
       buildSelectedWordMuteWindows,
       scheduleSelectedWordMutesFromAudioPayload,
+      runFastGuardFromTimedWords,
       isSelectedSpokenWord,
       isSelectedWordMuteModeEnabled,
+      readPageTextAssist,
+      buildEvidenceItem,
+      fuseCaptionWithEvidence,
+      getSourceHierarchy,
+      getSttPageAgreement,
       constants: {
         CLEAN_CAPTION_STALE_MS,
         CLEAN_CAPTION_LOOKAHEAD_SEC,
@@ -3397,6 +3892,13 @@
         userWasMutedBeforeIsweepMute = Boolean(state.userWasMutedBeforeIsweepMute);
         lastMuteOwner = state.lastMuteOwner || 'none';
       },
+      triggerSpeechEndedClear: (reason = 'test') => {
+        scheduleSpeechEndedOverlayClear(reason);
+      },
+      getCaptionStateSnapshot: () => ({
+        ...captionTimelineState,
+        assist: { ...(captionTimelineState.assist || {}) },
+      }),
     };
     return;
   }
@@ -3424,6 +3926,7 @@
         }
       }
       lastCaptionText = '';
+      markCaptionStateListening();
       captionStartTime = null;
       lastLiveCaptionObservedAtMs = 0;
       updateCleanOverlay('', 0);
@@ -3464,11 +3967,18 @@
     const video = findVideo(); // Cache video element if present
     if (video) {
       video.addEventListener('seeking', () => {
+        const now = Number(video.currentTime || 0);
+        if (Math.abs(now - Number(lastKnownVideoTimeSec || 0)) >= 1.0) {
+          resetCaptionTimelineState('seek_detected');
+        }
+        lastKnownVideoTimeSec = now;
         restoreMuteState('seek');
       });
       video.addEventListener('ended', () => {
+        resetCaptionTimelineState('video_ended');
         restoreMuteState('ended');
       });
+      lastKnownVideoTimeSec = Number(video.currentTime || 0);
     }
     await loadPreferencesFromStorage();
     requestPrefSync(); // Refresh prefs on load so blocklist/custom words propagate

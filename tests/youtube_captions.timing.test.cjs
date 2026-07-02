@@ -1041,3 +1041,63 @@ test('missing word timestamps does not schedule mute windows', () => {
   );
   assert.equal(windows.length, 0);
 });
+
+test('context-only transcript evidence cannot replace live STT text', () => {
+  const hooks = loadYoutubeTimingHooks();
+  const fused = hooks.fuseCaptionWithEvidence(
+    'audio stt primary line',
+    {
+      source: 'visible_transcript',
+      text: 'full transcript paragraph that should not replace stt',
+      confidence: 'context_only',
+      cue_start_seconds: null,
+      cue_end_seconds: null,
+    },
+    10,
+    10.4,
+  );
+  assert.equal(fused.usedEvidence, false);
+  assert.equal(fused.text, 'audio stt primary line');
+});
+
+test('timed text-track evidence can align and improve display wording only', () => {
+  const hooks = loadYoutubeTimingHooks();
+  const fused = hooks.fuseCaptionWithEvidence(
+    'helo wrld',
+    {
+      source: 'text_track',
+      text: 'hello world',
+      confidence: 'timed',
+      cue_start_seconds: 5.0,
+      cue_end_seconds: 5.8,
+    },
+    5.1,
+    5.6,
+  );
+  assert.equal(fused.usedEvidence, true);
+  assert.equal(fused.text, 'hello world');
+});
+
+test('fast guard reports insufficient evidence when no timed words exist', () => {
+  const hooks = loadYoutubeTimingHooks();
+  const windows = hooks.runFastGuardFromTimedWords([], ['hell'], 'audio_stt_live', 1.0, 1.4);
+  assert.equal(Array.isArray(windows), true);
+  assert.equal(windows.length, 0);
+});
+
+test('source hierarchy classifies transcript as context-only', () => {
+  const hooks = loadYoutubeTimingHooks();
+  const hierarchy = hooks.getSourceHierarchy();
+  const transcript = hierarchy.find((item) => item.source === 'visible_transcript');
+  assert.ok(transcript);
+  assert.equal(transcript.class, 'context_only');
+});
+
+test('caption state transitions to speech ended after clear delay', async () => {
+  const hooks = loadYoutubeTimingHooks();
+  hooks.triggerSpeechEndedClear('unit_test');
+  await new Promise((resolve) => setTimeout(resolve, 470));
+  const snapshot = hooks.getCaptionStateSnapshot();
+  assert.equal(snapshot.captionState, 'Speech ended');
+  assert.equal(snapshot.lastDroppedReason, 'unit_test');
+});

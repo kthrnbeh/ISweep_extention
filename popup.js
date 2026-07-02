@@ -195,7 +195,14 @@ function renderCaptionReadiness(status) {
   const backend = readiness?.backend && typeof readiness.backend === 'object' ? readiness.backend : {};
 
   if (backendStateValue) {
-    backendStateValue.textContent = backend.ready === true ? 'Ready' : 'Offline';
+    const backendState = String(backend.state || '').trim().toLowerCase();
+    if (backendState === 'ready') {
+      backendStateValue.textContent = 'Ready';
+    } else if (backendState === 'stt_disabled') {
+      backendStateValue.textContent = 'STT Disabled';
+    } else {
+      backendStateValue.textContent = 'Offline';
+    }
   }
   if (backendUrlValue) {
     backendUrlValue.textContent = String(backend.backendUrl || DEFAULT_BACKEND);
@@ -225,7 +232,11 @@ function renderCaptionReadiness(status) {
   }
   if (selectedWordsPreviewValue) {
     const preview = Array.isArray(readiness?.selectedWordPreview) ? readiness.selectedWordPreview : [];
-    selectedWordsPreviewValue.textContent = preview.length ? preview.slice(0, 8).join(', ') : '(none)';
+    const source = String(readiness?.selectedWordSource || '').trim();
+    const sourceSuffix = source ? ` [${source}]` : '';
+    selectedWordsPreviewValue.textContent = preview.length
+      ? `${preview.slice(0, 8).join(', ')}${sourceSuffix}`
+      : `(none)${sourceSuffix}`;
   }
 }
 

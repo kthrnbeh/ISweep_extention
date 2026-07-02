@@ -185,7 +185,7 @@ async function flushAudioChunk(options = {}) {
     mime_type: 'audio/wav',
     start_seconds: startSec,
     end_seconds: endSec,
-    capture_started_at: captureStartedAtMs,
+    capture_started_at: chunkStartedAt,
     chunk_started_at: chunkStartedAt,
     chunk_flushed_at: chunkFlushedAt,
     chunk_emitted_at: chunkFlushedAt,

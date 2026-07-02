@@ -54,11 +54,13 @@ const markerCacheByVideoId = new Map();
 const AUDIO_CAPTION_DEDUPE_WINDOW_MS = 1600;
 const AUDIO_CAPTION_FILTER_ACTIONS_ENABLED = false; // Caption-only mode: keep false until filtering is intentionally re-enabled
 const recentCaptionByText = new Map();
+const recentRelayByTabId = new Map();
 const tabCaptureSessionByTabId = new Map();
 const captionTranscribeQueueByTabId = new Map();
 let activeTabAudioCapture = null;
 let didLogBackendUrl = false;
 const CAPTION_TRANSCRIBE_INTERVAL_MS = 750;
+const AUDIO_RELAY_DEDUPE_WINDOW_MS = 1200;
 
 const AUDIO_DIAG_LOG = '[ISWEEP][AUDIO_DIAG]';
 
@@ -440,6 +442,7 @@ async function getCaptionModeSnapshot() {
   const settings = normalizeCleanCaptionSettings(store[STORAGE_KEYS.CLEAN_CAPTION_SETTINGS] || CLEAN_CAPTION_DEFAULTS);
   const prefs = normalizePreferences(store[STORAGE_KEYS.PREFS] || {});
   const words = Array.isArray(prefs?.blocklist?.items) ? prefs.blocklist.items : [];
+  const selectedWordSource = words.length > 0 ? 'prefs' : 'prefs_missing';
   return {
     cleanCaptionsEnabled: settings.cleanCaptionsEnabled === true,
     mode: settings.cleanCaptionWordMuteMode,
@@ -448,6 +451,7 @@ async function getCaptionModeSnapshot() {
       : 'Captions Only',
     selectedWordCount: words.length,
     selectedWordPreview: words.slice(0, 10),
+    selectedWordSource,
   };
 }
 
@@ -469,14 +473,30 @@ async function buildCaptionReadinessStatus() {
     getSignedInSnapshot(),
   ]);
 
+  const tabSelectedWordCount = Number.isFinite(Number(tabStatus?.selectedWordCount))
+    ? Number(tabStatus.selectedWordCount)
+    : null;
+  const selectedWordCount = tabSelectedWordCount !== null
+    ? tabSelectedWordCount
+    : modeSnapshot.selectedWordCount;
+  const selectedWordPreview = Array.isArray(tabStatus?.selectedWordPreview)
+    ? tabStatus.selectedWordPreview
+    : modeSnapshot.selectedWordPreview;
+  const selectedWordSource = String(
+    tabStatus?.selectedWordSource
+    || modeSnapshot.selectedWordSource
+    || (selectedWordCount > 0 ? 'prefs' : 'prefs_missing')
+  );
+
   return {
     backend,
     tabStatus,
     auth: authSnapshot,
     captionMode: modeSnapshot.mode,
     captionModeLabel: modeSnapshot.modeLabel,
-    selectedWordCount: modeSnapshot.selectedWordCount,
-    selectedWordPreview: modeSnapshot.selectedWordPreview,
+    selectedWordCount,
+    selectedWordPreview,
+    selectedWordSource,
     cleanCaptionsEnabled: modeSnapshot.cleanCaptionsEnabled,
     sttStatus: captionReadinessState.lastSttStatus,
     sttError: captionReadinessState.lastSttError,
@@ -500,7 +520,8 @@ async function handleCaptionRuntimeStatus() {
   const youtubeFallbackEnabled = tabStatus?.youtubeDomFallbackEnabled === true;
   const backendReady = backend?.ready === true;
 
-  if (tabStatus?.usingAudioStt && backendReady) {
+  const hasRenderableAudioText = tabStatus?.hasAudioCaptionText === true;
+  if (tabStatus?.usingAudioStt && hasRenderableAudioText && backendReady) {
     state = 'ready';
     source = tabStatus?.overlaySource === 'audio_stt_cached' ? 'audio_stt_cached' : 'audio_stt_live';
     label = source === 'audio_stt_cached' ? 'Audio captions: Audio STT Cached' : 'Audio captions: Audio STT Live';
@@ -537,6 +558,7 @@ async function handleCaptionRuntimeStatus() {
     captionModeLabel: readiness.captionModeLabel,
     selectedWordCount: readiness.selectedWordCount,
     selectedWordPreview: readiness.selectedWordPreview,
+    selectedWordSource: readiness.selectedWordSource,
     signedIn: readiness.auth?.signedIn === true,
     sttStatus: readiness.sttStatus,
     sttError: readiness.sttError,
@@ -714,6 +736,48 @@ function getCaptionTranscribeQueueState(tabId) {
 function clearCaptionTranscribeQueue(tabId) {
   const key = Number(tabId);
   captionTranscribeQueueByTabId.delete(key);
+  recentRelayByTabId.delete(key);
+}
+
+function shouldSuppressDuplicateRelay(tabId, relayMsg, windowMs = AUDIO_RELAY_DEDUPE_WINDOW_MS) {
+  const key = Number(tabId);
+  if (!Number.isFinite(key)) return false;
+  const now = Date.now();
+  const textCandidate = String(
+    relayMsg?.stable_text
+    || relayMsg?.clean_text
+    || relayMsg?.cleaned_text
+    || relayMsg?.text
+    || ''
+  ).trim();
+  const normalizedText = normalizeCaptionTextForDedupe(textCandidate);
+  const source = String(relayMsg?.source || 'unknown').trim().toLowerCase();
+  const status = String(relayMsg?.status || 'unknown').trim().toLowerCase();
+  const isPartial = relayMsg?.is_partial === true;
+  const signature = `${source}|${status}|${isPartial ? 'partial' : 'final'}|${normalizedText}`;
+  const previous = recentRelayByTabId.get(key);
+
+  if (!normalizedText) {
+    // Guard against empty/silence payloads clearing a recently-rendered valid caption.
+    if (previous && previous.hasText && (now - previous.seenAt) <= windowMs) {
+      return true;
+    }
+    recentRelayByTabId.set(key, {
+      seenAt: now,
+      hasText: false,
+      signature,
+    });
+    return false;
+  }
+
+  recentRelayByTabId.set(key, {
+    seenAt: now,
+    hasText: true,
+    signature,
+  });
+
+  if (!previous || !previous.hasText) return false;
+  return previous.signature === signature && (now - previous.seenAt) <= windowMs;
 }
 
 async function processCaptionTranscribeQueueForTab(tabId) {
@@ -824,6 +888,16 @@ async function relayAudioCaptionResultToTab(result) {
     latency: result?.latency && typeof result.latency === 'object' ? result.latency : null,
   };
 
+  if (shouldSuppressDuplicateRelay(tabId, relayMsg)) {
+    console.log(AUDIO_DIAG_LOG, 'relay duplicate suppressed', {
+      tabId,
+      source: relayMsg.source,
+      status: relayMsg.status,
+      textPreview: String(relayMsg.text || '').slice(0, 60),
+    });
+    return true;
+  }
+
   console.log('[ISWEEP][WORD_MUTE] relay words', {
     count: Array.isArray(relayMsg.words) ? relayMsg.words.length : 0,
     preview: Array.isArray(relayMsg.words)
@@ -903,6 +977,7 @@ function releaseTabCaptureSession(tabId, reason = 'released') {
   if (!Number.isFinite(Number(tabId))) return;
   if (tabCaptureSessionByTabId.has(tabId)) {
     tabCaptureSessionByTabId.delete(tabId);
+    recentRelayByTabId.delete(Number(tabId));
     console.log('[ISWEEP][AUDIO_CAPTIONS] tab capture session released', { tabId, reason });
   }
 }
@@ -1262,7 +1337,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const bgChunkVideoId = String(message.video_id || activeTabAudioCapture?.videoId || '').trim();
     const chunkStartedAt = Number.isFinite(Number(message.chunk_started_at)) ? Number(message.chunk_started_at) : null;
     const chunkFlushedAt = Number.isFinite(Number(message.chunk_flushed_at)) ? Number(message.chunk_flushed_at) : null;
-    const captureStartedAt = Number.isFinite(Number(message.capture_started_at)) ? Number(message.capture_started_at) : chunkStartedAt;
+    const captureStartedAt = Number.isFinite(Number(chunkStartedAt))
+      ? Number(chunkStartedAt)
+      : (Number.isFinite(Number(message.capture_started_at)) ? Number(message.capture_started_at) : null);
     const chunkEmittedAt = Number.isFinite(Number(message.chunk_emitted_at)) ? Number(message.chunk_emitted_at) : chunkFlushedAt;
     const backendReceivedAt = Date.now();
     audioCaptionDebug.bgChunkReceivedCount += 1;

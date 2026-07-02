@@ -125,6 +125,42 @@ test('caption runtime status reports listening when health has stt_enabled true 
   assert.equal(result.sttEnabled, true);
 });
 
+test('caption runtime status stays listening until audio STT has real text', async () => {
+  const bg = loadBackgroundContext();
+  bg.fetch = async () => ({ ok: true, status: 200, json: async () => ({ status: 'ok', stt_enabled: true }) });
+  bg.chrome.tabs.query = async () => ([{ id: 11 }]);
+  bg.chrome.tabs.sendMessage = async () => ({
+    usingYoutubeFallback: false,
+    usingAudioStt: true,
+    hasAudioCaptionText: false,
+    overlaySource: 'audio_stt_live',
+    youtubeDomFallbackEnabled: false,
+  });
+
+  const result = await bg.handleCaptionRuntimeStatus();
+  assert.equal(result.state, 'ready');
+  assert.equal(result.source, 'listening');
+  assert.equal(result.sourceLabel, 'Listening');
+});
+
+test('caption runtime status reports audio STT live only after real text is present', async () => {
+  const bg = loadBackgroundContext();
+  bg.fetch = async () => ({ ok: true, status: 200, json: async () => ({ status: 'ok', stt_enabled: true }) });
+  bg.chrome.tabs.query = async () => ([{ id: 12 }]);
+  bg.chrome.tabs.sendMessage = async () => ({
+    usingYoutubeFallback: false,
+    usingAudioStt: true,
+    hasAudioCaptionText: true,
+    overlaySource: 'audio_stt_live',
+    youtubeDomFallbackEnabled: false,
+  });
+
+  const result = await bg.handleCaptionRuntimeStatus();
+  assert.equal(result.state, 'ready');
+  assert.equal(result.source, 'audio_stt_live');
+  assert.equal(result.sourceLabel, 'Audio STT Live');
+});
+
 test('caption runtime status reports stt_disabled only when health stt_enabled is false', async () => {
   const bg = loadBackgroundContext();
   bg.fetch = async () => ({ ok: true, status: 200, json: async () => ({ status: 'ok', stt_enabled: false }) });

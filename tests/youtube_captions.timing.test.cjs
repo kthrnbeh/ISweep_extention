@@ -25,12 +25,33 @@ function loadYoutubeTimingHooks() {
       getElementById() {
         return null;
       },
+      createElement() {
+        return {
+          style: {},
+          className: '',
+          dataset: {},
+          textContent: '',
+          appendChild() {},
+          addEventListener() {},
+          removeEventListener() {},
+          remove() {},
+          setAttribute() {},
+          getBoundingClientRect() {
+            return { width: 100, height: 20, left: 0, top: 0 };
+          },
+        };
+      },
+      body: {
+        appendChild() {},
+      },
     },
     __ISWEEP_TEST_MODE__: true,
     setTimeout,
     clearTimeout,
     setInterval,
     clearInterval,
+    requestAnimationFrame: (cb) => setTimeout(cb, 0),
+    cancelAnimationFrame: (id) => clearTimeout(id),
   };
   context.globalThis = context;
   vm.createContext(context);

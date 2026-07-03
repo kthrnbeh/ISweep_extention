@@ -137,6 +137,13 @@ test('caption modes treat native captions as evidence-only and emit page text ev
   assert.equal(youtubeSource.includes("type: 'isweep_page_text_evidence'"), true);
   assert.equal(youtubeSource.includes("emitPageTextEvidence('page_caption_dom'"), true);
   assert.equal(youtubeSource.includes('startCaptionVideoWatchLoop'), true);
+  assert.equal(youtubeSource.includes('duplicate render dropped'), true);
+  assert.equal(youtubeSource.includes('shouldDropDuplicateRender'), true);
+});
+
+test('background relay logs exact duplicate relay dropped marker', () => {
+  const bgSource = fs.readFileSync(path.join(extensionRoot, 'background.js'), 'utf8');
+  assert.equal(bgSource.includes('duplicate relay dropped'), true);
 });
 
 test('popup shows explicit primary caption source readiness field', () => {
@@ -145,4 +152,14 @@ test('popup shows explicit primary caption source readiness field', () => {
   assert.equal(popupHtml.includes('id="primaryCaptionSourceValue"'), true);
   assert.equal(popupSource.includes('primaryCaptionSourceValue'), true);
   assert.equal(popupSource.includes('Waiting for audio'), true);
+});
+
+test('local reference artifacts are gitignored and not committed as fixtures', () => {
+  const gitignore = fs.readFileSync(path.join(extensionRoot, '.gitignore'), 'utf8');
+  assert.equal(gitignore.includes('local_user_references/'), true);
+  const localRefDir = path.join(extensionRoot, 'local_user_references');
+  if (fs.existsSync(localRefDir)) {
+    const files = fs.readdirSync(localRefDir).filter((name) => !name.startsWith('.'));
+    assert.equal(files.length, 0);
+  }
 });

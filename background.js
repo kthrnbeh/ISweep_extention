@@ -19,7 +19,8 @@ const STORAGE_KEYS = {
   PREFS: 'isweepPreferences',
   BACKEND_URL: 'isweepBackendUrl',
   CLEAN_CAPTION_SETTINGS: 'isweepCleanCaptionSettings',
-  DEV_LOCAL_AUTH: 'devLocalAuthEnabled'
+  DEV_LOCAL_AUTH: 'devLocalAuthEnabled',
+  LOCAL_REFERENCES: 'isweepLocalReferences'
 };
 
 const TOKEN_KEY = 'isweep_auth_token'; // Shared with site_token_bridge and frontend localStorage
@@ -61,6 +62,8 @@ let activeTabAudioCapture = null;
 let didLogBackendUrl = false;
 const CAPTION_TRANSCRIBE_INTERVAL_MS = 750;
 const AUDIO_RELAY_DEDUPE_WINDOW_MS = 1200;
+const CAPTION_RESULT_ID_CACHE_LIMIT = 160;
+const CAPTION_RESULT_ID_CACHE_TTL_MS = 2 * 60 * 1000;
 
 const AUDIO_DIAG_LOG = '[ISWEEP][AUDIO_DIAG]';
 const CAPTION_STATE_LOG = '[ISWEEP][CAPTION_STATE]';
@@ -82,10 +85,134 @@ function getCaptionTimelineState(tabId) {
       lastAudioWindowEndMs: -1,
       lastChunkId: null,
       lastDroppedReason: null,
+      recentRelayResultIds: new Map(),
       updatedAt: Date.now(),
     });
   }
   return captionTimelineByTabId.get(key);
+}
+
+function buildCaptionResultId(payload = {}) {
+  const tabId = Number.isFinite(Number(payload.tab_id)) ? Number(payload.tab_id) : 0;
+  const sessionId = String(payload.session_id || '').trim() || 'no_session';
+  const chunkId = String(payload.chunk_id || '').trim() || 'no_chunk';
+  const windowEndMs = Number.isFinite(Number(payload.audio_window_end_ms))
+    ? Number(payload.audio_window_end_ms)
+    : -1;
+  return `${tabId}|${sessionId}|${chunkId}|${windowEndMs}`;
+}
+
+function trimRecentCaptionResultIds(cacheMap) {
+  if (!(cacheMap instanceof Map)) return;
+  const now = Date.now();
+  for (const [key, seenAt] of cacheMap.entries()) {
+    if ((now - Number(seenAt || 0)) > CAPTION_RESULT_ID_CACHE_TTL_MS) {
+      cacheMap.delete(key);
+    }
+  }
+  while (cacheMap.size > CAPTION_RESULT_ID_CACHE_LIMIT) {
+    const oldestKey = cacheMap.keys().next().value;
+    if (typeof oldestKey === 'undefined') break;
+    cacheMap.delete(oldestKey);
+  }
+}
+
+function shouldDropDuplicateRelayByResultId(tabId, relayMsg) {
+  const timeline = getCaptionTimelineState(tabId);
+  if (!timeline) return false;
+  const cache = timeline.recentRelayResultIds instanceof Map
+    ? timeline.recentRelayResultIds
+    : new Map();
+  timeline.recentRelayResultIds = cache;
+  trimRecentCaptionResultIds(cache);
+  const resultId = buildCaptionResultId(relayMsg);
+  if (cache.has(resultId)) {
+    timeline.lastDroppedReason = 'duplicate_relay_result_id';
+    timeline.updatedAt = Date.now();
+    console.log(CAPTION_STATE_LOG, 'duplicate relay dropped', {
+      tab_id: Number(tabId),
+      result_id: resultId,
+      chunk_id: relayMsg?.chunk_id || null,
+      audio_window_end_ms: relayMsg?.audio_window_end_ms ?? null,
+    });
+    return true;
+  }
+  cache.set(resultId, Date.now());
+  trimRecentCaptionResultIds(cache);
+  return false;
+}
+
+function normalizeReferenceLineText(text) {
+  return String(text || '').replace(/\s+/g, ' ').trim();
+}
+
+function normalizeLocalReferenceInput(payload = {}) {
+  const videoId = String(payload.video_id || '').trim();
+  if (!videoId) {
+    return { ok: false, error: 'missing_video_id' };
+  }
+  const rawTitle = String(payload.title || '').trim();
+  const rawType = String(payload.reference_type || '').trim();
+  const referenceType = rawType || 'user_provided_lyrics';
+  const linesInput = Array.isArray(payload.lines) ? payload.lines : [];
+  const pastedLyrics = String(payload.pasted_lyrics || payload.lyrics_text || '').trim();
+
+  const parsedLines = linesInput.length
+    ? linesInput
+      .map((entry, index) => ({
+        id: String(entry?.id || `line_${String(index + 1).padStart(3, '0')}`),
+        text: normalizeReferenceLineText(entry?.text || ''),
+      }))
+      .filter((entry) => entry.text)
+    : pastedLyrics
+      .split(/\r?\n/)
+      .map((line) => normalizeReferenceLineText(line))
+      .filter(Boolean)
+      .map((line, index) => ({
+        id: `line_${String(index + 1).padStart(3, '0')}`,
+        text: line,
+      }));
+
+  if (!parsedLines.length) {
+    return { ok: false, error: 'empty_reference_lines' };
+  }
+
+  return {
+    ok: true,
+    reference: {
+      video_id: videoId,
+      title: rawTitle,
+      reference_type: referenceType,
+      provenance: 'user_supplied',
+      approval_status: 'local_user_approved',
+      lines: parsedLines,
+      imported_at: Date.now(),
+    },
+  };
+}
+
+async function importLocalReference(payload = {}) {
+  const normalized = normalizeLocalReferenceInput(payload);
+  if (!normalized.ok) {
+    return { ok: false, error: normalized.error };
+  }
+  const store = await chrome.storage.local.get([STORAGE_KEYS.LOCAL_REFERENCES]);
+  const existing = store && typeof store[STORAGE_KEYS.LOCAL_REFERENCES] === 'object' && store[STORAGE_KEYS.LOCAL_REFERENCES]
+    ? store[STORAGE_KEYS.LOCAL_REFERENCES]
+    : {};
+  const merged = {
+    ...existing,
+    [normalized.reference.video_id]: normalized.reference,
+  };
+  await chrome.storage.local.set({
+    [STORAGE_KEYS.LOCAL_REFERENCES]: merged,
+  });
+  return {
+    ok: true,
+    video_id: normalized.reference.video_id,
+    line_count: normalized.reference.lines.length,
+    approval_status: normalized.reference.approval_status,
+  };
 }
 
 function resetCaptionTimelineForTab(tabId, reason = 'reset') {
@@ -660,9 +787,20 @@ async function handleCaptionRuntimeStatus() {
   const hasRenderableAudioText = tabStatus?.hasAudioCaptionText === true;
   if (tabStatus?.usingAudioStt && hasRenderableAudioText && backendReady) {
     state = 'ready';
-    source = tabStatus?.overlaySource === 'audio_stt_cached' ? 'audio_stt_cached' : 'audio_stt_live';
-    label = source === 'audio_stt_cached' ? 'Audio captions: Audio STT Cached' : 'Audio captions: Audio STT Live';
-    sourceLabel = source === 'audio_stt_cached' ? 'Audio STT Cached' : 'Audio STT Live';
+    const overlaySource = String(tabStatus?.overlaySource || '').trim().toLowerCase();
+    if (overlaySource.startsWith('audio_stt_plus_reference')) {
+      source = 'audio_stt_plus_reference';
+      label = 'Audio captions: Audio STT + Local Reference';
+      sourceLabel = 'Audio STT + Local Reference';
+    } else if (overlaySource.startsWith('audio_stt_plus_page_evidence')) {
+      source = 'audio_stt_plus_page_evidence';
+      label = 'Audio captions: Audio STT + Page Evidence';
+      sourceLabel = 'Audio STT + Page Evidence';
+    } else {
+      source = overlaySource === 'audio_stt_cached' ? 'audio_stt_cached' : 'audio_stt';
+      label = source === 'audio_stt_cached' ? 'Audio captions: Audio STT Cached' : 'Audio captions: Audio STT';
+      sourceLabel = source === 'audio_stt_cached' ? 'Audio STT Cached' : 'Audio STT';
+    }
     primaryCaptionSource = 'Live Audio STT';
   } else if (youtubeFallbackEnabled && tabStatus?.usingYoutubeFallback) {
     state = 'youtube_fallback';
@@ -915,7 +1053,10 @@ function shouldSuppressDuplicateRelay(tabId, relayMsg, windowMs = AUDIO_RELAY_DE
   const source = String(relayMsg?.source || 'unknown').trim().toLowerCase();
   const status = String(relayMsg?.status || 'unknown').trim().toLowerCase();
   const isPartial = relayMsg?.is_partial === true;
-  const signature = `${source}|${status}|${isPartial ? 'partial' : 'final'}|${normalizedText}`;
+  const windowIdentity = Number.isFinite(Number(relayMsg?.audio_window_end_ms))
+    ? `w:${Number(relayMsg.audio_window_end_ms)}`
+    : `c:${String(relayMsg?.chunk_id || '').trim() || 'unknown_chunk'}`;
+  const signature = `${source}|${status}|${isPartial ? 'partial' : 'final'}|${windowIdentity}|${normalizedText}`;
   const previous = recentRelayByTabId.get(key);
 
   if (!normalizedText) {
@@ -1064,6 +1205,9 @@ async function relayAudioCaptionResultToTab(result) {
   };
 
   const timeline = getCaptionTimelineState(tabId);
+  if (shouldDropDuplicateRelayByResultId(tabId, relayMsg)) {
+    return true;
+  }
   if (timeline) {
     const incomingWindowEnd = Number.isFinite(Number(relayMsg.audio_window_end_ms))
       ? Number(relayMsg.audio_window_end_ms)
@@ -1098,7 +1242,7 @@ async function relayAudioCaptionResultToTab(result) {
       state.lastDroppedReason = 'duplicate_suppressed';
       state.updatedAt = Date.now();
     }
-    console.log(CAPTION_STATE_LOG, 'duplicate suppressed', {
+    console.log(CAPTION_STATE_LOG, 'duplicate relay dropped', {
       tab_id: tabId,
       chunk_id: relayMsg.chunk_id,
       audio_window_end_ms: relayMsg.audio_window_end_ms,
@@ -1727,6 +1871,28 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       channel: message.channel,
       duration_seconds: message.duration_seconds,
     }).then(sendResponse);
+    return true;
+  } else if (message.type === 'isweep_import_local_reference') {
+    importLocalReference(message).then(sendResponse);
+    return true;
+  } else if (message.type === 'isweep_get_local_reference') {
+    const requestedVideoId = String(message.video_id || '').trim();
+    chrome.storage.local.get([STORAGE_KEYS.LOCAL_REFERENCES]).then((store) => {
+      const allRefs = store && typeof store[STORAGE_KEYS.LOCAL_REFERENCES] === 'object' && store[STORAGE_KEYS.LOCAL_REFERENCES]
+        ? store[STORAGE_KEYS.LOCAL_REFERENCES]
+        : {};
+      if (!requestedVideoId) {
+        sendResponse({ ok: true, references: allRefs });
+        return;
+      }
+      sendResponse({
+        ok: true,
+        video_id: requestedVideoId,
+        reference: allRefs[requestedVideoId] || null,
+      });
+    }).catch((error) => {
+      sendResponse({ ok: false, error: String(error?.message || error || 'read_failed') });
+    });
     return true;
   }
 

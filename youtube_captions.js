@@ -11,6 +11,7 @@
     PREFS: 'isweepPreferences',
     CLEAN_CAPTION_SETTINGS: 'isweepCleanCaptionSettings',
     AUDIO_FILTERING_ENABLED: 'audioFilteringEnabled',
+    LOCAL_REFERENCES: 'isweepLocalReferences',
   };
   // Track caption text and when it started so we can measure how long words are spoken.
   // Playback-only: ISweep never edits media or captions; it only controls live playback state (mute/unmute/seek/rate).
@@ -52,6 +53,7 @@
   };
 
   let cachedPreferences = null;
+  let cachedLocalReferences = {};
 
   function normalizePreferences(prefs) {
     const raw = prefs && typeof prefs === 'object' ? prefs : {};
@@ -321,6 +323,9 @@
   const AUDIO_STT_MIN_VISIBLE_MS = 1200;
   const AUDIO_STT_HOLD_MS = 2500;
   const AUDIO_STT_STALE_MS = 3500;
+  const CAPTION_RESULT_ID_CACHE_LIMIT = 160;
+  const CAPTION_RESULT_ID_CACHE_TTL_MS = 2 * 60 * 1000;
+  const REFERENCE_ALIGNMENT_CONTEXT_SEC = 7.0;
 
   // Marker engine state. Future audio watch-ahead analyzers can emit the same marker shape.
   let activeVideoId = null;
@@ -372,6 +377,15 @@
   let currentVadState = 'unknown';
   let pageTextAssistLastState = 'unavailable';
   let lastSttPageAgreement = 'unavailable';
+  let lastReferenceAlignment = {
+    status: 'searching',
+    score: 0,
+    audio_anchor_count: 0,
+    reference_coverage: 0,
+    time_alignment_score: 0,
+    source: 'none',
+    reason: 'not_started',
+  };
   const captionTimelineState = {
     sessionId: null,
     tabId: null,
@@ -382,6 +396,7 @@
     currentChunkId: null,
     sequenceNumber: 0,
     lastDroppedReason: null,
+    recentAcceptedResultIds: new Map(),
     speechEndedAtMs: 0,
     captionState: 'Listening',
     assist: {
@@ -392,6 +407,9 @@
       observed_video_time: 0,
       confidence: 'context_only',
     },
+    referenceLineIndex: null,
+    referenceLineId: null,
+    referenceVideoTime: null,
   };
   let lastAudioRelaySignature = '';
   let lastAudioRelayAtMs = 0;
@@ -399,6 +417,53 @@
 
   function normalizeCaptionStateText(text) {
     return String(text || '').toLowerCase().replace(/\s+/g, ' ').trim();
+  }
+
+  function buildCaptionResultId(message = {}) {
+    const tabId = Number.isFinite(Number(message.tab_id)) ? Number(message.tab_id) : 0;
+    const sessionId = String(message.session_id || '').trim() || 'no_session';
+    const chunkId = String(message.chunk_id || '').trim() || 'no_chunk';
+    const windowEndMs = Number.isFinite(Number(message.audio_window_end_ms))
+      ? Number(message.audio_window_end_ms)
+      : -1;
+    return `${tabId}|${sessionId}|${chunkId}|${windowEndMs}`;
+  }
+
+  function trimRecentAcceptedResultIds() {
+    const cache = captionTimelineState.recentAcceptedResultIds;
+    if (!(cache instanceof Map)) return;
+    const now = Date.now();
+    for (const [key, seenAt] of cache.entries()) {
+      if ((now - Number(seenAt || 0)) > CAPTION_RESULT_ID_CACHE_TTL_MS) {
+        cache.delete(key);
+      }
+    }
+    while (cache.size > CAPTION_RESULT_ID_CACHE_LIMIT) {
+      const oldestKey = cache.keys().next().value;
+      if (typeof oldestKey === 'undefined') break;
+      cache.delete(oldestKey);
+    }
+  }
+
+  function shouldDropDuplicateRender(message = {}) {
+    trimRecentAcceptedResultIds();
+    const cache = captionTimelineState.recentAcceptedResultIds;
+    if (!(cache instanceof Map)) return false;
+    const resultId = buildCaptionResultId(message);
+    if (cache.has(resultId)) {
+      captionTimelineState.lastDroppedReason = 'duplicate_render_result_id';
+      console.log(CAPTION_STATE_LOG, 'duplicate render dropped', {
+        result_id: resultId,
+        chunk_id: String(message.chunk_id || '').trim() || null,
+        audio_window_end_ms: Number.isFinite(Number(message.audio_window_end_ms))
+          ? Number(message.audio_window_end_ms)
+          : null,
+      });
+      return true;
+    }
+    cache.set(resultId, Date.now());
+    trimRecentAcceptedResultIds();
+    return false;
   }
 
   function clearSpeechEndTimer() {
@@ -419,6 +484,7 @@
     captionTimelineState.currentChunkId = null;
     captionTimelineState.sequenceNumber = 0;
     captionTimelineState.lastDroppedReason = reason;
+    captionTimelineState.recentAcceptedResultIds = new Map();
     captionTimelineState.speechEndedAtMs = 0;
     captionTimelineState.captionState = 'Listening';
     lastAudioCaptionSource = null;
@@ -426,6 +492,9 @@
     lastAudioCaptionReceivedAtMs = 0;
     lastAudioRelaySignature = '';
     lastAudioRelayAtMs = 0;
+    captionTimelineState.referenceLineIndex = null;
+    captionTimelineState.referenceLineId = null;
+    captionTimelineState.referenceVideoTime = null;
     updateCleanOverlay('', findVideo()?.currentTime || 0);
     console.log(CAPTION_STATE_LOG, 'state reset', { reason, videoId: activeVideoId });
   }
@@ -748,9 +817,10 @@
 
     const preCachedAudioEntry = findTimedCleanCaptionEntry(preCachedAudioCaptions, nowSec, lookaheadSec);
     if (preCachedAudioEntry) {
+      const entrySource = String(preCachedAudioEntry.source || '').trim();
       return {
         text: getCleanCaptionDisplayText(preCachedAudioEntry),
-        source: 'audio_stt_cached',
+        source: entrySource || 'audio_stt_cached',
         stale: false,
         cleanResumeTime: Number.isFinite(Number(preCachedAudioEntry.clean_resume_time))
           ? Number(preCachedAudioEntry.clean_resume_time)
@@ -760,9 +830,10 @@
 
     const liveAudioEntry = findTimedCleanCaptionEntry(liveAudioCaptions, nowSec, lookaheadSec);
     if (liveAudioEntry) {
+      const entrySource = String(liveAudioEntry.source || '').trim();
       return {
         text: getCleanCaptionDisplayText(liveAudioEntry),
-        source: 'audio_stt_live',
+        source: entrySource || 'audio_stt_live',
         stale: false,
         cleanResumeTime: Number.isFinite(Number(liveAudioEntry.clean_resume_time))
           ? Number(liveAudioEntry.clean_resume_time)
@@ -776,7 +847,7 @@
     if (freshAudioText && normalizedAudioSource.startsWith('audio_stt') && audioAgeMs <= audioHoldMs) {
       return {
         text: freshAudioText,
-        source: normalizedAudioSource.includes('cached') ? 'audio_stt_cached' : 'audio_stt_live',
+        source: normalizedAudioSource || (normalizedAudioSource.includes('cached') ? 'audio_stt_cached' : 'audio_stt_live'),
         stale: false,
         cleanResumeTime: null,
       };
@@ -1747,13 +1818,18 @@
       const store = await chrome.storage.local.get([
         STORAGE_KEYS.PREFS,
         STORAGE_KEYS.AUDIO_FILTERING_ENABLED,
+        STORAGE_KEYS.LOCAL_REFERENCES,
       ]);
       cachedPreferences = store[STORAGE_KEYS.PREFS] || null;
       audioFilteringEnabled = store[STORAGE_KEYS.AUDIO_FILTERING_ENABLED] !== false;
+      cachedLocalReferences = store[STORAGE_KEYS.LOCAL_REFERENCES] && typeof store[STORAGE_KEYS.LOCAL_REFERENCES] === 'object'
+        ? store[STORAGE_KEYS.LOCAL_REFERENCES]
+        : {};
     } catch (err) {
       console.warn('[ISWEEP][MATCH] failed to load prefs', err?.message || err);
       cachedPreferences = null;
       audioFilteringEnabled = true;
+      cachedLocalReferences = {};
     }
   }
 
@@ -1762,6 +1838,10 @@
       if (areaName !== 'local') return;
       if (changes[STORAGE_KEYS.PREFS]) {
         cachedPreferences = changes[STORAGE_KEYS.PREFS].newValue || null;
+      }
+      if (changes[STORAGE_KEYS.LOCAL_REFERENCES]) {
+        const nextValue = changes[STORAGE_KEYS.LOCAL_REFERENCES].newValue;
+        cachedLocalReferences = nextValue && typeof nextValue === 'object' ? nextValue : {};
       }
       if (changes[STORAGE_KEYS.CLEAN_CAPTION_SETTINGS]) {
         const previousSettings = normalizeCleanCaptionSettings(changes[STORAGE_KEYS.CLEAN_CAPTION_SETTINGS].oldValue);
@@ -1831,6 +1911,7 @@
           pageTextAssistSource: String(assistSnapshot.source || 'none'),
           pageTextAssistState: pageTextAssistLastState,
           sttPageAgreement: lastSttPageAgreement,
+          referenceAlignment: lastReferenceAlignment,
           evidenceAssist: assistSnapshot,
           sourceHierarchy: getSourceHierarchy(),
           currentVadState,
@@ -1911,6 +1992,11 @@
         const normalizedIncomingText = normalizeCaptionStateText(dedupedText);
         const normalizedSource = String(nextSource || '').trim().toLowerCase();
         const isSilence = normalizedSource === 'silence';
+
+        if (shouldDropDuplicateRender(message)) {
+          sendResponse({ ok: true, deduped: 'duplicate_render_result_id' });
+          return true;
+        }
 
         if (captionTimelineState.sessionId && incomingSessionId && captionTimelineState.sessionId !== incomingSessionId) {
           captionTimelineState.lastDroppedReason = 'stale_session';
@@ -1996,9 +2082,12 @@
           return true;
         }
 
+        const startSec = Number.isFinite(Number(message.start_seconds)) ? Number(message.start_seconds) : (findVideo()?.currentTime || 0);
+        const endSec = Number.isFinite(Number(message.end_seconds)) ? Number(message.end_seconds) : startSec + 2;
+
         if (dedupedText) {
           clearSpeechEndTimer();
-          lastAudioCaptionSource = nextSource;
+          lastAudioCaptionSource = 'audio_stt';
           lastAudioCaptionText = dedupedText;
           lastAudioCaptionReceivedAtMs = Date.now();
           markCaptionStateLiveStt();
@@ -2019,18 +2108,31 @@
           );
           captionTimelineState.assist = assist;
           pageTextAssistLastState = getAssistStateLabel(assist);
-          const fused = fuseCaptionWithEvidence(dedupedText, assist, Number(message.start_seconds), Number(message.end_seconds));
-          if (fused.usedEvidence && fused.text) {
-            lastAudioCaptionText = fused.text;
-            lastAudioCaptionSource = `audio_stt_live+${assist.source}`;
+          const localReference = getLocalReferenceForVideo(captionTimelineState.videoId || activeVideoId);
+          const alignment = resolveCaptionAlignment({
+            sttText: dedupedText,
+            sttWords: Array.isArray(message.word_timestamps) ? message.word_timestamps : message.words,
+            assist,
+            localReference,
+            startSec,
+            endSec,
+            nowVideoSec: Number(video?.currentTime || endSec),
+          });
+          lastReferenceAlignment = alignment.diagnostics;
+          if (alignment.usedEvidence && alignment.text) {
+            lastAudioCaptionText = alignment.text;
+            lastAudioCaptionSource = alignment.sourceLabel;
           }
-          lastSttPageAgreement = getSttPageAgreement(dedupedText, assist);
+          lastSttPageAgreement = alignment.diagnostics.status === 'aligned' ? 'agree' : 'differ';
           console.log(CAPTION_STATE_LOG, 'accepted result', {
             session_id: captionTimelineState.sessionId,
             chunk_id: captionTimelineState.currentChunkId,
             audio_window_end_ms: incomingWindowEndMs,
             assist_source: assist.source,
             agreement: lastSttPageAgreement,
+            alignment_status: alignment.diagnostics.status,
+            alignment_score: alignment.diagnostics.score,
+            caption_source: lastAudioCaptionSource,
           });
         }
         console.log(CLEAN_CC_LOG_PREFIX, 'audio_stt message received', {
@@ -2043,8 +2145,6 @@
           textLength: dedupedText.length,
           textPreview: dedupedText.slice(0, 60),
         });
-        const startSec = Number.isFinite(Number(message.start_seconds)) ? Number(message.start_seconds) : (findVideo()?.currentTime || 0);
-        const endSec = Number.isFinite(Number(message.end_seconds)) ? Number(message.end_seconds) : startSec + 2;
         // Caption-only: never call ingestAudioMarkers from audio caption messages.
         // ingestAudioMarkers may only be called when a dedicated filtering mode is enabled.
         if (!dedupedText) {
@@ -2056,7 +2156,7 @@
         }
         const normalizedAudioCaptions = buildAudioResponseCaptions({
           status: message.status || 'ready',
-          source: message.source || 'audio_stt',
+          source: lastAudioCaptionSource || message.source || 'audio_stt',
           cleaned_captions: message.cleaned_captions,
           clean_captions: message.clean_captions,
           text: message.text,
@@ -2184,7 +2284,7 @@
         customCount,
         categoryCount,
       });
-      return { words: combined, source: 'prefs', customCount, categoryCount };
+      return { words: combined, source: 'cached', customCount, categoryCount };
     }
     if (lastSelectedWordsLogSignature !== '') {
       lastSelectedWordsLogSignature = '';
@@ -3606,24 +3706,213 @@
     return segments.map((el) => el.textContent.trim()).join(' ').trim(); // Join segments into full line
   }
 
-  function tokenizeTextForAgreement(text) {
+  const REFERENCE_ALIGNMENT_STOPWORDS = new Set([
+    'i', 'you', 'yeah', 'the', 'a', 'and', 'oh', 'woah', 'whoa',
+    'to', 'of', 'in', 'it', 'is', 'im', 'i\'m', 'we', 'they', 'he', 'she',
+    'me', 'my', 'your', 'our', 'for', 'on', 'at', 'be', 'are', 'was', 'were',
+    'do', 'did', 'have', 'has', 'had', 'that', 'this', 'these', 'those',
+  ]);
+
+  function tokenizeTextForAlignment(text) {
     return normalizeCaptionStateText(text)
+      .replace(/[^a-z0-9'\s]/g, ' ')
       .split(' ')
       .map((token) => token.trim())
       .filter(Boolean);
   }
 
-  function textAgreementScore(left, right) {
-    const leftTokens = tokenizeTextForAgreement(left);
-    const rightTokens = tokenizeTextForAgreement(right);
-    if (!leftTokens.length || !rightTokens.length) return 0;
-    const rightSet = new Set(rightTokens);
-    const leftSet = new Set(leftTokens);
-    let overlap = 0;
-    leftSet.forEach((token) => {
-      if (rightSet.has(token)) overlap += 1;
+  function isMeaningfulAlignmentAnchor(token) {
+    const value = String(token || '').trim().toLowerCase();
+    if (!value || value.length < 2) return false;
+    return !REFERENCE_ALIGNMENT_STOPWORDS.has(value);
+  }
+
+  function isDistinctiveAnchor(token) {
+    const value = String(token || '').trim().toLowerCase();
+    return value.length >= 6 && !REFERENCE_ALIGNMENT_STOPWORDS.has(value);
+  }
+
+  function uniqueMeaningfulAnchors(tokens = []) {
+    const out = [];
+    const seen = new Set();
+    tokens.forEach((token) => {
+      const normalized = String(token || '').trim().toLowerCase();
+      if (!isMeaningfulAlignmentAnchor(normalized)) return;
+      if (seen.has(normalized)) return;
+      seen.add(normalized);
+      out.push(normalized);
     });
-    return overlap / Math.max(Math.min(leftSet.size, rightSet.size), 1);
+    return out;
+  }
+
+  function getLocalReferenceForVideo(videoId) {
+    const stableVideoId = String(videoId || '').trim();
+    if (!stableVideoId) return null;
+    const ref = cachedLocalReferences && typeof cachedLocalReferences === 'object'
+      ? cachedLocalReferences[stableVideoId]
+      : null;
+    if (!ref || typeof ref !== 'object') return null;
+    const lines = Array.isArray(ref.lines)
+      ? ref.lines
+        .map((line, index) => ({
+          id: String(line?.id || `line_${String(index + 1).padStart(3, '0')}`),
+          text: String(line?.text || '').replace(/\s+/g, ' ').trim(),
+        }))
+        .filter((line) => line.text)
+      : [];
+    if (!lines.length) return null;
+    return {
+      video_id: stableVideoId,
+      title: String(ref.title || ''),
+      reference_type: String(ref.reference_type || 'user_provided_lyrics'),
+      provenance: String(ref.provenance || 'user_supplied'),
+      approval_status: String(ref.approval_status || 'local_user_approved'),
+      lines,
+    };
+  }
+
+  function computeTimeAlignmentScore(source, startSec, endSec, assist, candidateLineIndex, nowVideoSec) {
+    const start = Number.isFinite(Number(startSec)) ? Number(startSec) : Number(nowVideoSec || 0);
+    const end = Number.isFinite(Number(endSec)) ? Number(endSec) : start;
+    if (source === 'text_track' || source === 'page_caption_dom') {
+      if (isTimedEvidenceAligned(assist, start, end)) return 1;
+      const observed = Number.isFinite(Number(assist?.observed_video_time)) ? Number(assist.observed_video_time) : start;
+      const delta = Math.abs(observed - end);
+      if (delta <= 1.0) return 0.75;
+      if (delta <= 2.0) return 0.45;
+      return 0.15;
+    }
+    if (source === 'local_reference') {
+      const prevIndex = Number.isFinite(Number(captionTimelineState.referenceLineIndex))
+        ? Number(captionTimelineState.referenceLineIndex)
+        : null;
+      const prevVideoTime = Number.isFinite(Number(captionTimelineState.referenceVideoTime))
+        ? Number(captionTimelineState.referenceVideoTime)
+        : null;
+      if (prevIndex === null || prevVideoTime === null) return 0.65;
+      const elapsed = Math.max(Number(nowVideoSec || end) - prevVideoTime, 0);
+      const allowedStep = Math.max(1, Math.round(elapsed / REFERENCE_ALIGNMENT_CONTEXT_SEC) + 1);
+      const step = Math.abs(Number(candidateLineIndex || 0) - prevIndex);
+      if (step <= allowedStep) return 1;
+      return Math.max(0.1, 1 - ((step - allowedStep) / 5));
+    }
+    return 0.2;
+  }
+
+  function evaluateReferenceAlignmentCandidate(params = {}) {
+    const source = String(params.source || 'none');
+    const sttText = String(params.sttText || '').trim();
+    const candidateText = String(params.candidateText || '').trim();
+    const nowVideoSec = Number(params.nowVideoSec || 0);
+    if (!sttText || !candidateText) {
+      return {
+        status: 'searching',
+        score: 0,
+        audio_anchor_count: 0,
+        reference_coverage: 0,
+        time_alignment_score: 0,
+        source,
+        reason: 'missing_audio_or_reference_text',
+      };
+    }
+
+    const sttWordTokens = Array.isArray(params.sttWords)
+      ? params.sttWords.map((entry) => String(entry?.word || '').trim().toLowerCase()).filter(Boolean)
+      : [];
+    const audioTokens = sttWordTokens.length ? sttWordTokens : tokenizeTextForAlignment(sttText);
+    const referenceTokens = tokenizeTextForAlignment(candidateText);
+    const anchors = uniqueMeaningfulAnchors(audioTokens);
+    const referenceAnchorSet = new Set(uniqueMeaningfulAnchors(referenceTokens));
+    const matchedAnchors = anchors.filter((token) => referenceAnchorSet.has(token));
+    const audioAnchorCount = anchors.length;
+    const hasDistinctiveAnchor = anchors.some((token) => isDistinctiveAnchor(token));
+    const coverage = audioAnchorCount > 0 ? (matchedAnchors.length / audioAnchorCount) : 0;
+    const timeAlignmentScore = computeTimeAlignmentScore(
+      source,
+      params.startSec,
+      params.endSec,
+      params.assist,
+      params.candidateLineIndex,
+      nowVideoSec,
+    );
+
+    const anchorStrength = audioAnchorCount >= 2
+      ? 1
+      : ((audioAnchorCount === 1 && hasDistinctiveAnchor) ? 0.75 : 0.2);
+    const score = Math.max(0, Math.min(1,
+      (coverage * 0.5) + (timeAlignmentScore * 0.35) + (anchorStrength * 0.15)
+    ));
+
+    const onlyCommonFragment = matchedAnchors.length > 0 && matchedAnchors.every((token) => REFERENCE_ALIGNMENT_STOPWORDS.has(token));
+    const anchorsOk = audioAnchorCount >= 2 || (audioAnchorCount === 1 && hasDistinctiveAnchor);
+    const coverageOk = coverage >= (audioAnchorCount >= 2 ? 0.5 : 1.0);
+    const timeOk = timeAlignmentScore >= 0.45;
+
+    if (!anchorsOk) {
+      return {
+        status: 'rejected',
+        score,
+        audio_anchor_count: audioAnchorCount,
+        reference_coverage: coverage,
+        time_alignment_score: timeAlignmentScore,
+        source,
+        reason: 'insufficient_meaningful_audio_anchors',
+      };
+    }
+    if (onlyCommonFragment) {
+      return {
+        status: 'rejected',
+        score,
+        audio_anchor_count: audioAnchorCount,
+        reference_coverage: coverage,
+        time_alignment_score: timeAlignmentScore,
+        source,
+        reason: 'common_fragment_only',
+      };
+    }
+    if (!coverageOk) {
+      return {
+        status: 'rejected',
+        score,
+        audio_anchor_count: audioAnchorCount,
+        reference_coverage: coverage,
+        time_alignment_score: timeAlignmentScore,
+        source,
+        reason: 'insufficient_reference_coverage',
+      };
+    }
+    if (!timeOk) {
+      return {
+        status: 'rejected',
+        score,
+        audio_anchor_count: audioAnchorCount,
+        reference_coverage: coverage,
+        time_alignment_score: timeAlignmentScore,
+        source,
+        reason: 'time_misaligned',
+      };
+    }
+    if (score < 0.72) {
+      return {
+        status: 'rejected',
+        score,
+        audio_anchor_count: audioAnchorCount,
+        reference_coverage: coverage,
+        time_alignment_score: timeAlignmentScore,
+        source,
+        reason: 'alignment_score_below_threshold',
+      };
+    }
+
+    return {
+      status: 'aligned',
+      score,
+      audio_anchor_count: audioAnchorCount,
+      reference_coverage: coverage,
+      time_alignment_score: timeAlignmentScore,
+      source,
+      reason: 'strict_alignment_met',
+    };
   }
 
   function buildEvidenceItem(base, sessionId, videoId) {
@@ -3649,52 +3938,165 @@
     return e >= cueStart && s <= cueEnd;
   }
 
-  function fuseCaptionWithEvidence(sttText, assist, startSec, endSec) {
-    const baseText = String(sttText || '').trim();
-    const assistText = String(assist?.text || '').trim();
-    if (!assistText || !baseText) {
-      return { text: baseText, source: 'audio_stt_only', usedEvidence: false };
+  function resolveCaptionAlignment(params = {}) {
+    const baseText = String(params.sttText || '').trim();
+    if (!baseText) {
+      return {
+        text: '',
+        sourceLabel: 'audio_stt',
+        usedEvidence: false,
+        diagnostics: {
+          status: 'searching',
+          score: 0,
+          audio_anchor_count: 0,
+          reference_coverage: 0,
+          time_alignment_score: 0,
+          source: 'none',
+          reason: 'empty_audio_text',
+        },
+      };
     }
 
-    if (assist?.confidence === 'timed' && isTimedEvidenceAligned(assist, startSec, endSec)) {
-      console.log(EVIDENCE_LOG, 'aligned with STT', {
-        source: assist.source,
-        confidence: assist.confidence,
-        start_seconds: startSec,
-        end_seconds: endSec,
+    const candidates = [];
+    const assistText = String(params.assist?.text || '').trim();
+    const assistSource = String(params.assist?.source || 'none');
+    if (assistText && (assistSource === 'text_track' || assistSource === 'page_caption_dom')) {
+      candidates.push({
+        source: assistSource,
+        text: assistText,
+        lineIndex: null,
+        lineId: null,
       });
-      return { text: assistText, source: `${assist.source}_aligned`, usedEvidence: true };
     }
 
-    if (assist?.confidence === 'current_visible') {
-      const agreement = textAgreementScore(baseText, assistText);
-      if (agreement >= 0.45) {
-        console.log(EVIDENCE_LOG, 'aligned with STT', {
-          source: assist.source,
-          confidence: assist.confidence,
-          agreement,
+    const localReference = params.localReference;
+    if (localReference && Array.isArray(localReference.lines) && localReference.lines.length) {
+      const prevIndex = Number.isFinite(Number(captionTimelineState.referenceLineIndex))
+        ? Number(captionTimelineState.referenceLineIndex)
+        : null;
+      const minIndex = prevIndex === null ? 0 : Math.max(0, prevIndex - 3);
+      const maxIndex = prevIndex === null
+        ? Math.min(localReference.lines.length - 1, 32)
+        : Math.min(localReference.lines.length - 1, prevIndex + 10);
+      for (let index = minIndex; index <= maxIndex; index += 1) {
+        const line = localReference.lines[index];
+        const lineText = String(line?.text || '').trim();
+        if (!lineText) continue;
+        candidates.push({
+          source: 'local_reference',
+          text: lineText,
+          lineIndex: index,
+          lineId: String(line?.id || `line_${String(index + 1).padStart(3, '0')}`),
         });
-        return { text: assistText, source: `${assist.source}_supported`, usedEvidence: true };
       }
-      console.log(EVIDENCE_LOG, 'disagreement ignored', {
-        source: assist.source,
-        confidence: assist.confidence,
-        agreement,
-      });
-      return { text: baseText, source: 'audio_stt_only', usedEvidence: false };
     }
 
-    console.log(EVIDENCE_LOG, 'disagreement ignored', {
-      source: assist?.source || 'none',
-      confidence: assist?.confidence || 'context_only',
-      reason: 'context_only_evidence',
+    if (!candidates.length) {
+      return {
+        text: baseText,
+        sourceLabel: 'audio_stt',
+        usedEvidence: false,
+        diagnostics: {
+          status: 'searching',
+          score: 0,
+          audio_anchor_count: 0,
+          reference_coverage: 0,
+          time_alignment_score: 0,
+          source: 'none',
+          reason: 'no_reference_candidates',
+        },
+      };
+    }
+
+    let best = null;
+    candidates.forEach((candidate) => {
+      const diagnostics = evaluateReferenceAlignmentCandidate({
+        source: candidate.source,
+        sttText: baseText,
+        sttWords: params.sttWords,
+        candidateText: candidate.text,
+        assist: params.assist,
+        candidateLineIndex: candidate.lineIndex,
+        startSec: params.startSec,
+        endSec: params.endSec,
+        nowVideoSec: params.nowVideoSec,
+      });
+      if (!best || diagnostics.score > best.diagnostics.score) {
+        best = {
+          candidate,
+          diagnostics,
+        };
+      }
     });
-    return { text: baseText, source: 'audio_stt_only', usedEvidence: false };
+
+    if (!best || best.diagnostics.status !== 'aligned') {
+      console.log(EVIDENCE_LOG, 'alignment rejected', {
+        source: best?.diagnostics?.source || 'none',
+        reason: best?.diagnostics?.reason || 'no_candidate',
+        score: best?.diagnostics?.score || 0,
+      });
+      return {
+        text: baseText,
+        sourceLabel: 'audio_stt',
+        usedEvidence: false,
+        diagnostics: best
+          ? best.diagnostics
+          : {
+            status: 'rejected',
+            score: 0,
+            audio_anchor_count: 0,
+            reference_coverage: 0,
+            time_alignment_score: 0,
+            source: 'none',
+            reason: 'no_candidate',
+          },
+      };
+    }
+
+    if (best.candidate.source === 'local_reference') {
+      captionTimelineState.referenceLineIndex = best.candidate.lineIndex;
+      captionTimelineState.referenceLineId = best.candidate.lineId;
+      captionTimelineState.referenceVideoTime = Number(params.nowVideoSec || params.endSec || 0);
+    }
+
+    console.log(EVIDENCE_LOG, 'alignment accepted', {
+      source: best.candidate.source,
+      score: best.diagnostics.score,
+      reason: best.diagnostics.reason,
+      line_id: best.candidate.lineId || null,
+    });
+    return {
+      text: best.candidate.text,
+      sourceLabel: best.candidate.source === 'local_reference'
+        ? 'audio_stt_plus_reference'
+        : 'audio_stt_plus_page_evidence',
+      usedEvidence: true,
+      diagnostics: best.diagnostics,
+    };
+  }
+
+  function fuseCaptionWithEvidence(sttText, assist, startSec, endSec) {
+    const resolved = resolveCaptionAlignment({
+      sttText,
+      sttWords: [],
+      assist,
+      localReference: null,
+      startSec,
+      endSec,
+      nowVideoSec: Number(assist?.observed_video_time || endSec || startSec || 0),
+    });
+    return {
+      text: resolved.text,
+      source: resolved.sourceLabel,
+      usedEvidence: resolved.usedEvidence,
+      diagnostics: resolved.diagnostics,
+    };
   }
 
   function getSourceHierarchy() {
     return [
       { source: 'audio_stt', class: 'timed', role: 'primary' },
+      { source: 'local_reference', class: 'timed_text_optional', role: 'assist_if_strictly_aligned' },
       { source: 'text_track', class: 'timed', role: 'assist_if_aligned' },
       { source: 'page_caption_dom', class: 'current_visible', role: 'assist_if_similar' },
       { source: 'visible_transcript', class: 'context_only', role: 'context_only' },
@@ -3833,8 +4235,17 @@
     if (!assistText || assistSource === 'none' || assistSource === 'visible_transcript') {
       return 'unavailable';
     }
-    const score = textAgreementScore(sttText, assistText);
-    return score >= 0.45 ? 'agree' : 'differ';
+    const diagnostics = evaluateReferenceAlignmentCandidate({
+      source: assistSource,
+      sttText,
+      sttWords: [],
+      candidateText: assistText,
+      assist,
+      startSec: Number(assist?.cue_start_seconds),
+      endSec: Number(assist?.cue_end_seconds),
+      nowVideoSec: Number(assist?.observed_video_time || 0),
+    });
+    return diagnostics.status === 'aligned' ? 'agree' : 'differ';
   }
 
   if (typeof globalThis !== 'undefined') {
@@ -3910,6 +4321,8 @@
       isSelectedWordMuteModeEnabled,
       readPageTextAssist,
       buildEvidenceItem,
+      evaluateReferenceAlignmentCandidate,
+      resolveCaptionAlignment,
       fuseCaptionWithEvidence,
       getSourceHierarchy,
       getSttPageAgreement,
@@ -3935,6 +4348,20 @@
       },
       setCachedPreferences: (prefs) => {
         cachedPreferences = prefs || null;
+      },
+      setCachedLocalReferences: (references) => {
+        cachedLocalReferences = references && typeof references === 'object' ? references : {};
+      },
+      setReferenceAlignmentState: (state = {}) => {
+        captionTimelineState.referenceLineIndex = Number.isFinite(Number(state.referenceLineIndex))
+          ? Number(state.referenceLineIndex)
+          : null;
+        captionTimelineState.referenceLineId = typeof state.referenceLineId === 'string'
+          ? state.referenceLineId
+          : null;
+        captionTimelineState.referenceVideoTime = Number.isFinite(Number(state.referenceVideoTime))
+          ? Number(state.referenceVideoTime)
+          : null;
       },
       setMuteOwnershipState: (state = {}) => {
         isweepMuteActive = Boolean(state.isweepMuteActive);

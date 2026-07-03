@@ -22,3 +22,6 @@ temp/
 # Preview/test files
 preview.html
 test-popup.js
+
+# Local user-provided reference imports (lyrics/scripts) must stay local only
+local_user_references/

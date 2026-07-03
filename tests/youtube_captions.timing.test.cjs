@@ -1084,7 +1084,7 @@ test('context-only transcript evidence cannot replace live STT text', () => {
 test('timed text-track evidence can align and improve display wording only', () => {
   const hooks = loadYoutubeTimingHooks();
   const fused = hooks.fuseCaptionWithEvidence(
-    'helo wrld',
+    'hello wrld',
     {
       source: 'text_track',
       text: 'hello world',
@@ -1097,6 +1097,109 @@ test('timed text-track evidence can align and improve display wording only', () 
   );
   assert.equal(fused.usedEvidence, true);
   assert.equal(fused.text, 'hello world');
+});
+
+test('single common word cannot align a full reference line', () => {
+  const hooks = loadYoutubeTimingHooks();
+  const diagnostics = hooks.evaluateReferenceAlignmentCandidate({
+    source: 'page_caption_dom',
+    sttText: 'You',
+    sttWords: [{ word: 'You', start: 12.0, end: 12.1 }],
+    candidateText: 'You are always on my mind tonight',
+    assist: {
+      source: 'page_caption_dom',
+      observed_video_time: 12.05,
+      cue_start_seconds: null,
+      cue_end_seconds: null,
+    },
+    startSec: 12.0,
+    endSec: 12.2,
+    nowVideoSec: 12.05,
+  });
+  assert.equal(diagnostics.status, 'rejected');
+  assert.equal(diagnostics.audio_anchor_count <= 1, true);
+});
+
+test('two meaningful anchors can align matching local reference line', () => {
+  const hooks = loadYoutubeTimingHooks();
+  hooks.setCachedLocalReferences({
+    tQmEd_UeeIk: {
+      video_id: 'tQmEd_UeeIk',
+      title: 'local test',
+      reference_type: 'user_provided_lyrics',
+      provenance: 'user_supplied',
+      approval_status: 'local_user_approved',
+      lines: [
+        { id: 'line_001', text: 'we are flying higher now' },
+      ],
+    },
+  });
+  hooks.setReferenceAlignmentState({ referenceLineIndex: 0, referenceLineId: 'line_001', referenceVideoTime: 22.0 });
+
+  const resolved = hooks.resolveCaptionAlignment({
+    sttText: 'we flying higher',
+    sttWords: [
+      { word: 'we', start: 22.1, end: 22.2 },
+      { word: 'flying', start: 22.2, end: 22.5 },
+      { word: 'higher', start: 22.5, end: 22.8 },
+    ],
+    assist: { source: 'none', text: '' },
+    localReference: {
+      video_id: 'tQmEd_UeeIk',
+      lines: [{ id: 'line_001', text: 'we are flying higher now' }],
+    },
+    startSec: 22.1,
+    endSec: 22.8,
+    nowVideoSec: 22.5,
+  });
+
+  assert.equal(resolved.usedEvidence, true);
+  assert.equal(resolved.sourceLabel, 'audio_stt_plus_reference');
+  assert.equal(resolved.text, 'we are flying higher now');
+  assert.equal(resolved.diagnostics.status, 'aligned');
+});
+
+test('low-coverage unrelated reference does not replace audio stt text', () => {
+  const hooks = loadYoutubeTimingHooks();
+  const resolved = hooks.resolveCaptionAlignment({
+    sttText: 'bye bye',
+    sttWords: [{ word: 'bye', start: 31.0, end: 31.2 }],
+    assist: {
+      source: 'page_caption_dom',
+      text: 'what is in my body yeah i can have it',
+      observed_video_time: 31.1,
+      cue_start_seconds: null,
+      cue_end_seconds: null,
+      confidence: 'current_visible',
+    },
+    localReference: null,
+    startSec: 31.0,
+    endSec: 31.4,
+    nowVideoSec: 31.1,
+  });
+  assert.equal(resolved.usedEvidence, false);
+  assert.equal(resolved.text, 'bye bye');
+  assert.equal(resolved.sourceLabel, 'audio_stt');
+});
+
+test('local reference alignment remains display-only and cannot schedule mute by itself', () => {
+  const hooks = loadYoutubeTimingHooks();
+  const resolved = hooks.resolveCaptionAlignment({
+    sttText: 'flying higher',
+    sttWords: [{ word: 'flying', start: 40.0, end: 40.2 }, { word: 'higher', start: 40.2, end: 40.4 }],
+    assist: { source: 'none', text: '' },
+    localReference: {
+      video_id: 'tQmEd_UeeIk',
+      lines: [{ id: 'line_001', text: 'we are flying higher now' }],
+    },
+    startSec: 40.0,
+    endSec: 40.4,
+    nowVideoSec: 40.2,
+  });
+  assert.equal(resolved.sourceLabel === 'audio_stt_plus_reference' || resolved.sourceLabel === 'audio_stt', true);
+  assert.equal('action' in resolved, false);
+  assert.equal('start_seconds' in resolved, false);
+  assert.equal('end_seconds' in resolved, false);
 });
 
 test('fast guard reports insufficient evidence when no timed words exist', () => {

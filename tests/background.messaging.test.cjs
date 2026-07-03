@@ -157,7 +157,7 @@ test('caption runtime status stays listening until audio STT has real text', asy
   assert.equal(result.sourceLabel, 'Listening');
 });
 
-test('caption runtime status reports audio STT live only after real text is present', async () => {
+test('caption runtime status reports audio STT only after real text is present', async () => {
   const bg = loadBackgroundContext();
   bg.getCaptionBackendStatus = async () => ({
     state: 'ready',
@@ -178,8 +178,8 @@ test('caption runtime status reports audio STT live only after real text is pres
 
   const result = await bg.handleCaptionRuntimeStatus();
   assert.equal(result.state, 'ready');
-  assert.equal(result.source, 'audio_stt_live');
-  assert.equal(result.sourceLabel, 'Audio STT Live');
+  assert.equal(result.source, 'audio_stt');
+  assert.equal(result.sourceLabel, 'Audio STT');
 });
 
 test('caption runtime status reports stt_disabled only when health stt_enabled is false', async () => {
@@ -1221,6 +1221,69 @@ test('relay drops stale audio window result and does not send to content script'
   assert.equal(timeline.lastDroppedReason, 'old_audio_window');
 });
 
+test('relay sends each unique tab/session/chunk/window result exactly once', async () => {
+  const bg = loadBackgroundContext();
+  const sent = [];
+  bg.chrome.tabs.query = async () => ([{ id: 91, url: 'https://www.youtube.com/watch?v=once91' }]);
+  bg.chrome.tabs.sendMessage = async (tabId, payload) => {
+    sent.push({ tabId, payload });
+    return { ok: true };
+  };
+
+  const payload = {
+    status: 'ready',
+    source: 'audio_stt_live',
+    text: 'same text once',
+    tab_id: 91,
+    session_id: 'session-91',
+    chunk_id: 'chunk-123',
+    audio_window_end_ms: 2200,
+    events: [],
+  };
+
+  const first = await bg.relayAudioCaptionResultToTab(payload);
+  const second = await bg.relayAudioCaptionResultToTab(payload);
+
+  assert.equal(first, true);
+  assert.equal(second, true);
+  assert.equal(sent.length, 1);
+});
+
+test('relay allows repeated text for different chunk/window identities', async () => {
+  const bg = loadBackgroundContext();
+  const sent = [];
+  bg.chrome.tabs.query = async () => ([{ id: 92, url: 'https://www.youtube.com/watch?v=repeat92' }]);
+  bg.chrome.tabs.sendMessage = async (tabId, payload) => {
+    sent.push({ tabId, payload });
+    return { ok: true };
+  };
+
+  const first = await bg.relayAudioCaptionResultToTab({
+    status: 'ready',
+    source: 'audio_stt_live',
+    text: 'repeated lyric line',
+    tab_id: 92,
+    session_id: 'session-92',
+    chunk_id: 'chunk-a',
+    audio_window_end_ms: 5000,
+    events: [],
+  });
+  const second = await bg.relayAudioCaptionResultToTab({
+    status: 'ready',
+    source: 'audio_stt_live',
+    text: 'repeated lyric line',
+    tab_id: 92,
+    session_id: 'session-92',
+    chunk_id: 'chunk-b',
+    audio_window_end_ms: 5350,
+    events: [],
+  });
+
+  assert.equal(first, true);
+  assert.equal(second, true);
+  assert.equal(sent.length, 2);
+});
+
 test('background forwards offscreen VAD state updates to the active tab', async () => {
   const bg = loadBackgroundContext();
   const sent = [];
@@ -1282,4 +1345,29 @@ test('reference lookup interface runs once per stable video and uses short-lived
   assert.equal(calls, 1);
   assert.equal(Array.isArray(first.candidates), true);
   assert.equal(first.candidates.length, 1);
+});
+
+test('local reference import stores user-approved lines scoped to video id', async () => {
+  const bg = loadBackgroundContext();
+  const response = await bg.__sendRuntimeMessage({
+    type: 'isweep_import_local_reference',
+    video_id: 'tQmEd_UeeIk',
+    title: 'Local test title',
+    pasted_lyrics: 'First line\nSecond line',
+  });
+
+  assert.equal(response.ok, true);
+  assert.equal(response.video_id, 'tQmEd_UeeIk');
+  assert.equal(response.line_count, 2);
+
+  const loaded = await bg.__sendRuntimeMessage({
+    type: 'isweep_get_local_reference',
+    video_id: 'tQmEd_UeeIk',
+  });
+  assert.equal(loaded.ok, true);
+  assert.equal(loaded.reference.video_id, 'tQmEd_UeeIk');
+  assert.equal(loaded.reference.provenance, 'user_supplied');
+  assert.equal(loaded.reference.approval_status, 'local_user_approved');
+  assert.equal(Array.isArray(loaded.reference.lines), true);
+  assert.equal(loaded.reference.lines.length, 2);
 });

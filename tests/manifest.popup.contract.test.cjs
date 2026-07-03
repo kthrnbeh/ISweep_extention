@@ -77,7 +77,7 @@ test('youtube captions script enforces CC-mode captions-only safety guard', () =
     true
   );
   assert.equal(
-    youtubeSource.includes('[CC] mode uses audio STT captions only. Keep native timing state updated but skip decision/muting behavior.'),
+    youtubeSource.includes('[CC] mode uses audio STT captions only. Native caption text is evidence-only.'),
     true
   );
 });
@@ -130,4 +130,19 @@ test('selected-word mute path does not invoke skip/fast-forward/playbackRate or 
   assert.equal(snippet.includes("action === 'fast_forward'"), false);
   assert.equal(snippet.includes('/event'), false);
   assert.equal(snippet.includes('handleCaptionDecision'), false);
+});
+
+test('caption modes treat native captions as evidence-only and emit page text evidence messages', () => {
+  const youtubeSource = fs.readFileSync(path.join(extensionRoot, 'youtube_captions.js'), 'utf8');
+  assert.equal(youtubeSource.includes("type: 'isweep_page_text_evidence'"), true);
+  assert.equal(youtubeSource.includes("emitPageTextEvidence('page_caption_dom'"), true);
+  assert.equal(youtubeSource.includes('startCaptionVideoWatchLoop'), true);
+});
+
+test('popup shows explicit primary caption source readiness field', () => {
+  const popupHtml = fs.readFileSync(path.join(extensionRoot, 'popup.html'), 'utf8');
+  const popupSource = fs.readFileSync(path.join(extensionRoot, 'popup.js'), 'utf8');
+  assert.equal(popupHtml.includes('id="primaryCaptionSourceValue"'), true);
+  assert.equal(popupSource.includes('primaryCaptionSourceValue'), true);
+  assert.equal(popupSource.includes('Waiting for audio'), true);
 });

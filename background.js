@@ -575,7 +575,10 @@ async function getCaptionModeSnapshot() {
   const settings = normalizeCleanCaptionSettings(store[STORAGE_KEYS.CLEAN_CAPTION_SETTINGS] || CLEAN_CAPTION_DEFAULTS);
   const prefs = normalizePreferences(store[STORAGE_KEYS.PREFS] || {});
   const words = Array.isArray(prefs?.blocklist?.items) ? prefs.blocklist.items : [];
-  const selectedWordSource = words.length > 0 ? 'prefs' : 'prefs_missing';
+  const token = await getAuthToken();
+  const selectedWordSource = words.length > 0
+    ? (token ? 'synced' : 'cached')
+    : 'missing';
   return {
     cleanCaptionsEnabled: settings.cleanCaptionsEnabled === true,
     mode: settings.cleanCaptionWordMuteMode,
@@ -618,7 +621,7 @@ async function buildCaptionReadinessStatus() {
   const selectedWordSource = String(
     tabStatus?.selectedWordSource
     || modeSnapshot.selectedWordSource
-    || (selectedWordCount > 0 ? 'prefs' : 'prefs_missing')
+    || (selectedWordCount > 0 ? 'cached' : 'missing')
   );
 
   return {
@@ -649,6 +652,7 @@ async function handleCaptionRuntimeStatus() {
   let label = 'Audio captions: Backend offline';
   let sourceLabel = 'Backend Offline';
   let source = 'backend_offline';
+  let primaryCaptionSource = 'Waiting for audio';
 
   const youtubeFallbackEnabled = tabStatus?.youtubeDomFallbackEnabled === true;
   const backendReady = backend?.ready === true;
@@ -659,6 +663,7 @@ async function handleCaptionRuntimeStatus() {
     source = tabStatus?.overlaySource === 'audio_stt_cached' ? 'audio_stt_cached' : 'audio_stt_live';
     label = source === 'audio_stt_cached' ? 'Audio captions: Audio STT Cached' : 'Audio captions: Audio STT Live';
     sourceLabel = source === 'audio_stt_cached' ? 'Audio STT Cached' : 'Audio STT Live';
+    primaryCaptionSource = 'Live Audio STT';
   } else if (youtubeFallbackEnabled && tabStatus?.usingYoutubeFallback) {
     state = 'youtube_fallback';
     source = 'youtube_fallback';
@@ -669,11 +674,17 @@ async function handleCaptionRuntimeStatus() {
     source = 'listening';
     label = 'Audio captions: Listening';
     sourceLabel = 'Listening';
+    primaryCaptionSource = String(tabStatus?.captionState || '').toLowerCase() === 'speech ended'
+      ? 'Speech ended'
+      : 'Waiting for audio';
   } else if (backend.state === 'stt_disabled') {
     state = 'stt_disabled';
     source = 'stt_disabled';
     label = 'Audio captions: STT disabled';
     sourceLabel = 'STT Disabled';
+    primaryCaptionSource = 'STT error';
+  } else if (String(tabStatus?.captionState || '').toLowerCase() === 'speech ended') {
+    primaryCaptionSource = 'Speech ended';
   }
 
   const response = {
@@ -713,6 +724,7 @@ async function handleCaptionRuntimeStatus() {
       : null,
     sourceHierarchy: Array.isArray(tabStatus?.sourceHierarchy) ? tabStatus.sourceHierarchy : [],
     currentVadState: String(tabStatus?.currentVadState || 'unknown'),
+    primaryCaptionSource,
   };
   console.log(CAPTION_LOG_PREFIX, 'popup runtime status', response);
   return response;
@@ -2124,6 +2136,7 @@ async function handleAudioCaptionChunk(videoId, audioChunk, mimeType, startSecon
         chunk_flushed_at: chunkFlushedAt,
         session_id: sessionId,
         chunk_id: chunkId,
+        tab_id: Number.isFinite(Number(tabId)) ? Number(tabId) : (Number.isFinite(Number(activeTabAudioCapture?.tabId)) ? Number(activeTabAudioCapture.tabId) : null),
         sequence_number: sequenceNumber,
         audio_window_start_ms: audioWindowStartMs,
         audio_window_end_ms: audioWindowEndMs,

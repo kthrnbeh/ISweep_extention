@@ -129,12 +129,14 @@
     if (muteEnforceInterval) clearInterval(muteEnforceInterval);
     if (markerSchedulerInterval) clearInterval(markerSchedulerInterval);
     if (markerVideoWatchInterval) clearInterval(markerVideoWatchInterval);
+    if (captionVideoWatchInterval) clearInterval(captionVideoWatchInterval);
     if (bufferTimer) clearTimeout(bufferTimer);
     restoreMuteTimeout = null;
     hardRestoreTimeout = null;
     muteEnforceInterval = null;
     markerSchedulerInterval = null;
     markerVideoWatchInterval = null;
+    captionVideoWatchInterval = null;
     bufferTimer = null;
     console.log('[ISWEEP][AUDIO_CAPTIONS]', 'local timers stopped', { reason });
   }
@@ -326,6 +328,7 @@
   let firedMarkerIds = new Set();
   let markerSchedulerInterval = null;
   let markerVideoWatchInterval = null;
+  let captionVideoWatchInterval = null;
   let markerModeActive = false;
   let markerFallbackReason = 'scheduler_not_started';
   let markerFallbackLogVideoId = null;
@@ -1652,6 +1655,7 @@
   }
 
   function startVideoWatchLoop() {
+    if (cleanCaptionSettings.cleanCaptionsEnabled) return;
     handleVideoIdChange(getCurrentVideoId());
     if (markerVideoWatchInterval) return;
     console.log(MARKER_LOG_PREFIX, 'video watch loop started', { intervalMs: 1000 });
@@ -1659,6 +1663,25 @@
       handleVideoIdChange(getCurrentVideoId());
       // Retry audio capture each tick if tracks weren't available on the first attempt.
       if (ISWEEP_CONTENT_SCRIPT_AUDIO_AHEAD_ENABLED && tabAudioCaptureState !== 'ready' && tabAudioCaptureState !== 'starting' && activeVideoId && cleanCaptionSettings.cleanCaptionsEnabled && !audioAheadActive && !audioCapturePermissionDenied) startAudioCapture();
+    }, 1000);
+  }
+
+  function startCaptionVideoWatchLoop() {
+    if (!cleanCaptionSettings.cleanCaptionsEnabled) return;
+    handleVideoIdChange(getCurrentVideoId());
+    if (captionVideoWatchInterval) return;
+    console.log('[ISWEEP][AUDIO_CAPTIONS] caption-mode video watch loop started', { intervalMs: 1000 });
+    captionVideoWatchInterval = setInterval(() => {
+      handleVideoIdChange(getCurrentVideoId());
+      if (ISWEEP_CONTENT_SCRIPT_AUDIO_AHEAD_ENABLED
+        && tabAudioCaptureState !== 'ready'
+        && tabAudioCaptureState !== 'starting'
+        && activeVideoId
+        && cleanCaptionSettings.cleanCaptionsEnabled
+        && !audioAheadActive
+        && !audioCapturePermissionDenied) {
+        startAudioCapture();
+      }
     }, 1000);
   }
 
@@ -1744,13 +1767,22 @@
         const previousSettings = normalizeCleanCaptionSettings(changes[STORAGE_KEYS.CLEAN_CAPTION_SETTINGS].oldValue);
         cleanCaptionSettings = normalizeCleanCaptionSettings(changes[STORAGE_KEYS.CLEAN_CAPTION_SETTINGS].newValue);
         if (!cleanCaptionSettings.cleanCaptionsEnabled) {
+          if (captionVideoWatchInterval) {
+            clearInterval(captionVideoWatchInterval);
+            captionVideoWatchInterval = null;
+          }
           stopAudioCapture('captions_disabled');
           ensureMarkerSchedulerRunning();
           analyzeCurrentVideoMarkers(false);
+          startVideoWatchLoop();
         } else {
           if (markerSchedulerInterval) {
             clearInterval(markerSchedulerInterval);
             markerSchedulerInterval = null;
+          }
+          if (markerVideoWatchInterval) {
+            clearInterval(markerVideoWatchInterval);
+            markerVideoWatchInterval = null;
           }
           resetMarkerEngine('caption_mode_no_markers');
           if (previousSettings.cleanCaptionsEnabled === false) {
@@ -1759,6 +1791,7 @@
           if (ISWEEP_CONTENT_SCRIPT_AUDIO_AHEAD_ENABLED && tabAudioCaptureState !== 'ready' && tabAudioCaptureState !== 'starting' && activeVideoId && !audioAheadActive && !audioCapturePermissionDenied) {
             startAudioCapture();
           }
+          startCaptionVideoWatchLoop();
         }
         applyCleanCaptionOverlayStyles();
         updateCleanOverlay(lastCaptionText, findVideo()?.currentTime || 0);
@@ -1788,7 +1821,7 @@
           youtubeDomFallbackEnabled: ISWEEP_YOUTUBE_DOM_FALLBACK_ENABLED,
           selectedWordCount: Array.isArray(selectedWordSnapshot.words) ? selectedWordSnapshot.words.length : 0,
           selectedWordPreview: Array.isArray(selectedWordSnapshot.words) ? selectedWordSnapshot.words.slice(0, 10) : [],
-          selectedWordSource: selectedWordSnapshot.source || 'prefs_missing',
+          selectedWordSource: selectedWordSnapshot.source || 'missing',
           captionState: captionTimelineState.captionState || 'Listening',
           lastAcceptedWindowEndMs: Number.isFinite(Number(captionTimelineState.lastAcceptedAudioWindowEndMs))
             ? Number(captionTimelineState.lastAcceptedAudioWindowEndMs)
@@ -2146,7 +2179,7 @@
         });
       }
       console.log('[ISWEEP][FILTERS]', {
-        source: 'prefs',
+        source: 'cached',
         count: combined.length,
         customCount,
         categoryCount,
@@ -2161,13 +2194,13 @@
       });
     }
     console.log('[ISWEEP][FILTERS]', {
-      source: 'prefs_missing',
+      source: 'missing',
       count: 0,
       customCount,
       categoryCount,
       note: 'no saved words loaded; masking uses preferences only',
     });
-    return { words: [], source: 'prefs_missing', customCount, categoryCount };
+    return { words: [], source: 'missing', customCount, categoryCount };
   }
 
   function normalizeCleanCaptionSettings(raw) {
@@ -3526,9 +3559,8 @@
     const prevDuration = captionStartTime !== null && now !== null ? Math.max(0, now - captionStartTime) : null; // Duration of previous caption
 
     if (cleanCaptionSettings.cleanCaptionsEnabled) {
-      // [CC] mode uses audio STT captions only. Keep native timing state updated but skip decision/muting behavior.
-      lastCaptionText = text;
-      captionStartTime = now;
+      // [CC] mode uses audio STT captions only. Native caption text is evidence-only.
+      emitPageTextEvidence('page_caption_dom', text, now, null, null, 'current_visible');
       return;
     }
 
@@ -3770,6 +3802,23 @@
     };
   }
 
+  function emitPageTextEvidence(source, text, observedVideoTime, cueStartSeconds, cueEndSeconds, confidence) {
+    if (!cleanCaptionSettings.cleanCaptionsEnabled) return;
+    const cleanText = String(text || '').trim();
+    if (!cleanText) return;
+    safeRuntimeSendMessage({
+      type: 'isweep_page_text_evidence',
+      source: String(source || 'page_caption_dom'),
+      text: cleanText,
+      observed_video_time: Number.isFinite(Number(observedVideoTime)) ? Number(observedVideoTime) : 0,
+      cue_start_seconds: Number.isFinite(Number(cueStartSeconds)) ? Number(cueStartSeconds) : null,
+      cue_end_seconds: Number.isFinite(Number(cueEndSeconds)) ? Number(cueEndSeconds) : null,
+      confidence: String(confidence || 'context_only'),
+      video_id: String(captionTimelineState.videoId || activeVideoId || '').trim() || null,
+      session_id: String(captionTimelineState.sessionId || '').trim() || null,
+    }).catch(() => {});
+  }
+
   function getAssistStateLabel(assist) {
     const source = String(assist?.source || 'none');
     if (source === 'text_track') return 'timed cue';
@@ -3907,6 +3956,15 @@
     ensureCleanCaptionOverlay();
     const caption = extractCaptionText();
 
+    if (cleanCaptionSettings.cleanCaptionsEnabled) {
+      const video = findVideo();
+      const now = video && typeof video.currentTime === 'number' ? video.currentTime : 0;
+      if (caption) {
+        emitPageTextEvidence('page_caption_dom', caption, now, null, null, 'current_visible');
+      }
+      return;
+    }
+
     // If captions disappear, flush the final caption immediately and restore audio; empty snapshots should not debounce.
     if (!caption) {
       if (lastCaptionText && captionStartTime !== null) {
@@ -3987,10 +4045,11 @@
     if (!cleanCaptionSettings.cleanCaptionsEnabled) {
       ensureMarkerSchedulerRunning();
       analyzeCurrentVideoMarkers(false);
+      startVideoWatchLoop();
     } else {
       resetMarkerEngine('caption_mode_no_markers');
+      startCaptionVideoWatchLoop();
     }
-    startVideoWatchLoop();
     startObserving(); // Begin observing captions
   }
 

@@ -148,6 +148,7 @@ const backendLastErrorValue = document.getElementById('backendLastErrorValue');
 const backendSttStatusValue = document.getElementById('backendSttStatusValue');
 const backendLastSuccessCaptionValue = document.getElementById('backendLastSuccessCaptionValue');
 const captionStateValue = document.getElementById('captionStateValue');
+const primaryCaptionSourceValue = document.getElementById('primaryCaptionSourceValue');
 const currentChunkIdValue = document.getElementById('currentChunkIdValue');
 const lastAcceptedWindowValue = document.getElementById('lastAcceptedWindowValue');
 const lastDropReasonValue = document.getElementById('lastDropReasonValue');
@@ -232,6 +233,13 @@ function renderCaptionReadiness(status) {
   }
   if (captionStateValue) {
     captionStateValue.textContent = String(status?.captionState || readiness?.captionState || 'Listening');
+  }
+  if (primaryCaptionSourceValue) {
+    primaryCaptionSourceValue.textContent = String(
+      readiness?.primaryCaptionSource
+      || status?.primaryCaptionSource
+      || 'Waiting for audio'
+    );
   }
   if (currentChunkIdValue) {
     currentChunkIdValue.textContent = String(status?.currentChunkId || readiness?.currentChunkId || 'none');

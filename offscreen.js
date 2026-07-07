@@ -55,6 +55,9 @@ async function safeRuntimeSendMessage(message) {
 let audioCtx = null;
 let audioProcessor = null;
 let audioInputStream = null;
+let audioSourceNode = null;
+let monitorGainNode = null;
+let workletKeepAliveGainNode = null;
 let audioSampleBufs = [];
 let audioChunkWarm = false;
 let audioChunkStartSec = 0;
@@ -128,12 +131,36 @@ function takeTailSampleBuffers(sampleBufs, tailSamples) {
   return out;
 }
 
+function measureAudioBuffers(sampleBufs) {
+  let sampleCount = 0;
+  let sumSquares = 0;
+  let peak = 0;
+
+  for (const buffer of sampleBufs || []) {
+    if (!buffer || !buffer.length) continue;
+    for (let index = 0; index < buffer.length; index += 1) {
+      const value = Number(buffer[index]) || 0;
+      const absolute = Math.abs(value);
+      sampleCount += 1;
+      sumSquares += value * value;
+      if (absolute > peak) peak = absolute;
+    }
+  }
+
+  return {
+    sampleCount,
+    rms: sampleCount ? Math.sqrt(sumSquares / sampleCount) : 0,
+    peak,
+  };
+}
+
 async function flushAudioChunk(options = {}) {
   if (!running || !audioCtx || !audioSampleBufs.length) return;
   const force = options.force === true;
   const bufs = audioSampleBufs.slice();
   const sampleRate = audioCtx.sampleRate;
   const sampleCount = bufs.reduce((n, b) => n + b.length, 0);
+  const audioMetrics = measureAudioBuffers(bufs);
   const durationSec = sampleRate > 0 ? sampleCount / sampleRate : 0;
   if (!force && durationSec < AUDIO_CAPTION_MIN_SEND_SEC) {
     return;
@@ -174,6 +201,10 @@ async function flushAudioChunk(options = {}) {
     chunkId,
     start_seconds: startSec,
     end_seconds: endSec,
+    sample_rate: sampleRate,
+    sample_count: audioMetrics.sampleCount,
+    rms: Number(audioMetrics.rms.toFixed(6)),
+    peak: Number(audioMetrics.peak.toFixed(6)),
   });
   console.log(AUDIO_DIAG_LOG, 'offscreen chunk emitted', {
     videoId: activeVideoId,
@@ -220,6 +251,10 @@ async function flushAudioChunk(options = {}) {
     audio_window_end_ms: audioWindowEndMs,
     chunk_window_sec: AUDIO_CAPTION_CHUNK_SEC,
     chunk_overlap_sec: AUDIO_CAPTION_OVERLAP_SEC,
+    vad_state: vadSpeechActive ? 'speech_active' : 'speech_end',
+    audio_rms: Number(audioMetrics.rms.toFixed(6)),
+    audio_peak: Number(audioMetrics.peak.toFixed(6)),
+    sample_count: audioMetrics.sampleCount,
   }).catch(() => {});
 }
 
@@ -274,9 +309,21 @@ async function stopCapture(reason = 'stopped') {
     }
   }
   running = false;
+  if (audioSourceNode) {
+    try { audioSourceNode.disconnect(); } catch (_) {}
+    audioSourceNode = null;
+  }
   if (audioProcessor) {
     try { audioProcessor.disconnect(); } catch (_) {}
     audioProcessor = null;
+  }
+  if (monitorGainNode) {
+    try { monitorGainNode.disconnect(); } catch (_) {}
+    monitorGainNode = null;
+  }
+  if (workletKeepAliveGainNode) {
+    try { workletKeepAliveGainNode.disconnect(); } catch (_) {}
+    workletKeepAliveGainNode = null;
   }
   if (audioCtx) {
     try { await audioCtx.close(); } catch (_) {}
@@ -338,6 +385,10 @@ async function startCapture(streamId, videoId, tabId) {
   if (audioCtx.state === 'suspended') {
     await audioCtx.resume();
   }
+  console.log(LOG_PREFIX, 'audio context ready', {
+    requested_sample_rate: AUDIO_SAMPLE_RATE,
+    actual_sample_rate: audioCtx.sampleRate,
+  });
 
   const workletUrl = chrome.runtime.getURL('audio_chunk_processor.js');
   await audioCtx.audioWorklet.addModule(workletUrl);
@@ -345,7 +396,17 @@ async function startCapture(streamId, videoId, tabId) {
   safeRuntimeSendMessage({ type: 'isweep_audio_diag', stage: 'offscreen_worklet_loaded' }).catch(() => {});
 
   const source = audioCtx.createMediaStreamSource(stream);
-  const workletNode = new AudioWorkletNode(audioCtx, 'audio-chunk-processor');
+  const workletNode = new AudioWorkletNode(audioCtx, 'audio-chunk-processor', {
+    numberOfInputs: 1,
+    numberOfOutputs: 1,
+    outputChannelCount: [1],
+  });
+
+  // The worklet only reports PCM frames. Its own output is routed through a
+  // zero-gain branch so Chrome keeps that branch of the graph active without
+  // adding any sound to the user's tab audio.
+  const workletKeepAliveGain = audioCtx.createGain();
+  workletKeepAliveGain.gain.value = 0;
 
   // Create a monitor gain node to preserve tab audio playback.
   // Chrome tabCapture may otherwise silence normal tab playback unless the captured stream
@@ -370,14 +431,20 @@ async function startCapture(streamId, videoId, tabId) {
   };
 
   // Route captured tab audio to both caption processing and speakers.
-  // Caption path: source → worklet → (no output; worklet only extracts samples).
-  // Playback path: source → monitorGain → destination (preserves normal audio).
+  // Caption path: source → worklet → zero-gain → destination.
+  // The zero-gain node keeps the worklet graph alive but cannot change what the
+  // user hears. Playback path: source → monitorGain → destination.
   source.connect(workletNode);
+  workletNode.connect(workletKeepAliveGain);
+  workletKeepAliveGain.connect(audioCtx.destination);
   source.connect(monitorGain);
   monitorGain.connect(audioCtx.destination);
-  console.log(LOG_PREFIX, 'tab audio routed to speakers');
+  console.log(LOG_PREFIX, 'tab audio routed to speakers and active worklet');
 
+  audioSourceNode = source;
   audioProcessor = workletNode;
+  monitorGainNode = monitorGain;
+  workletKeepAliveGainNode = workletKeepAliveGain;
   running = true;
   audioChunkStartSec = 0;
   captureStartedAtMs = Date.now();

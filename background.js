@@ -69,6 +69,7 @@ const AUDIO_DIAG_LOG = '[ISWEEP][AUDIO_DIAG]';
 const CAPTION_STATE_LOG = '[ISWEEP][CAPTION_STATE]';
 
 const captionTimelineByTabId = new Map();
+const vadStateByTabId = new Map();
 const referenceProviderRegistry = [];
 const referenceLookupCacheByVideoId = new Map();
 const REFERENCE_CACHE_TTL_MS = 10 * 60 * 1000;

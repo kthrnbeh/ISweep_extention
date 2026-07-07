@@ -1177,11 +1177,13 @@ async function relayAudioCaptionResultToTab(result) {
     audio_window_start_ms: Number.isFinite(Number(result?.audio_window_start_ms)) ? Number(result.audio_window_start_ms) : null,
     audio_window_end_ms: Number.isFinite(Number(result?.audio_window_end_ms)) ? Number(result.audio_window_end_ms) : null,
     text: result?.text || result?.clean_text || result?.cleaned_text || '',
-    source: result?.source === 'audio_stt_disabled'
-      ? 'audio_stt_disabled'
-      : (result?.source === 'silence'
-        ? 'silence'
-        : (result?.cached === true ? 'audio_stt_cached' : 'audio_stt_live')),
+source: result?.source === 'audio_stt_disabled'
+  ? 'audio_stt_disabled'
+  : (result?.source === 'silence'
+    ? 'silence'
+    : (result?.source === 'waiting_audio_context'
+      ? 'waiting_audio_context'
+      : (result?.cached === true ? 'audio_stt_cached' : 'audio_stt_live'))),
     confidence: Number.isFinite(Number(result?.confidence)) ? Number(result.confidence) : 0,
     status: result?.status || 'error',
     failure_reason: result?.failure_reason || null,

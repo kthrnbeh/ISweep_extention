@@ -219,9 +219,16 @@ async function importLocalReference(payload = {}) {
 function resetCaptionTimelineForTab(tabId, reason = 'reset') {
   const key = Number(tabId);
   if (!Number.isFinite(key)) return;
+
   captionTimelineByTabId.delete(key);
   recentRelayByTabId.delete(key);
-  console.log(CAPTION_STATE_LOG, 'timeline reset', { tabId: key, reason });
+  vadStateByTabId.delete(key);
+
+  console.log(CAPTION_STATE_LOG, 'timeline reset', {
+    tabId: key,
+    reason,
+  });
+
   if (chrome.tabs?.sendMessage) {
     chrome.tabs.sendMessage(key, {
       type: 'isweep_caption_state_reset',
@@ -1042,23 +1049,22 @@ function clearCaptionTranscribeQueue(tabId) {
 function shouldSuppressDuplicateRelay(tabId, relayMsg, windowMs = AUDIO_RELAY_DEDUPE_WINDOW_MS) {
   const key = Number(tabId);
   if (!Number.isFinite(key)) return false;
+
   const now = Date.now();
-  const textCandidate = String(
-    relayMsg?.stable_text
-    || relayMsg?.clean_text
-    || relayMsg?.cleaned_text
-    || relayMsg?.text
-    || ''
-  ).trim();
-  const normalizedText = normalizeCaptionTextForDedupe(textCandidate);
-  const source = String(relayMsg?.source || 'unknown').trim().toLowerCase();
-  const status = String(relayMsg?.status || 'unknown').trim().toLowerCase();
-  const isPartial = relayMsg?.is_partial === true;
-  const windowIdentity = Number.isFinite(Number(relayMsg?.audio_window_end_ms))
-    ? `w:${Number(relayMsg.audio_window_end_ms)}`
-    : `c:${String(relayMsg?.chunk_id || '').trim() || 'unknown_chunk'}`;
-  const signature = `${source}|${status}|${isPartial ? 'partial' : 'final'}|${windowIdentity}|${normalizedText}`;
+  const resultId = buildCaptionResultId(relayMsg);
   const previous = recentRelayByTabId.get(key);
+
+  recentRelayByTabId.set(key, {
+    seenAt: now,
+    resultId,
+  });
+
+  return Boolean(
+    previous
+    && previous.resultId === resultId
+    && (now - previous.seenAt) <= windowMs
+  );
+}
 
   if (!normalizedText) {
     // Guard against empty/silence payloads clearing a recently-rendered valid caption.
@@ -1160,6 +1166,17 @@ async function relayAudioCaptionResultToTab(result) {
     audioCaptionDebug.updatedAt = Date.now();
     console.warn(AUDIO_DIAG_LOG, 'relay failed', { reason: 'no_tab_id' });
     return false;
+  }
+    // The backend recognized that this window contains no new transcript text.
+  // Keep the existing overlay visible, but do not render the same sentence again.
+  if (result?.no_change === true) {
+    console.log(CAPTION_STATE_LOG, 'no transcript change; relay skipped', {
+      tab_id: tabId,
+      session_id: result?.session_id || null,
+      chunk_id: result?.chunk_id || null,
+      audio_window_end_ms: result?.audio_window_end_ms ?? null,
+    });
+    return true;
   }
 
   const relayMsg = {
@@ -1753,6 +1770,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       sendResponse({ status: 'error', events: [], failure_reason: 'missing_tab_id' });
       return;
     }
+    const vadState = String(vadStateByTabId.get(tabId) || '').trim().toLowerCase() || null;
+
+  // Speech-end should be sent once to the backend so it can clear the rolling buffer.
+    if (vadState === 'speech_end') {
+    vadStateByTabId.delete(tabId);
+    }
 
     const timeline = getCaptionTimelineState(tabId);
     if (timeline) {
@@ -1796,6 +1819,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         audioWindowEndMs,
         backendReceivedAt,
         chunkWindowSec: audioCaptionDebug.chunkWindowSec,
+        vadState,
       },
     });
     sendResponse({ ok: true, queued: true });
@@ -1847,20 +1871,34 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
     sendResponse({ ok: true });
     return;
-  } else if (message.type === 'isweep_audio_vad_state') {
-    const tabId = Number.isFinite(Number(message.tab_id))
-      ? Number(message.tab_id)
-      : Number(activeTabAudioCapture?.tabId);
-    if (Number.isFinite(tabId)) {
-      chrome.tabs.sendMessage(tabId, {
-        type: 'isweep_audio_vad_state',
-        tab_id: tabId,
-        video_id: String(message.video_id || activeTabAudioCapture?.videoId || '').trim() || null,
-        session_id: String(message.session_id || '').trim() || null,
-        speech_active: message.speech_active === true,
-        reason: String(message.reason || 'offscreen_vad'),
-        observed_at: Number.isFinite(Number(message.observed_at)) ? Number(message.observed_at) : Date.now(),
-      }).catch(() => {});
+  }} else if (message.type === 'isweep_audio_vad_state') {
+  const tabId = Number.isFinite(Number(message.tab_id))
+    ? Number(message.tab_id)
+    : Number(activeTabAudioCapture?.tabId);
+
+  if (Number.isFinite(tabId)) {
+    const vadState = message.speech_active === true
+      ? 'speech_active'
+      : 'speech_end';
+
+    vadStateByTabId.set(tabId, vadState);
+
+    chrome.tabs.sendMessage(tabId, {
+      type: 'isweep_audio_vad_state',
+      tab_id: tabId,
+      video_id: String(message.video_id || activeTabAudioCapture?.videoId || '').trim() || null,
+      session_id: String(message.session_id || '').trim() || null,
+      speech_active: message.speech_active === true,
+      vad_state: vadState,
+      reason: String(message.reason || 'offscreen_vad'),
+      observed_at: Number.isFinite(Number(message.observed_at))
+        ? Number(message.observed_at)
+        : Date.now(),
+    }).catch(() => {});
+  }
+
+  sendResponse({ ok: true });
+  return;
     }
     sendResponse({ ok: true });
     return;
@@ -2244,6 +2282,7 @@ async function handleAudioCaptionChunk(videoId, audioChunk, mimeType, startSecon
   const sessionId = String(chunkMeta?.sessionId || '').trim() || null;
   const sequenceNumber = Number.isFinite(Number(chunkMeta?.sequenceNumber)) ? Number(chunkMeta.sequenceNumber) : null;
   const chunkId = String(chunkMeta?.chunkId || '').trim() || null;
+  const vadState = String(chunkMeta?.vadState || '').trim().toLowerCase() || null;
   const audioWindowStartMs = Number.isFinite(Number(chunkMeta?.audioWindowStartMs))
     ? Number(chunkMeta.audioWindowStartMs)
     : Math.max(Math.round(normalizedStart * 1000), 0);

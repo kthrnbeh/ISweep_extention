@@ -5,6 +5,9 @@
 (function () {
   'use strict';
 
+  const ISWEEP_CAPTION_REPAIR_VERSION = 'v4-self-agreed-stt';
+  console.log('[ISWEEP][CAPTION_REPAIR]', ISWEEP_CAPTION_REPAIR_VERSION, 'loaded');
+
   const LOG_PREFIX = '[ISWEEP][YT]';
   const MARKER_LOG_PREFIX = '[ISWEEP][MARKERS]';
   const STORAGE_KEYS = {

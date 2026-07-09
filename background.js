@@ -60,7 +60,8 @@ const tabCaptureSessionByTabId = new Map();
 const captionTranscribeQueueByTabId = new Map();
 let activeTabAudioCapture = null;
 let didLogBackendUrl = false;
-const CAPTION_TRANSCRIBE_INTERVAL_MS = 750;
+const CAPTION_TRANSCRIBE_INTERVAL_MS = 2000;
+const MIN_AUDIO_CAPTION_TRANSCRIBE_WINDOW_MS = 2000;
 const AUDIO_RELAY_DEDUPE_WINDOW_MS = 1200;
 const CAPTION_RESULT_ID_CACHE_LIMIT = 160;
 const CAPTION_RESULT_ID_CACHE_TTL_MS = 2 * 60 * 1000;
@@ -1749,6 +1750,30 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       sendResponse({ status: 'error', events: [], failure_reason: 'missing_tab_id' });
       return;
     }
+
+    const audioWindowDurationMs = (
+      Number.isFinite(Number(audioWindowStartMs))
+      && Number.isFinite(Number(audioWindowEndMs))
+    )
+      ? Math.max(Number(audioWindowEndMs) - Number(audioWindowStartMs), 0)
+      : null;
+
+    if (
+      Number.isFinite(Number(audioWindowDurationMs))
+      && Number(audioWindowDurationMs) > 0
+      && Number(audioWindowDurationMs) < MIN_AUDIO_CAPTION_TRANSCRIBE_WINDOW_MS
+    ) {
+      console.log(CAPTION_STATE_LOG, 'short audio window skipped before STT', {
+        tab_id: tabId,
+        video_id: bgChunkVideoId || null,
+        chunk_id: chunkId,
+        audio_window_duration_ms: audioWindowDurationMs,
+        min_audio_window_ms: MIN_AUDIO_CAPTION_TRANSCRIBE_WINDOW_MS,
+      });
+      sendResponse({ ok: true, queued: false, skipped: 'short_audio_window' });
+      return true;
+    }
+
     const vadState = String(vadStateByTabId.get(tabId) || '').trim().toLowerCase() || null;
 
     // VAD state is kept for runtime diagnostics. Do not delete it here and do

@@ -10,11 +10,13 @@ const LOG_PREFIX = '[ISWEEP][AUDIO_CAPTIONS][OFFSCREEN]';
 const AUDIO_DIAG_LOG = '[ISWEEP][AUDIO_DIAG]';
 const CAPTION_LATENCY_LOG = '[ISWEEP][CAPTION_LATENCY]';
 const AUDIO_SAMPLE_RATE = 16000;
-const AUDIO_CAPTION_CHUNK_SEC = 0.35;
-const AUDIO_CAPTION_OVERLAP_SEC = 0.05;
-const AUDIO_CAPTION_MIN_SEND_SEC = 0.30;
+// Recovery setting: do not send tiny 0.3s chunks to STT.
+// Whisper-style transcription needs a few seconds of context or it guesses/hallucinates.
+const AUDIO_CAPTION_CHUNK_SEC = 3.0;
+const AUDIO_CAPTION_OVERLAP_SEC = 1.0;
+const AUDIO_CAPTION_MIN_SEND_SEC = 2.25;
 const VAD_RMS_THRESHOLD = 0.012;
-const VAD_SPEECH_END_HOLD_MS = 380;
+const VAD_SPEECH_END_HOLD_MS = 1200;
 
 let offscreenChunkEmitCount = 0;
 let audioChunkStartedAtMs = 0;

@@ -317,8 +317,11 @@
   // scheduler lead short and specific to profanity muting.
   const PROFANITY_MARKER_FIRE_EARLY_SEC = AUDIO_PREROLL_MS / 1000;
   const AUDIO_MARKER_FALLBACK_SKIP_WINDOW_SEC = 0.75;
-  const ISWEEP_AUDIO_STT_PRIMARY = true;
-  const ISWEEP_YOUTUBE_DOM_FALLBACK_ENABLED = false;
+  const ISWEEP_AUDIO_STT_PRIMARY = false;
+  // Recovery rule: visible/timed page captions are allowed to drive the overlay.
+  // Raw live STT is only displayed after it agrees with page evidence or a local reference.
+  const ISWEEP_YOUTUBE_DOM_FALLBACK_ENABLED = true;
+  const AUDIO_STT_DISPLAY_REQUIRES_ALIGNMENT = true;
   const ISWEEP_CONTENT_SCRIPT_AUDIO_AHEAD_ENABLED = false;
   const AUDIO_STT_MIN_VISIBLE_MS = 1200;
   const AUDIO_STT_HOLD_MS = 2500;
@@ -677,6 +680,7 @@
             : displayText,
           cleaned_text: typeof entry.cleaned_text === 'string' ? entry.cleaned_text : null,
           caption_text: typeof entry.caption_text === 'string' ? entry.caption_text : null,
+          source: typeof entry.source === 'string' ? entry.source : null,
           clean_resume_time: Number.isFinite(Number(entry.clean_resume_time))
             ? Number(entry.clean_resume_time)
             : null,
@@ -740,6 +744,7 @@
         clean_text: typeof payload.clean_text === 'string' ? payload.clean_text : null,
         cleaned_text: typeof payload.cleaned_text === 'string' ? payload.cleaned_text : null,
         caption_text: typeof payload.caption_text === 'string' ? payload.caption_text : null,
+        source: typeof payload.source === 'string' ? payload.source : null,
         words: normalizedWords,
       },
     ]);
@@ -764,8 +769,23 @@
     }) || null;
   }
 
+  function isApprovedAudioCaptionSource(source) {
+    const value = String(source || '').trim().toLowerCase();
+    if (!value) return false;
+    if (value === 'audio_stt_plus_page_evidence') return true;
+    if (value === 'audio_stt_plus_reference') return true;
+    if (value === 'text_track') return true;
+    if (value === 'page_caption_dom') return true;
+    if (!AUDIO_STT_DISPLAY_REQUIRES_ALIGNMENT && value.startsWith('audio_stt') && !value.includes('draft')) {
+      return true;
+    }
+    return false;
+  }
+
   function getBestCleanCaptionText(liveText, nowSec, options = {}) {
-    // Priority order: pre-analyzed transcript -> marker text -> audio STT -> live caption fallback.
+    // Priority order after recovery:
+    // 1) pre-analyzed/reference captions, 2) visible page captions, 3) approved STT only.
+    // Raw STT that disagrees with the page is not shown because it causes hallucinated captions.
     const preCachedAudioCaptions = Array.isArray(options.preCachedAudioCaptions)
       ? options.preCachedAudioCaptions
       : preCachedAudioCleanCaptions;
@@ -815,44 +835,6 @@
       };
     }
 
-    const preCachedAudioEntry = findTimedCleanCaptionEntry(preCachedAudioCaptions, nowSec, lookaheadSec);
-    if (preCachedAudioEntry) {
-      const entrySource = String(preCachedAudioEntry.source || '').trim();
-      return {
-        text: getCleanCaptionDisplayText(preCachedAudioEntry),
-        source: entrySource || 'audio_stt_cached',
-        stale: false,
-        cleanResumeTime: Number.isFinite(Number(preCachedAudioEntry.clean_resume_time))
-          ? Number(preCachedAudioEntry.clean_resume_time)
-          : null,
-      };
-    }
-
-    const liveAudioEntry = findTimedCleanCaptionEntry(liveAudioCaptions, nowSec, lookaheadSec);
-    if (liveAudioEntry) {
-      const entrySource = String(liveAudioEntry.source || '').trim();
-      return {
-        text: getCleanCaptionDisplayText(liveAudioEntry),
-        source: entrySource || 'audio_stt_live',
-        stale: false,
-        cleanResumeTime: Number.isFinite(Number(liveAudioEntry.clean_resume_time))
-          ? Number(liveAudioEntry.clean_resume_time)
-          : null,
-      };
-    }
-
-    const normalizedAudioSource = String(audioCaptionSource || '').toLowerCase();
-    const freshAudioText = String(audioCaptionText || '').trim();
-    const audioAgeMs = audioCaptionObservedAtMs > 0 ? nowMs - audioCaptionObservedAtMs : Number.POSITIVE_INFINITY;
-    if (freshAudioText && normalizedAudioSource.startsWith('audio_stt') && audioAgeMs <= audioHoldMs) {
-      return {
-        text: freshAudioText,
-        source: normalizedAudioSource || (normalizedAudioSource.includes('cached') ? 'audio_stt_cached' : 'audio_stt_live'),
-        stale: false,
-        cleanResumeTime: null,
-      };
-    }
-
     const maskedLiveText = toCleanCaptionText(String(liveText || ''));
     if (ISWEEP_YOUTUBE_DOM_FALLBACK_ENABLED && maskedLiveText) {
       const isStale = liveCaptionObservedAtMs > 0 && (nowMs - liveCaptionObservedAtMs) > staleMs;
@@ -866,6 +848,53 @@
       return {
         text: maskedLiveText,
         source: 'live_masked',
+        stale: false,
+        cleanResumeTime: null,
+      };
+    }
+
+    const preCachedAudioEntry = findTimedCleanCaptionEntry(preCachedAudioCaptions, nowSec, lookaheadSec);
+    if (preCachedAudioEntry) {
+      const entrySource = String(preCachedAudioEntry.source || '').trim() || 'audio_stt_cached';
+      if (isApprovedAudioCaptionSource(entrySource)) {
+        return {
+          text: getCleanCaptionDisplayText(preCachedAudioEntry),
+          source: entrySource,
+          stale: false,
+          cleanResumeTime: Number.isFinite(Number(preCachedAudioEntry.clean_resume_time))
+            ? Number(preCachedAudioEntry.clean_resume_time)
+            : null,
+        };
+      }
+    }
+
+    const liveAudioEntry = findTimedCleanCaptionEntry(liveAudioCaptions, nowSec, lookaheadSec);
+    if (liveAudioEntry) {
+      const entrySource = String(liveAudioEntry.source || '').trim() || 'audio_stt_live';
+      if (isApprovedAudioCaptionSource(entrySource)) {
+        return {
+          text: getCleanCaptionDisplayText(liveAudioEntry),
+          source: entrySource,
+          stale: false,
+          cleanResumeTime: Number.isFinite(Number(liveAudioEntry.clean_resume_time))
+            ? Number(liveAudioEntry.clean_resume_time)
+            : null,
+        };
+      }
+    }
+
+    const normalizedAudioSource = String(audioCaptionSource || '').toLowerCase();
+    const freshAudioText = String(audioCaptionText || '').trim();
+    const audioAgeMs = audioCaptionObservedAtMs > 0 ? nowMs - audioCaptionObservedAtMs : Number.POSITIVE_INFINITY;
+    if (
+      freshAudioText
+      && normalizedAudioSource.startsWith('audio_stt')
+      && isApprovedAudioCaptionSource(normalizedAudioSource)
+      && audioAgeMs <= audioHoldMs
+    ) {
+      return {
+        text: freshAudioText,
+        source: normalizedAudioSource || (normalizedAudioSource.includes('cached') ? 'audio_stt_cached' : 'audio_stt_live'),
         stale: false,
         cleanResumeTime: null,
       };
@@ -2085,11 +2114,12 @@
         const startSec = Number.isFinite(Number(message.start_seconds)) ? Number(message.start_seconds) : (findVideo()?.currentTime || 0);
         const endSec = Number.isFinite(Number(message.end_seconds)) ? Number(message.end_seconds) : startSec + 2;
 
+        let audioDisplayApproved = false;
+        let alignedCaptionText = '';
+        let alignedCaptionSource = 'audio_stt_draft_unaligned';
+
         if (dedupedText) {
           clearSpeechEndTimer();
-          lastAudioCaptionSource = 'audio_stt';
-          lastAudioCaptionText = dedupedText;
-          lastAudioCaptionReceivedAtMs = Date.now();
           markCaptionStateLiveStt();
           if (incomingWindowEndMs >= 0) {
             captionTimelineState.lastAcceptedAudioWindowEndMs = Math.max(
@@ -2098,7 +2128,6 @@
             );
           }
           captionTimelineState.lastAcceptedTextNormByWindow.set(incomingWindowKey, normalizedIncomingText);
-          captionTimelineState.lastDroppedReason = null;
 
           const video = findVideo();
           const assist = buildEvidenceItem(
@@ -2119,12 +2148,22 @@
             nowVideoSec: Number(video?.currentTime || endSec),
           });
           lastReferenceAlignment = alignment.diagnostics;
-          if (alignment.usedEvidence && alignment.text) {
-            lastAudioCaptionText = alignment.text;
-            lastAudioCaptionSource = alignment.sourceLabel;
+          audioDisplayApproved = Boolean(alignment.usedEvidence && alignment.text && isApprovedAudioCaptionSource(alignment.sourceLabel));
+          if (audioDisplayApproved) {
+            alignedCaptionText = alignment.text;
+            alignedCaptionSource = alignment.sourceLabel;
+            lastAudioCaptionText = alignedCaptionText;
+            lastAudioCaptionSource = alignedCaptionSource;
+            lastAudioCaptionReceivedAtMs = Date.now();
+            captionTimelineState.lastDroppedReason = null;
+          } else {
+            lastAudioCaptionText = '';
+            lastAudioCaptionSource = 'audio_stt_draft_unaligned';
+            lastAudioCaptionReceivedAtMs = 0;
+            captionTimelineState.lastDroppedReason = `stt_alignment_rejected:${alignment.diagnostics.reason || 'unknown'}`;
           }
           lastSttPageAgreement = alignment.diagnostics.status === 'aligned' ? 'agree' : 'differ';
-          console.log(CAPTION_STATE_LOG, 'accepted result', {
+          console.log(CAPTION_STATE_LOG, 'audio_stt evaluated', {
             session_id: captionTimelineState.sessionId,
             chunk_id: captionTimelineState.currentChunkId,
             audio_window_end_ms: incomingWindowEndMs,
@@ -2132,7 +2171,8 @@
             agreement: lastSttPageAgreement,
             alignment_status: alignment.diagnostics.status,
             alignment_score: alignment.diagnostics.score,
-            caption_source: lastAudioCaptionSource,
+            display_approved: audioDisplayApproved,
+            caption_source: audioDisplayApproved ? alignedCaptionSource : 'suppressed_audio_stt',
           });
         }
         console.log(CLEAN_CC_LOG_PREFIX, 'audio_stt message received', {
@@ -2154,14 +2194,29 @@
           sendResponse({ ok: true });
           return true;
         }
+
+        if (!audioDisplayApproved) {
+          if (!message.cached) {
+            liveAudioCleanCaptions = [];
+          }
+          console.log(CLEAN_CC_LOG_PREFIX, 'audio_stt suppressed; showing page captions or listening', {
+            reason: lastReferenceAlignment?.reason || 'alignment_not_approved',
+            source: nextSource,
+            textPreview: dedupedText.slice(0, 80),
+          });
+          updateCleanOverlay(lastCaptionText, findVideo()?.currentTime || 0);
+          sendResponse({ ok: true, dropped: 'stt_unaligned' });
+          return true;
+        }
+
         const normalizedAudioCaptions = buildAudioResponseCaptions({
           status: message.status || 'ready',
-          source: lastAudioCaptionSource || message.source || 'audio_stt',
+          source: alignedCaptionSource || lastAudioCaptionSource || message.source || 'audio_stt',
           cleaned_captions: message.cleaned_captions,
           clean_captions: message.clean_captions,
-          text: message.text,
-          clean_text: lastAudioCaptionText || dedupedText,
-          cleaned_text: lastAudioCaptionText || dedupedText,
+          text: alignedCaptionText || message.text,
+          clean_text: alignedCaptionText || lastAudioCaptionText || dedupedText,
+          cleaned_text: alignedCaptionText || lastAudioCaptionText || dedupedText,
           words: Array.isArray(message.words)
             ? message.words
             : (Array.isArray(message.word_timestamps) ? message.word_timestamps : []),
@@ -3659,8 +3714,13 @@
     const prevDuration = captionStartTime !== null && now !== null ? Math.max(0, now - captionStartTime) : null; // Duration of previous caption
 
     if (cleanCaptionSettings.cleanCaptionsEnabled) {
-      // [CC] mode uses audio STT captions only. Native caption text is evidence-only.
+      // Recovery mode: visible YouTube/page captions are trusted first.
+      // They drive the overlay while STT is only used as evidence unless it aligns.
+      lastCaptionText = text;
+      captionStartTime = now;
+      lastLiveCaptionObservedAtMs = Date.now();
       emitPageTextEvidence('page_caption_dom', text, now, null, null, 'current_visible');
+      updateCleanOverlay(text, now || 0);
       return;
     }
 
@@ -4095,10 +4155,12 @@
 
   function getSourceHierarchy() {
     return [
-      { source: 'audio_stt', class: 'timed', role: 'primary' },
-      { source: 'local_reference', class: 'timed_text_optional', role: 'assist_if_strictly_aligned' },
-      { source: 'text_track', class: 'timed', role: 'assist_if_aligned' },
-      { source: 'page_caption_dom', class: 'current_visible', role: 'assist_if_similar' },
+      { source: 'pre_analyzed', class: 'timed_text', role: 'primary_when_available' },
+      { source: 'text_track', class: 'timed', role: 'primary_when_available' },
+      { source: 'page_caption_dom', class: 'current_visible', role: 'primary_visible_caption' },
+      { source: 'audio_stt_plus_page_evidence', class: 'timed', role: 'approved_stt_after_alignment' },
+      { source: 'audio_stt_plus_reference', class: 'timed', role: 'approved_stt_after_alignment' },
+      { source: 'audio_stt', class: 'timed', role: 'draft_hidden_until_aligned' },
       { source: 'visible_transcript', class: 'context_only', role: 'context_only' },
       { source: 'external_reference_candidate', class: 'context_only', role: 'future_provider_only' },
     ];
@@ -4342,6 +4404,7 @@
         AUDIO_CHUNK_SEC,
         AUDIO_CHUNK_OVERLAP_SEC,
         AUDIO_STT_HOLD_MS,
+        AUDIO_STT_DISPLAY_REQUIRES_ALIGNMENT,
         AUDIO_PREROLL_MS,
         WORD_MUTE_PRE_PAD_SEC,
         WORD_MUTE_POST_PAD_SEC,
@@ -4387,7 +4450,16 @@
       const video = findVideo();
       const now = video && typeof video.currentTime === 'number' ? video.currentTime : 0;
       if (caption) {
+        lastCaptionText = caption;
+        captionStartTime = now;
+        lastLiveCaptionObservedAtMs = Date.now();
         emitPageTextEvidence('page_caption_dom', caption, now, null, null, 'current_visible');
+        updateCleanOverlay(caption, now);
+      } else {
+        lastCaptionText = '';
+        captionStartTime = null;
+        lastLiveCaptionObservedAtMs = 0;
+        updateCleanOverlay('', now);
       }
       return;
     }

@@ -417,9 +417,82 @@
   let lastAudioRelaySignature = '';
   let lastAudioRelayAtMs = 0;
   const AUDIO_RELAY_DEDUPE_WINDOW_MS = 1200;
+  const STT_SELF_AGREEMENT_WINDOW_MS = 9000;
+  const STT_SELF_AGREEMENT_MIN_SCORE = 0.46;
+  const STT_SELF_AGREEMENT_MIN_CHARS = 18;
+  const recentSttDrafts = [];
 
   function normalizeCaptionStateText(text) {
     return String(text || '').toLowerCase().replace(/\s+/g, ' ').trim();
+  }
+
+  function sttAgreementTokens(text) {
+    return normalizeCaptionStateText(text)
+      .replace(/[^a-z0-9' ]/g, ' ')
+      .split(/\s+/)
+      .map((token) => token.trim())
+      .filter((token) => token.length >= 3);
+  }
+
+  function scoreSttTextAgreement(a, b) {
+    const aTokens = Array.from(new Set(sttAgreementTokens(a)));
+    const bTokens = Array.from(new Set(sttAgreementTokens(b)));
+    if (!aTokens.length || !bTokens.length) return 0;
+    const bSet = new Set(bTokens);
+    const shared = aTokens.filter((token) => bSet.has(token)).length;
+    return shared / Math.max(Math.min(aTokens.length, bTokens.length), 1);
+  }
+
+  function trimRecentSttDrafts(nowMs = Date.now()) {
+    while (recentSttDrafts.length && (nowMs - Number(recentSttDrafts[0].observedAtMs || 0)) > STT_SELF_AGREEMENT_WINDOW_MS) {
+      recentSttDrafts.shift();
+    }
+    while (recentSttDrafts.length > 8) {
+      recentSttDrafts.shift();
+    }
+  }
+
+  function evaluateSelfAgreedStt(text, windowEndMs) {
+    const clean = String(text || '').replace(/\s+/g, ' ').trim();
+    const nowMs = Date.now();
+    trimRecentSttDrafts(nowMs);
+
+    if (clean.length < STT_SELF_AGREEMENT_MIN_CHARS) {
+      recentSttDrafts.push({ text: clean, windowEndMs, observedAtMs: nowMs });
+      trimRecentSttDrafts(nowMs);
+      return { approved: false, score: 0, reason: 'too_short' };
+    }
+
+    let bestScore = 0;
+    let bestText = '';
+    for (const prior of recentSttDrafts) {
+      const score = scoreSttTextAgreement(clean, prior.text);
+      if (score > bestScore) {
+        bestScore = score;
+        bestText = prior.text;
+      }
+    }
+
+    recentSttDrafts.push({ text: clean, windowEndMs, observedAtMs: nowMs });
+    trimRecentSttDrafts(nowMs);
+
+    if (bestScore >= STT_SELF_AGREEMENT_MIN_SCORE) {
+      return {
+        approved: true,
+        score: bestScore,
+        text: clean,
+        sourceLabel: 'audio_stt_self_agreed',
+        reason: 'repeated_stt_overlap',
+        previousPreview: bestText.slice(0, 80),
+      };
+    }
+
+    return {
+      approved: false,
+      score: bestScore,
+      reason: 'not_repeated_enough',
+      previousPreview: bestText.slice(0, 80),
+    };
   }
 
   function buildCaptionResultId(message = {}) {
@@ -495,6 +568,7 @@
     lastAudioCaptionReceivedAtMs = 0;
     lastAudioRelaySignature = '';
     lastAudioRelayAtMs = 0;
+    recentSttDrafts.length = 0;
     captionTimelineState.referenceLineIndex = null;
     captionTimelineState.referenceLineId = null;
     captionTimelineState.referenceVideoTime = null;
@@ -776,6 +850,7 @@
     if (value === 'audio_stt_plus_reference') return true;
     if (value === 'text_track') return true;
     if (value === 'page_caption_dom') return true;
+    if (value === 'audio_stt_self_agreed') return true;
     if (!AUDIO_STT_DISPLAY_REQUIRES_ALIGNMENT && value.startsWith('audio_stt') && !value.includes('draft')) {
       return true;
     }
@@ -2157,12 +2232,38 @@
             lastAudioCaptionReceivedAtMs = Date.now();
             captionTimelineState.lastDroppedReason = null;
           } else {
-            lastAudioCaptionText = '';
-            lastAudioCaptionSource = 'audio_stt_draft_unaligned';
-            lastAudioCaptionReceivedAtMs = 0;
-            captionTimelineState.lastDroppedReason = `stt_alignment_rejected:${alignment.diagnostics.reason || 'unknown'}`;
+            const selfAgreement = evaluateSelfAgreedStt(dedupedText, incomingWindowEndMs);
+            if (selfAgreement.approved && isApprovedAudioCaptionSource(selfAgreement.sourceLabel)) {
+              audioDisplayApproved = true;
+              alignedCaptionText = selfAgreement.text;
+              alignedCaptionSource = selfAgreement.sourceLabel;
+              lastAudioCaptionText = alignedCaptionText;
+              lastAudioCaptionSource = alignedCaptionSource;
+              lastAudioCaptionReceivedAtMs = Date.now();
+              captionTimelineState.lastDroppedReason = null;
+              lastReferenceAlignment = {
+                ...(lastReferenceAlignment || {}),
+                status: 'self_agreed',
+                score: selfAgreement.score,
+                source: 'audio_stt_self_agreed',
+                reason: selfAgreement.reason,
+              };
+              console.log(CAPTION_STATE_LOG, 'audio_stt self-agreement approved', {
+                chunk_id: incomingChunkId,
+                score: Number(selfAgreement.score.toFixed(3)),
+                previousPreview: selfAgreement.previousPreview,
+                textPreview: alignedCaptionText.slice(0, 80),
+              });
+            } else {
+              lastAudioCaptionText = '';
+              lastAudioCaptionSource = 'audio_stt_draft_unaligned';
+              lastAudioCaptionReceivedAtMs = 0;
+              captionTimelineState.lastDroppedReason = `stt_alignment_rejected:${alignment.diagnostics.reason || selfAgreement.reason || 'unknown'}`;
+            }
           }
-          lastSttPageAgreement = alignment.diagnostics.status === 'aligned' ? 'agree' : 'differ';
+          lastSttPageAgreement = audioDisplayApproved
+            ? (alignedCaptionSource === 'audio_stt_self_agreed' ? 'self_agreed' : 'agree')
+            : 'differ';
           console.log(CAPTION_STATE_LOG, 'audio_stt evaluated', {
             session_id: captionTimelineState.sessionId,
             chunk_id: captionTimelineState.currentChunkId,

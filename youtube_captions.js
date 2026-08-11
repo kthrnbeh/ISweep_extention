@@ -5,7 +5,7 @@
 (function () {
   'use strict';
 
-  const ISWEEP_CAPTION_REPAIR_VERSION = 'v4-self-agreed-stt';
+  const ISWEEP_CAPTION_REPAIR_VERSION = 'v6-youtube-caption-reference-mode';
   console.log('[ISWEEP][CAPTION_REPAIR]', ISWEEP_CAPTION_REPAIR_VERSION, 'loaded');
 
   const LOG_PREFIX = '[ISWEEP][YT]';
@@ -57,6 +57,8 @@
 
   let cachedPreferences = null;
   let cachedLocalReferences = {};
+  const YOUTUBE_CAPTION_HISTORY_LIMIT = 240;
+  const youtubeCaptionHistoryByVideoId = new Map();
 
   function normalizePreferences(prefs) {
     const raw = prefs && typeof prefs === 'object' ? prefs : {};
@@ -2027,6 +2029,22 @@
         sendResponse(status);
         return true;
       }
+      if (message?.type === 'isweep_get_youtube_caption_history') {
+        const video = findVideo();
+        const now = video && typeof video.currentTime === 'number' ? video.currentTime : null;
+        const visibleCaption = extractCaptionText();
+        if (visibleCaption) rememberYouTubeCaptionLine(visibleCaption, now, 'page_caption_dom');
+        const videoId = getCurrentVideoId() || activeVideoId || '';
+        const lines = getYouTubeCaptionHistoryForVideo(videoId);
+        sendResponse({
+          ok: true,
+          video_id: videoId,
+          line_count: lines.length,
+          lines,
+          text: lines.map((entry) => entry.text).join('\n'),
+        });
+        return true;
+      }
       if (message?.type === 'isweep_caption_capture_start') {
         audioCapturePermissionDenied = false;
         tabAudioCaptureState = 'starting';
@@ -3823,6 +3841,7 @@
       lastCaptionText = text;
       captionStartTime = now;
       lastLiveCaptionObservedAtMs = Date.now();
+      rememberYouTubeCaptionLine(text, now, 'page_caption_dom');
       emitPageTextEvidence('page_caption_dom', text, now, null, null, 'current_visible');
       updateCleanOverlay(text, now || 0);
       return;
@@ -3862,6 +3881,76 @@
     lastCaptionText = text;
     captionStartTime = now;
     console.log('[ISweep Timing] caption observed', { text, startSec: now });
+  }
+
+  function normalizeObservedCaptionLine(text) {
+    return String(text || '')
+      .replace(/[\u200B-\u200D\uFEFF]/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  function rememberYouTubeCaptionLine(text, nowSec = null, source = 'page_caption_dom') {
+    const clean = normalizeObservedCaptionLine(text);
+    if (!clean || clean.length < 2) return;
+    const videoId = getCurrentVideoId() || activeVideoId || 'unknown_video';
+    if (!videoId || videoId === 'unknown_video') return;
+    const observedAtMs = Date.now();
+    const entry = {
+      text: clean,
+      source,
+      observed_at_ms: observedAtMs,
+      video_time_seconds: Number.isFinite(Number(nowSec)) ? Number(nowSec) : null,
+    };
+    const lines = youtubeCaptionHistoryByVideoId.get(videoId) || [];
+    const last = lines.length ? lines[lines.length - 1] : null;
+    const lastText = normalizeObservedCaptionLine(last?.text || '');
+    const lower = clean.toLowerCase();
+    const lastLower = lastText.toLowerCase();
+
+    if (lastText) {
+      if (lower === lastLower) {
+        lines[lines.length - 1] = { ...last, ...entry };
+        youtubeCaptionHistoryByVideoId.set(videoId, lines);
+        return;
+      }
+      // YouTube often reveals captions word-by-word. Replace the previous
+      // partial line with the longer version instead of storing every fragment.
+      if (lower.startsWith(lastLower) && clean.length > lastText.length) {
+        lines[lines.length - 1] = entry;
+        youtubeCaptionHistoryByVideoId.set(videoId, lines);
+        return;
+      }
+      if (lastLower.startsWith(lower)) {
+        return;
+      }
+    }
+
+    lines.push(entry);
+    while (lines.length > YOUTUBE_CAPTION_HISTORY_LIMIT) lines.shift();
+    youtubeCaptionHistoryByVideoId.set(videoId, lines);
+  }
+
+  function getYouTubeCaptionHistoryForVideo(videoId = getCurrentVideoId()) {
+    const stableVideoId = String(videoId || '').trim();
+    if (!stableVideoId) return [];
+    const lines = youtubeCaptionHistoryByVideoId.get(stableVideoId) || [];
+    return lines
+      .map((entry, index) => ({
+        id: `yt_seen_${String(index + 1).padStart(3, '0')}`,
+        text: normalizeObservedCaptionLine(entry?.text || ''),
+        source: entry?.source || 'page_caption_dom',
+        observed_at_ms: Number(entry?.observed_at_ms || 0) || null,
+        video_time_seconds: Number.isFinite(Number(entry?.video_time_seconds)) ? Number(entry.video_time_seconds) : null,
+      }))
+      .filter((entry) => entry.text);
+  }
+
+  function formatYouTubeCaptionHistoryText(videoId = getCurrentVideoId()) {
+    return getYouTubeCaptionHistoryForVideo(videoId)
+      .map((entry) => entry.text)
+      .filter(Boolean)
+      .join('\n');
   }
 
   function extractCaptionText() {
@@ -4056,7 +4145,8 @@
         reason: 'time_misaligned',
       };
     }
-    if (score < 0.72) {
+    const requiredScore = source === 'local_reference' ? 0.62 : 0.72;
+    if (score < requiredScore) {
       return {
         status: 'rejected',
         score,
@@ -4140,7 +4230,7 @@
         : null;
       const minIndex = prevIndex === null ? 0 : Math.max(0, prevIndex - 3);
       const maxIndex = prevIndex === null
-        ? Math.min(localReference.lines.length - 1, 32)
+        ? localReference.lines.length - 1
         : Math.min(localReference.lines.length - 1, prevIndex + 10);
       for (let index = minIndex; index <= maxIndex; index += 1) {
         const line = localReference.lines[index];
@@ -4284,6 +4374,7 @@
         .join(' ')
         .trim();
       if (!cueText) continue;
+      rememberYouTubeCaptionLine(cueText, now, 'text_track');
       return {
         source: 'text_track',
         text: cueText,
@@ -4492,6 +4583,8 @@
       fuseCaptionWithEvidence,
       getSourceHierarchy,
       getSttPageAgreement,
+      getYouTubeCaptionHistoryForVideo,
+      formatYouTubeCaptionHistoryText,
       constants: {
         CLEAN_CAPTION_STALE_MS,
         CLEAN_CAPTION_LOOKAHEAD_SEC,
@@ -4557,6 +4650,7 @@
         lastCaptionText = caption;
         captionStartTime = now;
         lastLiveCaptionObservedAtMs = Date.now();
+        rememberYouTubeCaptionLine(caption, now, 'page_caption_dom');
         emitPageTextEvidence('page_caption_dom', caption, now, null, null, 'current_visible');
         updateCleanOverlay(caption, now);
       } else {

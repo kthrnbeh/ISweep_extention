@@ -1135,4 +1135,2676 @@
     }
 
     return false;
+  }   function getBestCleanCaptionText(liveText, nowSec, options = {}) {
+    // Priority order after recovery:
+    // 1) pre-analyzed/reference captions, 2) visible page captions, 3) approved STT only.
+    // Raw STT that disagrees with the page is not shown because it causes hallucinated captions.
+    const preCachedAudioCaptions = Array.isArray(options.preCachedAudioCaptions)
+      ? options.preCachedAudioCaptions
+      : preCachedAudioCleanCaptions;
+    const liveAudioCaptions = Array.isArray(options.liveAudioCaptions)
+      ? options.liveAudioCaptions
+      : liveAudioCleanCaptions;
+    const preAnalyzedCaptions = Array.isArray(options.preAnalyzedCaptions)
+      ? options.preAnalyzedCaptions
+      : preAnalyzedCleanCaptions;
+    const markers = Array.isArray(options.markerEntries)
+      ? options.markerEntries
+      : markerEvents;
+    const liveCaptionObservedAtMs = Number.isFinite(Number(options.liveCaptionObservedAtMs))
+      ? Number(options.liveCaptionObservedAtMs)
+      : lastLiveCaptionObservedAtMs;
+    const audioCaptionText = typeof options.audioCaptionText === 'string'
+      ? options.audioCaptionText
+      : lastAudioCaptionText;
+    const audioCaptionSource = typeof options.audioCaptionSource === 'string'
+      ? options.audioCaptionSource
+      : lastAudioCaptionSource;
+    const audioCaptionObservedAtMs = Number.isFinite(Number(options.audioCaptionObservedAtMs))
+      ? Number(options.audioCaptionObservedAtMs)
+      : lastAudioCaptionReceivedAtMs;
+    const nowMs = Number.isFinite(Number(options.nowMs))
+      ? Number(options.nowMs)
+      : Date.now();
+    const lookaheadSec = Number.isFinite(Number(options.lookaheadSec))
+      ? Number(options.lookaheadSec)
+      : CLEAN_CAPTION_LOOKAHEAD_SEC;
+    const staleMs = Number.isFinite(Number(options.staleMs))
+      ? Number(options.staleMs)
+      : CLEAN_CAPTION_STALE_MS;
+    const audioHoldMs = Number.isFinite(Number(options.audioHoldMs))
+      ? Number(options.audioHoldMs)
+      : AUDIO_STT_HOLD_MS;
+
+    const preAnalyzedEntry = findTimedCleanCaptionEntry(
+      preAnalyzedCaptions,
+      nowSec,
+      lookaheadSec
+    );
+
+    if (preAnalyzedEntry) {
+      return {
+        text: getCleanCaptionDisplayText(preAnalyzedEntry),
+        source: 'pre_analyzed',
+        stale: false,
+        cleanResumeTime: Number.isFinite(Number(preAnalyzedEntry.clean_resume_time))
+          ? Number(preAnalyzedEntry.clean_resume_time)
+          : null,
+      };
+    }
+
+    const markerTextEntry = findTimedCleanCaptionEntry(
+      markers,
+      nowSec,
+      lookaheadSec
+    );
+
+    if (markerTextEntry) {
+      return {
+        text: getCleanCaptionDisplayText(markerTextEntry),
+        source: 'marker_text',
+        stale: false,
+        cleanResumeTime: Number.isFinite(Number(markerTextEntry.clean_resume_time))
+          ? Number(markerTextEntry.clean_resume_time)
+          : null,
+      };
+    }
+
+    const maskedLiveText = toCleanCaptionText(String(liveText || ''));
+
+    if (ISWEEP_YOUTUBE_DOM_FALLBACK_ENABLED && maskedLiveText) {
+      const isStale =
+        liveCaptionObservedAtMs > 0
+        && (nowMs - liveCaptionObservedAtMs) > staleMs;
+
+      if (isStale) {
+        return {
+          text: '',
+          source: 'live_masked',
+          stale: true,
+        };
+      }
+
+      return {
+        text: maskedLiveText,
+        source: 'live_masked',
+        stale: false,
+        cleanResumeTime: null,
+      };
+    }
+
+    const preCachedAudioEntry = findTimedCleanCaptionEntry(
+      preCachedAudioCaptions,
+      nowSec,
+      lookaheadSec
+    );
+
+    if (preCachedAudioEntry) {
+      const entrySource =
+        String(preCachedAudioEntry.source || '').trim()
+        || 'audio_stt_cached';
+
+      if (isApprovedAudioCaptionSource(entrySource)) {
+        return {
+          text: getCleanCaptionDisplayText(preCachedAudioEntry),
+          source: entrySource,
+          stale: false,
+          cleanResumeTime: Number.isFinite(
+            Number(preCachedAudioEntry.clean_resume_time)
+          )
+            ? Number(preCachedAudioEntry.clean_resume_time)
+            : null,
+        };
+      }
+    }
+
+    const liveAudioEntry = findTimedCleanCaptionEntry(
+      liveAudioCaptions,
+      nowSec,
+      lookaheadSec
+    );
+
+    if (liveAudioEntry) {
+      const entrySource =
+        String(liveAudioEntry.source || '').trim()
+        || 'audio_stt_live';
+
+      if (isApprovedAudioCaptionSource(entrySource)) {
+        return {
+          text: getCleanCaptionDisplayText(liveAudioEntry),
+          source: entrySource,
+          stale: false,
+          cleanResumeTime: Number.isFinite(
+            Number(liveAudioEntry.clean_resume_time)
+          )
+            ? Number(liveAudioEntry.clean_resume_time)
+            : null,
+        };
+      }
+    }
+
+    const normalizedAudioSource =
+      String(audioCaptionSource || '').toLowerCase();
+
+    const freshAudioText =
+      String(audioCaptionText || '').trim();
+
+    const audioAgeMs =
+      audioCaptionObservedAtMs > 0
+        ? nowMs - audioCaptionObservedAtMs
+        : Number.POSITIVE_INFINITY;
+
+    if (
+      freshAudioText
+      && normalizedAudioSource.startsWith('audio_stt')
+      && isApprovedAudioCaptionSource(normalizedAudioSource)
+      && audioAgeMs <= audioHoldMs
+    ) {
+      return {
+        text: freshAudioText,
+        source:
+          normalizedAudioSource
+          || (
+            normalizedAudioSource.includes('cached')
+              ? 'audio_stt_cached'
+              : 'audio_stt_live'
+          ),
+        stale: false,
+        cleanResumeTime: null,
+      };
+    }
+
+    return {
+      text: '',
+      source: null,
+      stale: false,
+      cleanResumeTime: null,
+    };
+  }
+
+  function resetMarkerEngine(reason) {
+    markerEvents = [];
+    firedMarkerIds = new Set();
+    markerModeActive = false;
+    markerFallbackReason = reason || 'reset';
+    markerPastEndLogged = false;
+
+    console.log(MARKER_LOG_PREFIX, 'engine reset', {
+      reason,
+    });
+  }
+
+  function markerSourcePriority(source) {
+    const value =
+      String(source || '').toLowerCase();
+
+    if (value.startsWith('audio')) return 0;
+
+    if (
+      value.startsWith('transcript')
+      || value.startsWith('pre')
+    ) {
+      return 1;
+    }
+
+    return 2;
+  }
+
+  function shouldDedupAudioMarker(existing, incoming) {
+    if (!existing || !incoming) return false;
+    if (existing.action !== incoming.action) return false;
+
+    const overlapStart = Math.max(
+      Number(existing.start_seconds) || 0,
+      Number(incoming.start_seconds) || 0
+    );
+
+    const overlapEnd = Math.min(
+      Number(existing.end_seconds) || 0,
+      Number(incoming.end_seconds) || 0
+    );
+
+    if (overlapEnd <= overlapStart) return false;
+
+    const existingDur = Math.max(
+      (Number(existing.end_seconds) || 0)
+        - (Number(existing.start_seconds) || 0),
+      0.001
+    );
+
+    const incomingDur = Math.max(
+      (Number(incoming.end_seconds) || 0)
+        - (Number(incoming.start_seconds) || 0),
+      0.001
+    );
+
+    const overlapDur =
+      overlapEnd - overlapStart;
+
+    const overlapRatio =
+      overlapDur / Math.min(existingDur, incomingDur);
+
+    return overlapRatio >= 0.7;
+  }
+
+  function takeTailSampleBuffers(sampleBufs, tailSamples) {
+    const target = Math.max(
+      Math.floor(Number(tailSamples) || 0),
+      0
+    );
+
+    if (
+      !target
+      || !Array.isArray(sampleBufs)
+      || sampleBufs.length === 0
+    ) {
+      return [];
+    }
+
+    const out = [];
+    let remaining = target;
+
+    for (
+      let i = sampleBufs.length - 1;
+      i >= 0 && remaining > 0;
+      i -= 1
+    ) {
+      const buf = sampleBufs[i];
+
+      if (!buf || !buf.length) continue;
+
+      if (buf.length <= remaining) {
+        out.unshift(new Float32Array(buf));
+        remaining -= buf.length;
+      } else {
+        out.unshift(
+          new Float32Array(
+            buf.slice(buf.length - remaining)
+          )
+        );
+        remaining = 0;
+      }
+    }
+
+    return out;
+  }
+
+  function setMarkerEvents(events, source) {
+    const normalized =
+      (Array.isArray(events) ? events : [])
+        .map(normalizeMarkerEvent)
+        .map((event) => (
+          event
+            ? {
+              ...event,
+              source:
+                event.source
+                || source
+                || null,
+            }
+            : null
+        ))
+        .filter(Boolean)
+        .sort(
+          (a, b) =>
+            a.start_seconds - b.start_seconds
+        );
+
+    markerEvents = normalized;
+    firedMarkerIds = new Set();
+
+    markerModeActive =
+      markerEvents.length > 0;
+
+    markerFallbackReason =
+      markerModeActive
+        ? 'markers_loaded'
+        : 'marker_list_empty';
+
+    markerFallbackLogVideoId = null;
+    markerPastEndLogged = false;
+
+    console.log(
+      MARKER_LOG_PREFIX,
+      'events loaded',
+      {
+        source,
+        count: markerEvents.length,
+      }
+    );
+
+    if (!markerModeActive) {
+      console.log(
+        MARKER_LOG_PREFIX,
+        'marker list empty; live caption fallback active',
+        {
+          videoId: activeVideoId,
+        }
+      );
+    }
+  }
+
+  function applyMarkerEvent(marker, nowSec) {
+    const video = findVideo();
+
+    if (!video) return;
+
+    // ISweep does not edit media.
+    // It only applies temporary playback controls
+    // and separate overlay captions.
+
+    if (marker.action === 'mute') {
+      const muteWindow =
+        getMuteWindowFromMarker(marker);
+
+      const markerStartSec =
+        muteWindow.start_seconds;
+
+      const markerEndSec =
+        muteWindow.end_seconds;
+
+      console.log(
+        WORD_MUTE_LOG_PREFIX,
+        'applied',
+        {
+          id: marker.id,
+          source:
+            marker.source || 'unknown',
+          blocked_word_start:
+            marker.blocked_word_start
+            || markerStartSec,
+          clean_resume_time:
+            marker.clean_resume_time
+            || markerEndSec,
+        }
+      );
+
+      applyMuteWindow(
+        markerStartSec,
+        markerEndSec,
+        `marker:${marker.id}`
+      );
+
+      console.log(
+        MARKER_LOG_PREFIX,
+        'marker applied',
+        {
+          id: marker.id,
+          action: 'mute',
+          start: markerStartSec,
+          end: markerEndSec,
+          clean_resume_time:
+            marker.clean_resume_time || null,
+          blocked_word_start:
+            marker.blocked_word_start || null,
+          source:
+            marker.source || 'unknown',
+        }
+      );
+
+      if (
+        String(marker.source || '')
+          .toLowerCase()
+          .startsWith('audio')
+      ) {
+        console.log(
+          AUDIO_LOG_PREFIX,
+          'marker applied',
+          {
+            id: marker.id,
+            start_seconds: markerStartSec,
+            end_seconds: markerEndSec,
+            source:
+              marker.source || 'audio',
+          }
+        );
+      }
+
+      if (
+        Number.isFinite(
+          Number(marker.clean_resume_time)
+        )
+      ) {
+        console.log(
+          WORD_MUTE_LOG_PREFIX,
+          'clean resume',
+          {
+            id: marker.id,
+            clean_resume_time:
+              marker.clean_resume_time,
+          }
+        );
+      }
+
+      return;
+    }
+
+    if (marker.action === 'skip') {
+      const jump = Math.max(
+        Number(marker.duration_seconds) || 0,
+        0
+      );
+
+      if (jump > 0) {
+        let targetTime =
+          nowSec + jump;
+
+        if (
+          Number.isFinite(video.duration)
+          && video.duration > 0
+        ) {
+          targetTime = Math.min(
+            targetTime,
+            Math.max(
+              video.duration - 0.05,
+              0
+            )
+          );
+        }
+
+        if (
+          Number.isFinite(targetTime)
+          && targetTime > nowSec
+        ) {
+          video.currentTime =
+            targetTime;
+        }
+      }
+
+      console.log(
+        MARKER_LOG_PREFIX,
+        'marker fired',
+        {
+          id: marker.id,
+          action: 'skip',
+          jump,
+        }
+      );
+
+      return;
+    }
+
+    if (marker.action === 'fast_forward') {
+      const durationMs = Math.max(
+        (marker.duration_seconds || 0) * 1000,
+        0
+      );
+
+      if (restoreRateTimeout) {
+        clearTimeout(
+          restoreRateTimeout
+        );
+      }
+
+      const restoreRate =
+        Number.isFinite(video.playbackRate)
+        && video.playbackRate > 0
+          ? video.playbackRate
+          : 1.0;
+
+      previousRate =
+        restoreRate;
+
+      video.playbackRate =
+        2.0;
+
+      const rateVideo =
+        video;
+
+      restoreRateTimeout =
+        setTimeout(() => {
+          if (
+            rateVideo
+            && typeof rateVideo.playbackRate
+              === 'number'
+          ) {
+            rateVideo.playbackRate =
+              restoreRate;
+          }
+        }, durationMs || 8000);
+
+      console.log(
+        MARKER_LOG_PREFIX,
+        'marker fired',
+        {
+          id: marker.id,
+          action: 'fast_forward',
+          durationMs,
+          restoreRate,
+        }
+      );
+    }
+  }
+
+  function getMuteWindowFromMarker(marker) {
+    const markerStartSec = Math.max(
+      Number(
+        marker && marker.start_seconds
+      ) || 0,
+      0
+    );
+
+    let markerEndSec =
+      Number(
+        marker && marker.end_seconds
+      )
+      || markerStartSec;
+
+    if (
+      Number.isFinite(
+        Number(
+          marker
+          && marker.clean_resume_time
+        )
+      )
+    ) {
+      const resumeSec =
+        Number(marker.clean_resume_time);
+
+      if (resumeSec > markerStartSec) {
+        markerEndSec =
+          Math.min(
+            markerEndSec,
+            resumeSec
+          );
+      }
+    }
+
+    return {
+      start_seconds:
+        markerStartSec,
+      end_seconds:
+        Math.max(
+          markerEndSec,
+          markerStartSec
+        ),
+    };
+  }
+
+  function tickMarkerScheduler() {
+    if (extensionContextInvalidated) return;
+
+    const video = findVideo();
+
+    if (!video) return;
+
+    const nowSec =
+      video.currentTime || 0;
+
+    updateCleanOverlay(
+      lastCaptionText,
+      nowSec
+    );
+
+    // [CC] mode is captions-only.
+    // Do not fire marker-based mute/skip/fast-forward actions.
+    if (
+      cleanCaptionSettings
+        .cleanCaptionsEnabled
+    ) {
+      return;
+    }
+
+    if (!markerEvents.length) return;
+
+    markerEvents.forEach((marker) => {
+      if (!isActionableMarker(marker)) {
+        return;
+      }
+
+      if (
+        firedMarkerIds.has(marker.id)
+      ) {
+        return;
+      }
+
+      // Mute markers fire slightly before their start
+      // so the audio is silent before the viewer hears the word.
+      // Skip/fast_forward fire exactly on-time.
+      const earlyWindowSec =
+        getMarkerEarlyWindowSec(
+          marker.action
+        );
+
+      if (
+        !shouldFireMarker(
+          marker,
+          nowSec,
+          firedMarkerIds
+        )
+      ) {
+        return;
+      }
+
+      firedMarkerIds.add(
+        marker.id
+      );
+
+      console.log(
+        MARKER_LOG_PREFIX,
+        'marker fired',
+        {
+          id: marker.id,
+          action: marker.action,
+          start_seconds:
+            marker.start_seconds,
+          original_start_seconds:
+            marker.start_seconds,
+          scheduler_nowSec:
+            +nowSec.toFixed(3),
+          lead_time_used:
+            earlyWindowSec,
+          leadSec:
+            +(
+              marker.start_seconds
+              - nowSec
+            ).toFixed(3),
+          source:
+            marker.source
+            || 'unknown',
+        }
+      );
+
+      applyMarkerEvent(
+        marker,
+        nowSec
+      );
+    });
+
+    if (
+      !markerPastEndLogged
+      && markerEvents.length > 0
+    ) {
+      const last =
+        markerEvents[
+          markerEvents.length - 1
+        ];
+
+      if (
+        nowSec >
+          last.end_seconds + 0.25
+        && firedMarkerIds.size === 0
+      ) {
+        markerPastEndLogged = true;
+
+        console.warn(
+          MARKER_LOG_PREFIX,
+          'markers loaded but none fired by end window',
+          {
+            videoId:
+              activeVideoId,
+            markerCount:
+              markerEvents.length,
+            nowSec,
+            lastEnd:
+              last.end_seconds,
+          }
+        );
+      }
+    }
+  }
+
+  function ensureMarkerSchedulerRunning() {
+    if (
+      cleanCaptionSettings
+        .cleanCaptionsEnabled
+    ) {
+      markerFallbackReason =
+        'caption_mode_no_markers';
+
+      return;
+    }
+
+    if (markerSchedulerInterval) {
+      return;
+    }
+
+    console.log(
+      MARKER_LOG_PREFIX,
+      'scheduler started',
+      {
+        intervalMs:
+          MARKER_SCHEDULER_INTERVAL_MS,
+      }
+    );
+
+    markerSchedulerInterval =
+      setInterval(() => {
+        tickMarkerScheduler();
+      }, MARKER_SCHEDULER_INTERVAL_MS);
+  }
+
+  async function analyzeCurrentVideoMarkers(
+    forceRefresh = false
+  ) {
+    if (
+      cleanCaptionSettings
+        .cleanCaptionsEnabled
+    ) {
+      resetMarkerEngine(
+        'caption_mode_no_markers'
+      );
+
+      preAnalyzedCleanCaptions = [];
+
+      return;
+    }
+
+    const videoId =
+      getCurrentVideoId();
+
+    if (!videoId) {
+      resetMarkerEngine(
+        'missing_video_id'
+      );
+
+      return;
+    }
+
+    try {
+      console.log(
+        MARKER_LOG_PREFIX,
+        'analyze request start',
+        {
+          videoId,
+          forceRefresh,
+        }
+      );
+
+      const response =
+        await safeRuntimeSendMessage({
+          type:
+            'isweep_markers_analyze',
+          video_id:
+            videoId,
+          force_refresh:
+            forceRefresh,
+        });
+
+      // Ignore stale results after YouTube SPA navigation.
+      if (
+        activeVideoId !== videoId
+        || getCurrentVideoId()
+          !== videoId
+      ) {
+        console.log(
+          MARKER_LOG_PREFIX,
+          'stale analyze result ignored',
+          {
+            failure_reason:
+              'stale_analyze_response_ignored',
+            requestVideoId:
+              videoId,
+            activeVideoId,
+            currentVideoId:
+              getCurrentVideoId(),
+          }
+        );
+
+        return;
+      }
+
+      console.log(
+        MARKER_LOG_PREFIX,
+        'analyze result',
+        {
+          videoId,
+          status:
+            response?.status
+            || 'unknown',
+          source:
+            response?.source
+            || null,
+          events:
+            Array.isArray(
+              response?.events
+            )
+              ? response.events.length
+              : 0,
+          failure_reason:
+            response?.failure_reason
+            || null,
+        }
+      );
+
+      if (
+        !response
+        || response.status !== 'ready'
+      ) {
+        const fallbackReason =
+          response?.failure_reason
+          || `status:${response?.status || 'unknown'}`;
+
+        resetMarkerEngine(
+          fallbackReason
+        );
+
+        preAnalyzedCleanCaptions = [];
+
+        console.log(
+          MARKER_LOG_PREFIX,
+          'watch-ahead unavailable; live caption fallback active',
+          {
+            videoId,
+            status:
+              response?.status
+              || 'unknown',
+            failure_reason:
+              response?.failure_reason
+              || null,
+          }
+        );
+
+        return;
+      }
+
+      preAnalyzedCleanCaptions =
+        normalizePreAnalyzedCaptions(
+          response.cleaned_captions
+          || response.clean_captions
+          || []
+        );
+
+      setMarkerEvents(
+        response.events,
+        response.source
+          || 'transcript'
+      );
+    } catch (err) {
+      resetMarkerEngine(
+        'analyze_exception'
+      );
+
+      console.warn(
+        MARKER_LOG_PREFIX,
+        'analyze request failed',
+        {
+          videoId,
+          failure_reason:
+            'analyze_exception',
+          error:
+            err?.message
+            || err,
+        }
+      );
+    }
+  }
+
+  // ── Audio watch-ahead helpers ─────────────────────────
+
+  function encodeWAV(sampleBufs, sampleRate) {
+    const totalSamples =
+      sampleBufs.reduce(
+        (n, b) => n + b.length,
+        0
+      );
+
+    const dataBytes =
+      totalSamples * 2;
+
+    const out =
+      new ArrayBuffer(
+        44 + dataBytes
+      );
+
+    const view =
+      new DataView(out);
+
+    const w = (off, str) => {
+      for (
+        let i = 0;
+        i < str.length;
+        i++
+      ) {
+        view.setUint8(
+          off + i,
+          str.charCodeAt(i)
+        );
+      }
+    };
+
+    w(0, 'RIFF');
+    view.setUint32(
+      4,
+      36 + dataBytes,
+      true
+    );
+
+    w(8, 'WAVE');
+    w(12, 'fmt ');
+
+    view.setUint32(
+      16,
+      16,
+      true
+    );
+
+    view.setUint16(
+      20,
+      1,
+      true
+    );
+
+    view.setUint16(
+      22,
+      1,
+      true
+    );
+
+    view.setUint32(
+      24,
+      sampleRate,
+      true
+    );
+
+    view.setUint32(
+      28,
+      sampleRate * 2,
+      true
+    );
+
+    view.setUint16(
+      32,
+      2,
+      true
+    );
+
+    view.setUint16(
+      34,
+      16,
+      true
+    );
+
+    w(36, 'data');
+
+    view.setUint32(
+      40,
+      dataBytes,
+      true
+    );
+
+    let offset = 44;
+
+    sampleBufs.forEach((buf) => {
+      for (
+        let i = 0;
+        i < buf.length;
+        i++
+      ) {
+        const s =
+          Math.max(
+            -1,
+            Math.min(
+              1,
+              buf[i]
+            )
+          );
+
+        view.setInt16(
+          offset,
+          s < 0
+            ? s * 0x8000
+            : s * 0x7fff,
+          true
+        );
+
+        offset += 2;
+      }
+    });
+
+    return out;
+  }
+
+  function arrayBufferToBase64(buffer) {
+    const bytes =
+      new Uint8Array(buffer);
+
+    const parts = [];
+
+    for (
+      let i = 0;
+      i < bytes.length;
+      i += 8192
+    ) {
+      parts.push(
+        String.fromCharCode(
+          ...bytes.subarray(
+            i,
+            Math.min(
+              i + 8192,
+              bytes.length
+            )
+          )
+        )
+      );
+    }
+
+    return btoa(
+      parts.join('')
+    );
+  }
+
+  function flattenSampleBuffers(sampleBufs) {
+    const total =
+      (sampleBufs || [])
+        .reduce(
+          (
+            sum,
+            buf
+          ) =>
+            sum
+            + (
+              buf?.length
+              || 0
+            ),
+          0
+        );
+
+    const merged =
+      new Float32Array(total);
+
+    let offset = 0;
+
+    (sampleBufs || [])
+      .forEach((buf) => {
+        if (
+          !(buf instanceof Float32Array)
+          || !buf.length
+        ) {
+          return;
+        }
+
+        merged.set(
+          buf,
+          offset
+        );
+
+        offset +=
+          buf.length;
+      });
+
+    return Array.from(
+      merged
+    );
+  }
+
+  function stopAudioCapture(reason) {
+    if (
+      !audioAheadActive
+      && !audioCtx
+      && !audioInputStream
+    ) {
+      return;
+    }
+
+    audioAheadActive = false;
+
+    if (audioProcessor) {
+      try {
+        audioProcessor.disconnect();
+      } catch (_) {}
+
+      audioProcessor = null;
+    }
+
+    if (audioCtx) {
+      try {
+        audioCtx.close();
+      } catch (_) {}
+
+      audioCtx = null;
+    }
+
+    if (
+      audioInputStream
+      && typeof audioInputStream.getTracks
+        === 'function'
+    ) {
+      audioInputStream
+        .getTracks()
+        .forEach((track) => {
+          try {
+            track.stop();
+          } catch (_) {}
+        });
+    }
+
+    try {
+      void safeRuntimeSendMessage({
+        type:
+          'isweep_release_tab_capture_stream',
+        reason,
+      });
+    } catch (_) {}
+
+    audioInputStream = null;
+    audioCaptureSource = null;
+    audioSampleBufs = [];
+    audioAheadVideoId = null;
+
+    if (
+      reason ===
+      'captions_disabled'
+    ) {
+      lastAudioCaptionSource = null;
+      lastAudioCaptionText = '';
+      lastAudioCaptionReceivedAtMs = 0;
+      lastAudioCaptionFailureReason = null;
+      audioCapturePermissionDenied = false;
+      tabAudioCaptureState = 'idle';
+    }
+
+    console.log(
+      AUDIO_AHEAD_LOG_PREFIX,
+      'audio capture stopped',
+      {
+        reason,
+      }
+    );
+  }
+
+  function classifyCaptureFailure(
+    errorOrMessage
+  ) {
+    const text =
+      String(
+        errorOrMessage?.message
+        || errorOrMessage
+        || ''
+      ).trim();
+
+    if (
+      /notallowederror|permission|denied|not allowed/i
+        .test(text)
+    ) {
+      return 'audio_capture_permission_denied';
+    }
+
+    return 'audio_capture_unavailable';
+  }
+
+  async function requestTabCaptureAudioStream() {
+    console.log(
+      '[ISWEEP][AUDIO_CAPTIONS] tab capture start requested',
+      {
+        videoId:
+          activeVideoId,
+      }
+    );
+
+    let response;
+
+    try {
+      response =
+        await safeRuntimeSendMessage({
+          type:
+            'isweep_request_tab_capture_stream',
+          video_id:
+            activeVideoId,
+        });
+    } catch (err) {
+      return {
+        stream: null,
+        failureReason:
+          classifyCaptureFailure(
+            err
+          ),
+      };
+    }
+
+    if (
+      !response?.ok
+      || !response?.streamId
+    ) {
+      return {
+        stream: null,
+        failureReason:
+          response?.failure_reason
+          || 'audio_capture_unavailable',
+      };
+    }
+
+    try {
+      const stream =
+        await navigator.mediaDevices
+          .getUserMedia({
+            audio: {
+              mandatory: {
+                chromeMediaSource:
+                  'tab',
+                chromeMediaSourceId:
+                  response.streamId,
+              },
+            },
+            video: false,
+          });
+
+      const tracks =
+        typeof stream?.getAudioTracks
+          === 'function'
+          ? stream.getAudioTracks()
+          : [];
+
+      if (!tracks.length) {
+        return {
+          stream: null,
+          failureReason:
+            'audio_capture_unavailable',
+        };
+      }
+
+      console.log(
+        '[ISWEEP][AUDIO_CAPTIONS] tab capture stream ready',
+        {
+          videoId:
+            activeVideoId,
+          tracks:
+            tracks.length,
+        }
+      );
+
+      return {
+        stream,
+        failureReason: null,
+      };
+    } catch (err) {
+      return {
+        stream: null,
+        failureReason:
+          classifyCaptureFailure(
+            err
+          ),
+      };
+    }
+  }
+
+  function requestVideoCaptureStream(video) {
+    const captureMethod =
+      typeof video.captureStream
+        === 'function'
+        ? 'captureStream'
+        : (
+          typeof video.mozCaptureStream
+            === 'function'
+            ? 'mozCaptureStream'
+            : null
+        );
+
+    if (!captureMethod) {
+      return {
+        stream: null,
+        failureReason:
+          'audio_capture_unavailable',
+        captureMethod: null,
+      };
+    }
+
+    let stream;
+
+    try {
+      stream =
+        video[captureMethod]();
+    } catch (err) {
+      return {
+        stream: null,
+        failureReason:
+          classifyCaptureFailure(
+            err
+          ),
+        captureMethod,
+      };
+    }
+
+    const audioTracks =
+      typeof stream?.getAudioTracks
+        === 'function'
+        ? stream.getAudioTracks()
+        : [];
+
+    if (!audioTracks.length) {
+      return {
+        stream: null,
+        failureReason:
+          'audio_capture_unavailable',
+        captureMethod,
+      };
+    }
+
+    console.log(
+      '[ISWEEP][AUDIO_CAPTIONS] using video.captureStream fallback',
+      {
+        videoId:
+          activeVideoId,
+        method:
+          captureMethod,
+      }
+    );
+
+    return {
+      stream:
+        new MediaStream(
+          audioTracks
+        ),
+      failureReason: null,
+      captureMethod,
+    };
+  }
+
+  async function startAudioPipeline(
+    audioStream,
+    sourceLabel,
+    video,
+    captureMethod = null
+  ) {
+    if (
+      !ISWEEP_CONTENT_SCRIPT_AUDIO_AHEAD_ENABLED
+    ) {
+      return false;
+    }
+
+    try {
+      audioCtx =
+        new AudioContext({
+          sampleRate:
+            AUDIO_SAMPLE_RATE,
+        });
+
+      console.log(
+        AUDIO_AHEAD_LOG_PREFIX,
+        'audio context state before resume',
+        {
+          state:
+            audioCtx.state,
+        }
+      );
+
+      if (
+        audioCtx.state ===
+        'suspended'
+      ) {
+        try {
+          await audioCtx.resume();
+
+          console.log(
+            AUDIO_AHEAD_LOG_PREFIX,
+            'audio context resumed',
+            {
+              state:
+                audioCtx.state,
+            }
+          );
+        } catch (err) {
+          const reason =
+            classifyCaptureFailure(
+              err
+            );
+
+          stopAudioCapture(
+            'resume_failed'
+          );
+
+          if (
+            reason ===
+            'audio_capture_permission_denied'
+          ) {
+            audioCapturePermissionDenied =
+              true;
+          }
+
+          throw err;
+        }
+      }
+
+      if (
+        audioCtx.state ===
+        'suspended'
+      ) {
+        stopAudioCapture(
+          'context_still_suspended'
+        );
+
+        return false;
+      }
+
+      const workletUrl =
+        chrome.runtime.getURL(
+          'audio_chunk_processor.js'
+        );
+
+      console.log(
+        AUDIO_AHEAD_LOG_PREFIX,
+        'audio worklet load start',
+        {
+          workletUrl,
+        }
+      );
+
+      await audioCtx
+        .audioWorklet
+        .addModule(
+          workletUrl
+        );
+
+      console.log(
+        AUDIO_AHEAD_LOG_PREFIX,
+        'audio worklet loaded successfully',
+        {
+          workletUrl,
+        }
+      );
+
+      const source =
+        audioCtx
+          .createMediaStreamSource(
+            audioStream
+          );
+
+      const workletNode =
+        new AudioWorkletNode(
+          audioCtx,
+          'audio-chunk-processor'
+        );
+
+      const silentGain =
+        audioCtx.createGain();
+
+      silentGain.gain.value = 0;
+
+      workletNode.port.onmessage =
+        (e) => {
+          if (!audioAheadActive) {
+            return;
+          }
+
+          const vid = findVideo();
+
+          if (
+            !vid
+            || vid.paused
+          ) {
+            return;
+          }
+
+          audioSampleBufs.push(
+            new Float32Array(
+              e.data
+            )
+          );
+
+          const total =
+            audioSampleBufs.reduce(
+              (
+                n,
+                b
+              ) =>
+                n + b.length,
+              0
+            );
+
+          const required =
+            (
+              audioChunkWarm
+                ? (
+                  AUDIO_CHUNK_SEC
+                  - AUDIO_CHUNK_OVERLAP_SEC
+                )
+                : AUDIO_CHUNK_SEC
+            )
+            * audioCtx.sampleRate;
+
+          if (total >= required) {
+            flushAudioChunk();
+          }
+        };
+
+      source.connect(
+        workletNode
+      );
+
+      workletNode.connect(
+        silentGain
+      );
+
+      silentGain.connect(
+        audioCtx.destination
+      );
+
+      audioProcessor =
+        workletNode;
+
+      audioInputStream =
+        audioStream;
+
+      audioCaptureSource =
+        sourceLabel;
+
+      audioAheadActive =
+        true;
+
+      audioAheadVideoId =
+        activeVideoId;
+
+      audioChunkStartSec =
+        video.currentTime || 0;
+
+      audioSampleBufs = [];
+      audioChunkWarm = false;
+
+      console.log(
+        AUDIO_CAPTURE_LOG_PREFIX,
+        'capture started',
+        {
+          videoId:
+            activeVideoId,
+          chunkSec:
+            AUDIO_CHUNK_SEC,
+        }
+      );
+
+      console.log(
+        AUDIO_CAPTURE_LOG_PREFIX,
+        'captions_required=false',
+        {
+          videoId:
+            activeVideoId,
+        }
+      );
+
+      console.log(
+        AUDIO_CAPTURE_LOG_PREFIX,
+        `source=${sourceLabel}`,
+        {
+          videoId:
+            activeVideoId,
+        }
+      );
+
+      console.log(
+        AUDIO_CAPTURE_LOG_PREFIX,
+        'microphone_used=false',
+        {
+          videoId:
+            activeVideoId,
+        }
+      );
+
+      console.log(
+        AUDIO_AHEAD_LOG_PREFIX,
+        'audio capture started',
+        {
+          videoId:
+            activeVideoId,
+          source:
+            sourceLabel,
+          method:
+            captureMethod,
+          readyState:
+            video.readyState || 0,
+          sampleRate:
+            audioCtx.sampleRate,
+          chunkSec:
+            AUDIO_CHUNK_SEC,
+          processor:
+            'AudioWorkletNode',
+        }
+      );
+
+      return true;
+    } catch (err) {
+      const reason =
+        classifyCaptureFailure(
+          err
+        );
+
+      console.warn(
+        AUDIO_AHEAD_LOG_PREFIX,
+        `failure_reason: ${reason}`,
+        {
+          error:
+            err?.message
+            || String(err),
+        }
+      );
+
+      stopAudioCapture(
+        'init_failed'
+      );
+
+      if (
+        reason ===
+        'audio_capture_permission_denied'
+      ) {
+        audioCapturePermissionDenied =
+          true;
+      }
+
+      return false;
+    }
+  }
+
+  function flushAudioChunk() {
+    if (!audioSampleBufs.length) {
+      return;
+    }
+
+    const bufs =
+      audioSampleBufs.slice();
+
+    const chunkStartSec =
+      audioChunkStartSec;
+
+    const videoId =
+      audioAheadVideoId;
+
+    if (!videoId) return;
+
+    const sampleRate =
+      audioCtx
+        ? audioCtx.sampleRate
+        : AUDIO_SAMPLE_RATE;
+
+    const sampleCount =
+      bufs.reduce(
+        (
+          n,
+          b
+        ) =>
+          n + b.length,
+        0
+      );
+
+    const measuredDurationSec =
+      sampleRate > 0
+        ? sampleCount / sampleRate
+        : 0;
+
+    let chunkEndSec =
+      chunkStartSec
+      + measuredDurationSec;
+
+    const video =
+      findVideo();
+
+    const nowSec =
+      video
+        ? video.currentTime || 0
+        : chunkEndSec;
+
+    if (
+      Number.isFinite(nowSec)
+      && nowSec > chunkStartSec
+    ) {
+      chunkEndSec =
+        nowSec;
+    }
+
+    if (
+      !(chunkEndSec > chunkStartSec)
+    ) {
+      chunkEndSec =
+        chunkStartSec
+        + Math.max(
+          measuredDurationSec,
+          0.05
+        );
+    }
+
+    const overlapSamples =
+      Math.floor(
+        Math.max(
+          AUDIO_CHUNK_OVERLAP_SEC,
+          0
+        )
+        * sampleRate
+      );
+
+    const overlapBufs =
+      takeTailSampleBuffers(
+        bufs,
+        overlapSamples
+      );
+
+    const overlapCount =
+      overlapBufs.reduce(
+        (
+          n,
+          b
+        ) =>
+          n + b.length,
+        0
+      );
+
+    const overlapDurationSec =
+      sampleRate > 0
+        ? overlapCount / sampleRate
+        : 0;
+
+    audioSampleBufs =
+      overlapBufs;
+
+    audioChunkStartSec =
+      Math.max(
+        chunkEndSec
+        - overlapDurationSec,
+        0
+      );
+
+    audioChunkWarm =
+      true;
+
+    const wavBuf =
+      encodeWAV(
+        bufs,
+        sampleRate
+      );
+
+    const audioChunk =
+      arrayBufferToBase64(
+        wavBuf
+      );
+
+    const audioSamples =
+      flattenSampleBuffers(
+        bufs
+      );
+
+    console.log(
+      AUDIO_AHEAD_LOG_PREFIX,
+      'chunk ready',
+      {
+        videoId,
+        start_seconds:
+          chunkStartSec,
+        end_seconds:
+          chunkEndSec,
+        samplesCollected:
+          sampleCount,
+        wavBytes:
+          wavBuf.byteLength,
+      }
+    );
+
+    console.log(
+      AUDIO_CAPTURE_LOG_PREFIX,
+      'chunk ready',
+      {
+        videoId,
+        chunk_start_seconds:
+          chunkStartSec,
+        chunk_end_seconds:
+          chunkEndSec,
+      }
+    );
+
+    console.log(
+      AUDIO_AHEAD_LOG_PREFIX,
+      'sending chunk',
+      {
+        videoId,
+        start_seconds:
+          chunkStartSec,
+        end_seconds:
+          chunkEndSec,
+      }
+    );
+
+    console.log(
+      AUDIO_LOG_PREFIX,
+      'chunk sent',
+      {
+        videoId,
+        start_seconds:
+          chunkStartSec,
+        end_seconds:
+          chunkEndSec,
+      }
+    );
+
+    console.log(
+      AUDIO_CAPTURE_LOG_PREFIX,
+      'chunk sent',
+      {
+        videoId,
+        chunk_start_seconds:
+          chunkStartSec,
+        chunk_end_seconds:
+          chunkEndSec,
+      }
+    );
+
+    safeRuntimeSendMessage({
+      type:
+        'isweep_audio_chunk',
+      video_id:
+        videoId,
+      audio_chunk:
+        audioChunk,
+      audio:
+        audioSamples,
+      sampleRate,
+      channels: 1,
+      mime_type:
+        'audio/wav',
+      start_seconds:
+        chunkStartSec,
+      end_seconds:
+        chunkEndSec,
+    })
+      .then((response) => {
+        if (!response) {
+          console.warn(
+            AUDIO_AHEAD_LOG_PREFIX,
+            'failure_reason: analyze_exception',
+            {
+              videoId,
+              start_seconds:
+                chunkStartSec,
+              end_seconds:
+                chunkEndSec,
+            }
+          );
+
+          return;
+        }
+
+        console.log(
+          AUDIO_CAPTURE_LOG_PREFIX,
+          'response received',
+          {
+            videoId,
+            chunk_start_seconds:
+              chunkStartSec,
+            chunk_end_seconds:
+              chunkEndSec,
+            status:
+              response.status
+              || 'unknown',
+          }
+        );
+
+        lastAudioCaptionSource =
+          response.source || null;
+
+        lastAudioCaptionFailureReason =
+          response.failure_reason || null;
+
+        if (
+          response.source ===
+            'audio_stt_disabled'
+          || response.failure_reason ===
+            'stt_disabled'
+        ) {
+          console.warn(
+            AUDIO_CAPTURE_LOG_PREFIX,
+            'STT disabled',
+            {
+              videoId,
+              failure_reason:
+                response.failure_reason
+                || null,
+            }
+          );
+        }
+
+        if (
+          response.failure_reason ===
+          'backend_not_running'
+        ) {
+          console.warn(
+            AUDIO_CAPTURE_LOG_PREFIX,
+            'backend offline',
+            {
+              videoId,
+            }
+          );
+        }
+
+        if (
+          typeof response.text
+            === 'string'
+          && response.text.trim()
+        ) {
+          console.log(
+            AUDIO_CAPTURE_LOG_PREFIX,
+            'transcript received',
+            {
+              videoId,
+              textPreview:
+                response.text
+                  .slice(0, 80),
+            }
+          );
+        }
+
+        console.log(
+          AUDIO_AHEAD_LOG_PREFIX,
+          'chunk result',
+          {
+            videoId,
+            start_seconds:
+              chunkStartSec,
+            end_seconds:
+              chunkEndSec,
+            status:
+              response.status,
+            events:
+              Array.isArray(
+                response.events
+              )
+                ? response.events.length
+                : 0,
+            failure_reason:
+              response.failure_reason
+              || null,
+          }
+        );
+
+        if (
+          response.status ===
+            'ready'
+          && Array.isArray(
+            response.events
+          )
+          && response.events.length > 0
+        ) {
+          ingestAudioMarkers(
+            response.events,
+            videoId
+          );
+        }
+
+        const normalizedAudioCaptions =
+          buildAudioResponseCaptions(
+            response,
+            chunkStartSec,
+            chunkEndSec
+          );
+
+        if (
+          response.status === 'ready'
+          && normalizedAudioCaptions.length > 0
+        ) {
+          if (
+            response.cached === true
+          ) {
+            preCachedAudioCleanCaptions =
+              normalizedAudioCaptions;
+          } else {
+            liveAudioCleanCaptions =
+              normalizedAudioCaptions;
+          }
+
+          console.log(
+            CLEAN_CC_LOG_PREFIX,
+            'audio caption stored',
+            {
+              source:
+                response.cached === true
+                  ? 'audio_stt_cached'
+                  : 'audio_stt_live',
+              count:
+                normalizedAudioCaptions.length,
+            }
+          );
+        }
+
+        updateCleanOverlay(
+          lastCaptionText,
+          findVideo()?.currentTime || 0
+        );
+      })
+      .catch((err) => {
+        console.warn(
+          AUDIO_AHEAD_LOG_PREFIX,
+          'failure_reason: analyze_exception',
+          {
+            videoId,
+            start_seconds:
+              chunkStartSec,
+            end_seconds:
+              chunkEndSec,
+            error:
+              err?.message
+              || String(err),
+          }
+        );
+
+        lastAudioCaptionSource =
+          'audio_stt';
+
+        lastAudioCaptionFailureReason =
+          'analyze_exception';
+
+        updateCleanOverlay(
+          lastCaptionText,
+          findVideo()?.currentTime || 0
+        );
+      });
+  }
+
+  function ingestAudioMarkers(
+    newEvents,
+    videoId
+  ) {
+    if (
+      videoId !== activeVideoId
+    ) {
+      console.log(
+        AUDIO_AHEAD_LOG_PREFIX,
+        'failure_reason: stale_audio_response_ignored',
+        {
+          responseVideoId:
+            videoId,
+          activeVideoId,
+        }
+      );
+
+      return;
+    }
+
+    const normalized =
+      (
+        Array.isArray(newEvents)
+          ? newEvents
+          : []
+      )
+        .map(
+          normalizeMarkerEvent
+        )
+        .map((event) => (
+          event
+            ? {
+              ...event,
+              source:
+                event.source
+                || 'audio_stt',
+            }
+            : null
+        ))
+        .filter(Boolean)
+        .filter(
+          (e) =>
+            !firedMarkerIds.has(
+              e.id
+            )
+        );
+
+    if (!normalized.length) {
+      return;
+    }
+
+    const firedBefore =
+      new Set(
+        firedMarkerIds
+      );
+
+    const merged = [
+      ...markerEvents,
+    ];
+
+    normalized.forEach((e) => {
+      const exact =
+        merged.some(
+          (m) =>
+            m.id === e.id
+        );
+
+      const overlapDup =
+        merged.some(
+          (m) =>
+            shouldDedupAudioMarker(
+              m,
+              e
+            )
+        );
+
+      if (
+        !exact
+        && !overlapDup
+      ) {
+        merged.push(e);
+      }
+    });
+
+    merged.sort(
+      (a, b) => {
+        const delta =
+          a.start_seconds
+          - b.start_seconds;
+
+        if (
+          Math.abs(delta)
+          > 1e-6
+        ) {
+          return delta;
+        }
+
+        return (
+          markerSourcePriority(
+            a.source
+          )
+          - markerSourcePriority(
+            b.source
+          )
+        );
+      }
+    );
+
+    markerEvents =
+      merged;
+
+    markerModeActive =
+      markerEvents.length > 0;
+
+    markerFallbackReason =
+      markerModeActive
+        ? 'markers_loaded'
+        : 'marker_list_empty';
+
+    markerFallbackLogVideoId =
+      null;
+
+    firedMarkerIds =
+      firedBefore;
+
+    console.log(
+      MARKER_LOG_PREFIX,
+      'events merged',
+      {
+        source:
+          'audio_chunk',
+        total:
+          markerEvents.length,
+        added:
+          normalized.map(
+            (event) => ({
+              id:
+                event.id,
+              start_seconds:
+                event.start_seconds,
+              end_seconds:
+                event.end_seconds,
+              source:
+                event.source
+                || 'audio_chunk',
+            })
+          ),
+      }
+    );
+
+    console.log(
+      AUDIO_AHEAD_LOG_PREFIX,
+      'audio markers merged',
+      {
+        videoId:
+          activeVideoId,
+        addedCount:
+          normalized.length,
+        totalCount:
+          markerEvents.length,
+      }
+    );
+
+    console.log(
+      AUDIO_LOG_PREFIX,
+      'markers received',
+      {
+        videoId:
+          activeVideoId,
+        addedCount:
+          normalized.length,
+        totalCount:
+          markerEvents.length,
+      }
+    );
+
+    normalized.forEach(
+      (event) => {
+        if (
+          event.action === 'mute'
+        ) {
+          console.log(
+            WORD_MUTE_LOG_PREFIX,
+            'marker scheduled',
+            {
+              id:
+                event.id,
+              source:
+                event.source
+                || 'audio_stt',
+              blocked_word_start:
+                event.blocked_word_start
+                || event.start_seconds,
+              clean_resume_time:
+                event.clean_resume_time
+                || event.end_seconds,
+            }
+          );
+        }
+      }
+    );
+  }
+
+  async function startAudioCapture() {
+    if (
+      !ISWEEP_CONTENT_SCRIPT_AUDIO_AHEAD_ENABLED
+    ) {
+      return;
+    }
+
+    const video =
+      findVideo();
+
+    console.log(
+      AUDIO_AHEAD_LOG_PREFIX,
+      'start requested',
+      {
+        videoId:
+          activeVideoId,
+        hasVideo:
+          Boolean(video),
+        audioAheadActive,
+        audioCapturePermissionDenied,
+        audioFilteringEnabled,
+        readyState:
+          video?.readyState
+          ?? null,
+        paused:
+          video?.paused
+          ?? null,
+        currentTime:
+          video?.currentTime
+          ?? null,
+      }
+    );
+
+    if (
+      !cleanCaptionSettings
+        .cleanCaptionsEnabled
+    ) {
+      return;
+    }
+
+    if (
+      tabAudioCaptureState
+        === 'starting'
+      || tabAudioCaptureState
+        === 'ready'
+    ) {
+      return;
+    }
+
+    if (
+      !video
+      || audioAheadActive
+      || audioCapturePermissionDenied
+    ) {
+      return;
+    }
+
+    const minReadyState =
+      typeof HTMLMediaElement
+        !== 'undefined'
+        ? HTMLMediaElement
+          .HAVE_CURRENT_DATA
+        : 2;
+
+    if (
+      !video.currentSrc
+      || (
+        video.readyState || 0
+      ) < minReadyState
+    ) {
+      console.log(
+        AUDIO_AHEAD_LOG_PREFIX,
+        'waiting for video/audio tracks',
+        {
+          videoId:
+            activeVideoId,
+          readyState:
+            video.readyState
+            || 0,
+          currentSrc:
+            video.currentSrc
+            || null,
+        }
+      );
+
+      return;
+    }
+
+    const tabCapture =
+      await requestTabCaptureAudioStream();
+
+    if (tabCapture.stream) {
+      await startAudioPipeline(
+        tabCapture.stream,
+        'tab_capture',
+        video,
+        'tabCapture'
+      );
+
+      return;
+    }
+
+    const videoCapture =
+      requestVideoCaptureStream(
+        video
+      );
+
+    if (videoCapture.stream) {
+      await startAudioPipeline(
+        videoCapture.stream,
+        'video_capture_stream',
+        video,
+        videoCapture.captureMethod
+      );
+
+      return;
+    }
+
+    const reasons = [
+      tabCapture.failureReason,
+      videoCapture.failureReason,
+    ].filter(Boolean);
+
+    const finalReason =
+      reasons.includes(
+        'audio_capture_permission_denied'
+      )
+        ? 'audio_capture_permission_denied'
+        : 'audio_capture_unavailable';
+
+    if (
+      finalReason ===
+      'audio_capture_permission_denied'
+    ) {
+      audioCapturePermissionDenied =
+        true;
+    }
+
+    lastAudioCaptionSource =
+      'audio_stt';
+
+    lastAudioCaptionFailureReason =
+      finalReason;
+
+    console.warn(
+      '[ISWEEP][AUDIO_CAPTIONS] audio_capture_unavailable',
+      {
+        videoId:
+          activeVideoId,
+        failure_reason:
+          finalReason,
+        tab_failure_reason:
+          tabCapture.failureReason
+          || null,
+        video_failure_reason:
+          videoCapture.failureReason
+          || null,
+      }
+    );
+  }
+
+  // ──────────────────────────────────────────────────────
+
+  function handleVideoIdChange(newVideoId) {
+    if (!newVideoId) {
+      if (activeVideoId) {
+        console.log(
+          MARKER_LOG_PREFIX,
+          'video id change',
+          {
+            from:
+              activeVideoId,
+            to:
+              null,
+          }
+        );
+      }
+
+      activeVideoId =
+        null;
+
+      preAnalyzedCleanCaptions =
+        [];
+
+      stopAudioCapture(
+        'video_id_lost'
+      );
+
+      resetMarkerEngine(
+        'missing_video_id'
+      );
+
+      updateCleanOverlay(
+        '',
+        0
+      );
+
+      return;
+    }
+
+    if (
+      newVideoId ===
+      activeVideoId
+    ) {
+      return;
+    }
+
+    console.log(
+      MARKER_LOG_PREFIX,
+      'video id change',
+      {
+        from:
+          activeVideoId,
+        to:
+          newVideoId,
+      }
+    );
+
+    activeVideoId =
+      newVideoId;
+
+    preAnalyzedCleanCaptions =
+      [];
+
+    preCachedAudioCleanCaptions =
+      [];
+
+    liveAudioCleanCaptions =
+      [];
+
+    lastAudioCaptionSource =
+      null;
+
+    lastAudioCaptionText =
+      '';
+
+    lastAudioCaptionReceivedAtMs =
+      0;
+
+    lastAudioCaptionFailureReason =
+      null;
+
+    audioCapturePermissionDenied =
+      false;
+
+    tabAudioCaptureState =
+      'idle';
+
+    stopAudioCapture(
+      'video_changed'
+    );
+
+    resetMarkerEngine(
+      'video changed'
+    );
+
+    if (
+      !cleanCaptionSettings
+        .cleanCaptionsEnabled
+    ) {
+      analyzeCurrentVideoMarkers(
+        false
+      );
+    } else {
+      markerFallbackReason =
+        'caption_mode_no_markers';
+    }
+
+    if (
+      ISWEEP_CONTENT_SCRIPT_AUDIO_AHEAD_ENABLED
+      && cleanCaptionSettings
+        .cleanCaptionsEnabled
+    ) {
+      setTimeout(
+        startAudioCapture,
+        1500
+      );
+    }
+  }
+
+  function startVideoWatchLoop() {
+    if (
+      cleanCaptionSettings
+        .cleanCaptionsEnabled
+    ) {
+      return;
+    }
+
+    handleVideoIdChange(
+      getCurrentVideoId()
+    );
+
+    if (
+      markerVideoWatchInterval
+    ) {
+      return;
+    }
+
+    console.log(
+      MARKER_LOG_PREFIX,
+      'video watch loop started',
+      {
+        intervalMs: 1000,
+      }
+    );
+
+    markerVideoWatchInterval =
+      setInterval(() => {
+        handleVideoIdChange(
+          getCurrentVideoId()
+        );
+
+        if (
+          ISWEEP_CONTENT_SCRIPT_AUDIO_AHEAD_ENABLED
+          && tabAudioCaptureState
+            !== 'ready'
+          && tabAudioCaptureState
+            !== 'starting'
+          && activeVideoId
+          && cleanCaptionSettings
+            .cleanCaptionsEnabled
+          && !audioAheadActive
+          && !audioCapturePermissionDenied
+        ) {
+          startAudioCapture();
+        }
+      }, 1000);
+  }
+
+  function startCaptionVideoWatchLoop() {
+    if (
+      !cleanCaptionSettings
+        .cleanCaptionsEnabled
+    ) {
+      return;
+    }
+
+    handleVideoIdChange(
+      getCurrentVideoId()
+    );
+
+    if (
+      captionVideoWatchInterval
+    ) {
+      return;
+    }
+
+    console.log(
+      '[ISWEEP][AUDIO_CAPTIONS] caption-mode video watch loop started',
+      {
+        intervalMs: 1000,
+      }
+    );
+
+    captionVideoWatchInterval =
+      setInterval(() => {
+        handleVideoIdChange(
+          getCurrentVideoId()
+        );
+
+        if (
+          ISWEEP_CONTENT_SCRIPT_AUDIO_AHEAD_ENABLED
+          && tabAudioCaptureState
+            !== 'ready'
+          && tabAudioCaptureState
+            !== 'starting'
+          && activeVideoId
+          && cleanCaptionSettings
+            .cleanCaptionsEnabled
+          && !audioAheadActive
+          && !audioCapturePermissionDenied
+        ) {
+          startAudioCapture();
+        }
+      }, 1000);
+  }
+
+  function log(...args) {
+    console.log(
+      LOG_PREFIX,
+      ...args
+    );
+  }
+
+  function normalizeCaptionWord(word) {
+    return (
+      word || ''
+    )
+      .toLowerCase()
+      .replace(
+        /[^a-z0-9']/g,
+        ''
+      )
+      .trim();
+  }
+
+  function normalizeCaptionText(text) {
+    return (
+      text || ''
+    )
+      .toLowerCase()
+      .replace(
+        /[^\w\s']/g,
+        ' '
+      )
+      .replace(
+        /\s+/g,
+        ' '
+      )
+      .trim();
+  }
+
+  function normalizeFilterWord(word) {
+    return (
+      word || ''
+    )
+      .toLowerCase()
+      .replace(
+        /[^\w*\s]/g,
+        ''
+      )
+      .trim();
   }

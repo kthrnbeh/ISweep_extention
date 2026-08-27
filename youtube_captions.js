@@ -3808,3 +3808,511 @@
       )
       .trim();
   }
+
+  function findVideo() {
+    if (videoEl && document.contains(videoEl)) return videoEl;
+    videoEl = document.querySelector('video');
+    return videoEl;
+  }
+
+  function setCachedPreferences(prefs) {
+    cachedPreferences = normalizePreferences(prefs);
+    return cachedPreferences;
+  }
+
+  function setCachedLocalReferences(references) {
+    cachedLocalReferences = references && typeof references === 'object'
+      ? references
+      : {};
+    return cachedLocalReferences;
+  }
+
+  function getFilterWords() {
+    const preferences = cachedPreferences || normalizePreferences({});
+    const language = preferences.categories?.language || {};
+    const enabled = preferences.enabled !== false
+      && preferences.blocklist?.enabled !== false
+      && language.enabled !== false;
+
+    return {
+      enabled,
+      words: enabled ? preferences.blocklist.items : [],
+      source: 'saved_preferences',
+    };
+  }
+
+  function expandWordFamily(word) {
+    return [word, ...(WORD_FAMILY_VARIANTS[word] || [])];
+  }
+
+  function escapeRegex(value) {
+    return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
+
+  function maskToRegex(word) {
+    const normalized = normalizeFilterWord(word);
+    if (!normalized) return /^$/;
+    return new RegExp(`^${escapeRegex(normalized).replace(/\\\*/g, '.*')}$`, 'i');
+  }
+
+  function buildStretchRegex(word) {
+    const normalized = normalizeFilterWord(word);
+    if (!normalized) return /^$/;
+    const body = Array.from(normalized)
+      .map((character) => `${escapeRegex(character)}+`)
+      .join('');
+    return new RegExp(`^${body}$`, 'i');
+  }
+
+  function isProlongedVariant(word, baseWord) {
+    return normalizeCaptionWord(word) !== normalizeCaptionWord(baseWord);
+  }
+
+  function deriveWordMatches(words, captionText) {
+    const sourceWords = Array.isArray(words) && words.length
+      ? words
+      : normalizeCaptionText(captionText).split(/\s+/).filter(Boolean);
+    const normalizedWords = sourceWords.map(normalizeCaptionWord);
+    const matches = new Map();
+    const filterMeta = getFilterWords();
+
+    if (!filterMeta.enabled) return matches;
+
+    filterMeta.words.forEach((rawFilter) => {
+      const filter = normalizeFilterWord(rawFilter);
+      if (!filter) return;
+
+      const regexes = expandWordFamily(filter).map(maskToRegex);
+      regexes.push(buildStretchRegex(filter));
+      normalizedWords.forEach((word, index) => {
+        if (!word || matches.has(index)) return;
+        if (regexes.some((regex) => regex.test(word))) {
+          matches.set(index, {
+            index,
+            baseWord: rawFilter,
+            matchedVariant: sourceWords[index],
+            prolonged: isProlongedVariant(word, filter),
+            source: filterMeta.source,
+          });
+        }
+      });
+    });
+
+    return matches;
+  }
+
+  function buildSelectedWordMuteWindows(words, selectedWords) {
+    const timedWords = Array.isArray(words) ? words : [];
+    const filters = new Set((selectedWords || []).map(normalizeFilterWord).filter(Boolean));
+    return timedWords
+      .map((entry) => {
+        const word = normalizeCaptionWord(entry?.word || entry?.text);
+        if (!word || !Number.isFinite(Number(entry?.start)) || !Number.isFinite(Number(entry?.end))) return null;
+        const match = Array.from(filters).find((filter) => (
+          maskToRegex(filter).test(word)
+          || buildStretchRegex(filter).test(word)
+          || expandWordFamily(filter).some((variant) => maskToRegex(variant).test(word))
+        ));
+        if (!match || Number(entry.end) <= Number(entry.start)) return null;
+        return {
+          start: Math.max(Number(entry.start) - WORD_MUTE_PRE_PAD_SEC, 0),
+          end: Number(entry.end) + WORD_MUTE_POST_PAD_SEC,
+          start_seconds: Math.max(Number(entry.start) - WORD_MUTE_PRE_PAD_SEC, 0),
+          end_seconds: Number(entry.end) + WORD_MUTE_POST_PAD_SEC,
+          matched_word: entry.word || entry.text,
+          selected_word: match,
+        };
+      })
+      .filter(Boolean)
+      .reduce((windows, window) => {
+        const previous = windows[windows.length - 1];
+        if (previous && window.start <= previous.end + WORD_GAP_MERGE_MS / 1000) {
+          previous.end = Math.max(previous.end, window.end);
+          previous.end_seconds = previous.end;
+          return windows;
+        }
+        windows.push(window);
+        return windows;
+      }, []);
+  }
+
+  function isSelectedWordMuteModeEnabled(settings = cleanCaptionSettings) {
+    return settings?.cleanCaptionWordMuteMode === 'captions_word_mute';
+  }
+
+  function extractTimedWordsFromAudioPayload(payload = {}) {
+    return normalizeTimedWords(payload.words);
+  }
+
+  function scheduleSelectedWordMutesFromAudioPayload(payload = {}, options = {}) {
+    if (!isSelectedWordMuteModeEnabled(options.settingsOverride || cleanCaptionSettings)) return [];
+    const words = extractTimedWordsFromAudioPayload(payload);
+    const selectedWords = Array.isArray(options.selectedWords)
+      ? options.selectedWords
+      : getFilterWords().words;
+    return buildSelectedWordMuteWindows(words, selectedWords);
+  }
+
+  function evaluateReferenceAlignmentCandidate(params = {}) {
+    const isNearMatch = (left, right) => {
+      if (left === right) return true;
+      if (left.length < 4 || right.length < 4 || Math.abs(left.length - right.length) > 1) return false;
+      let previous = Array.from({ length: right.length + 1 }, (_, index) => index);
+      for (let leftIndex = 1; leftIndex <= left.length; leftIndex += 1) {
+        const current = [leftIndex];
+        for (let rightIndex = 1; rightIndex <= right.length; rightIndex += 1) {
+          current[rightIndex] = Math.min(
+            current[rightIndex - 1] + 1,
+            previous[rightIndex] + 1,
+            previous[rightIndex - 1] + (left[leftIndex - 1] === right[rightIndex - 1] ? 0 : 1),
+          );
+        }
+        previous = current;
+      }
+      return previous[right.length] <= 1;
+    };
+    const audio = new Set(normalizeCaptionText(params.sttText).split(/\s+/).filter(Boolean));
+    const reference = new Set(normalizeCaptionText(params.candidateText).split(/\s+/).filter(Boolean));
+    const shared = Array.from(audio).filter((word) => reference.has(word)
+      || Array.from(reference).some((candidate) => isNearMatch(word, candidate)));
+    const meaningful = shared.filter((word) => !['i', 'you', 'the', 'a', 'and', 'we', 'are', 'to', 'of'].includes(word));
+    const timed = params.source === 'text_track' || params.source === 'page_caption_dom'
+      ? (Number(params.startSec) <= Number(params.assist?.cue_end_seconds) && Number(params.endSec) >= Number(params.assist?.cue_start_seconds) ? 1 : 0)
+      : 0.65;
+    const coverage = audio.size ? shared.length / audio.size : 0;
+    const aligned = meaningful.length >= 2 && coverage >= 0.5 && timed >= 0.45;
+    return {
+      status: aligned ? 'aligned' : 'rejected',
+      score: coverage * 0.65 + timed * 0.35,
+      audio_anchor_count: meaningful.length,
+      reference_coverage: coverage,
+      time_alignment_score: timed,
+      source: params.source || 'none',
+      reason: aligned ? 'strict_alignment_met' : 'insufficient_meaningful_audio_anchors',
+    };
+  }
+
+  function resolveCaptionAlignment(params = {}) {
+    const assist = params.assist || {};
+    const diagnostics = evaluateReferenceAlignmentCandidate({
+      ...params,
+      source: params.source || assist.source,
+      candidateText: assist.text,
+    });
+    if (assist.text && diagnostics.status === 'aligned') {
+      return { text: assist.text, sourceLabel: 'audio_stt_plus_page_evidence', usedEvidence: true, diagnostics };
+    }
+    const reference = params.localReference?.lines?.[0];
+    const referenceDiagnostics = reference
+      ? evaluateReferenceAlignmentCandidate({ ...params, source: 'local_reference', candidateText: reference.text })
+      : null;
+    if (reference && referenceDiagnostics?.status === 'aligned') {
+      return { text: reference.text, sourceLabel: 'audio_stt_plus_reference', usedEvidence: true, diagnostics: referenceDiagnostics };
+    }
+    return { text: String(params.sttText || ''), sourceLabel: 'audio_stt', usedEvidence: false, diagnostics: diagnostics.status ? diagnostics : { status: 'searching' } };
+  }
+
+  function fuseCaptionWithEvidence(sttText, assist, startSec, endSec) {
+    return resolveCaptionAlignment({ sttText, assist, startSec, endSec });
+  }
+
+  function getSourceHierarchy() {
+    return [
+      { source: 'pre_analyzed', class: 'timed_text', role: 'primary_when_available' },
+      { source: 'text_track', class: 'timed', role: 'primary_when_available' },
+      { source: 'page_caption_dom', class: 'current_visible', role: 'primary_visible_caption' },
+      { source: 'audio_stt_plus_page_evidence', class: 'timed', role: 'approved_stt_after_alignment' },
+      { source: 'audio_stt_plus_reference', class: 'timed', role: 'approved_stt_after_alignment' },
+      { source: 'audio_stt', class: 'timed', role: 'draft_hidden_until_aligned' },
+      { source: 'visible_transcript', class: 'context_only', role: 'context_only' },
+    ];
+  }
+
+  function runFastGuardFromTimedWords(words, selectedWords) {
+    return buildSelectedWordMuteWindows(words, selectedWords);
+  }
+
+  function triggerSpeechEndedClear(reason = 'speech_ended') {
+    scheduleSpeechEndedOverlayClear(reason);
+  }
+
+  function getCaptionStateSnapshot() {
+    return {
+      ...captionTimelineState,
+      assist: { ...captionTimelineState.assist },
+    };
+  }
+
+  function setReferenceAlignmentState(state = {}) {
+    captionTimelineState.referenceLineIndex = state.referenceLineIndex ?? null;
+    captionTimelineState.referenceLineId = state.referenceLineId ?? null;
+    captionTimelineState.referenceVideoTime = state.referenceVideoTime ?? null;
+  }
+
+  function rescheduleMuteRestoreTimers(nowSec) {
+    if (restoreMuteTimeout) clearTimeout(restoreMuteTimeout);
+    if (hardRestoreTimeout) clearTimeout(hardRestoreTimeout);
+    const video = findVideo();
+    if (!video || muteLockUntilSec <= nowSec) {
+      restoreMuteState('window_elapsed');
+      return;
+    }
+    const delayMs = Math.max((muteLockUntilSec - (video.currentTime || nowSec)) * 1000, 0);
+    restoreMuteTimeout = setTimeout(() => restoreMuteState('word_ended'), delayMs + 10);
+    hardRestoreTimeout = setTimeout(() => restoreMuteState('hard_timeout'), delayMs + HARD_RESTORE_GRACE_MS + 50);
+  }
+
+  function applyMuteWindow(startSec, endSec, reason = 'selected_word') {
+    const video = findVideo();
+    if (!video || !Number.isFinite(Number(endSec))) return false;
+    const nowSec = Number(video.currentTime || 0);
+    const start = Math.max(Number(startSec) || nowSec, 0);
+    const end = Math.max(Number(endSec), start);
+    if (end <= nowSec) return false;
+
+    if (muteLockUntilSec <= nowSec && shouldSkipMuteBecauseUserMuted(video.muted, isweepMuteActive)) {
+      lastMuteOwner = 'user';
+      return false;
+    }
+
+    if (muteLockUntilSec > nowSec) {
+      if (end <= muteLockUntilSec) return true;
+      muteLockUntilSec = end;
+      rescheduleMuteRestoreTimers(nowSec);
+      return true;
+    }
+
+    previousMuteState = Boolean(video.muted);
+    if (!setMutedState(true, `start:${reason}`)) return false;
+    isweepMuteActive = true;
+    userWasMutedBeforeIsweepMute = previousMuteState;
+    lastMuteOwner = 'isweep';
+    muteWindowStartSec = start;
+    muteLockUntilSec = end;
+    startMuteEnforcement();
+    rescheduleMuteRestoreTimers(nowSec);
+    console.log(WORD_MUTE_LOG_PREFIX, 'mute start', {
+      start_seconds: start,
+      end_seconds: end,
+      reason,
+    });
+    return true;
+  }
+
+  function getMarkerEarlyWindowSec(action) {
+    return action === 'mute' ? PROFANITY_MARKER_FIRE_EARLY_SEC : 0;
+  }
+
+  function shouldFireMarker(marker, nowSec, fired = new Set()) {
+    if (!marker || fired.has(marker.id)) return false;
+    const early = getMarkerEarlyWindowSec(marker.action);
+    return Number(nowSec) >= Number(marker.start_seconds) - early
+      && Number(nowSec) <= Number(marker.end_seconds || marker.start_seconds) + 0.25;
+  }
+
+  function observePageCaption(text, source = 'page_caption_dom') {
+    const cleanText = String(text || '').replace(/\s+/g, ' ').trim();
+    if (!cleanText) return;
+    const video = findVideo();
+    const nowSec = Number(video?.currentTime || 0);
+    const signature = `${activeVideoId || getCurrentVideoId()}|${normalizeCaptionText(cleanText)}`;
+    const nowMs = Date.now();
+    if (signature === lastPageSelectedWordMuteSignature
+      && nowMs - lastPageSelectedWordMuteAtMs < PAGE_SELECTED_WORD_MUTE_RETRIGGER_MS) return;
+
+    const matches = deriveWordMatches([], cleanText);
+    if (!matches.size) return;
+    lastPageSelectedWordMuteSignature = signature;
+    lastPageSelectedWordMuteAtMs = nowMs;
+    const duration = PAGE_SELECTED_WORD_MUTE_SEC;
+    applyMuteWindow(nowSec, nowSec + duration, `page_caption:${source}`);
+    console.log(WORD_MUTE_LOG_PREFIX, 'page selected word detected', {
+      source,
+      text: cleanText,
+      words: Array.from(matches.values()).map((entry) => entry.matchedVariant),
+    });
+  }
+
+  function extractCaptionText() {
+    return Array.from(document.querySelectorAll('.ytp-caption-segment'))
+      .map((element) => String(element.textContent || '').trim())
+      .filter(Boolean)
+      .join(' ')
+      .trim();
+  }
+
+  function pollVisibleCaptions() {
+    const video = findVideo();
+    if (!video) return;
+    handleVideoIdChange(getCurrentVideoId());
+    const text = extractCaptionText();
+    if (text) {
+      lastCaptionText = text;
+      lastLiveCaptionObservedAtMs = Date.now();
+      observePageCaption(text, 'page_caption_dom');
+      updateCleanOverlay(text, video.currentTime || 0);
+    }
+  }
+
+  function normalizeCleanCaptionSettings(settings) {
+    const raw = settings && typeof settings === 'object' ? settings : {};
+    const styles = new Set(['transparent_white', 'white_black', 'black_white']);
+    const sizes = new Set(['small', 'medium', 'large']);
+    const position = raw.cleanCaptionPosition && typeof raw.cleanCaptionPosition === 'object'
+      ? raw.cleanCaptionPosition
+      : {};
+    return {
+      ...CLEAN_CAPTION_DEFAULTS,
+      ...raw,
+      cleanCaptionsEnabled: raw.cleanCaptionsEnabled !== false,
+      cleanCaptionStyle: styles.has(raw.cleanCaptionStyle) ? raw.cleanCaptionStyle : CLEAN_CAPTION_DEFAULTS.cleanCaptionStyle,
+      cleanCaptionTextSize: sizes.has(raw.cleanCaptionTextSize) ? raw.cleanCaptionTextSize : CLEAN_CAPTION_DEFAULTS.cleanCaptionTextSize,
+      cleanCaptionPosition: {
+        x: Math.min(Math.max(Number(position.x) || 0.5, 0), 1),
+        y: Math.min(Math.max(Number(position.y) || 0.8, 0), 1),
+      },
+    };
+  }
+
+  function stripCategoryLabelsFromCaption(text) {
+    return String(text || '')
+      .replace(/\b(language|sexual|violence|profanity)\s*:?\s*/gi, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  function toCleanCaptionText(text) {
+    const value = String(text || '');
+    const filters = getFilterWords();
+    if (!filters.enabled || !filters.words.length) return value;
+    return value.split(/(\s+)/).map((part) => {
+      const word = normalizeCaptionWord(part);
+      return filters.words.some((filter) => (
+        maskToRegex(filter).test(word)
+        || buildStretchRegex(filter).test(word)
+        || expandWordFamily(filter).some((variant) => maskToRegex(variant).test(word))
+      )) ? '___' : part;
+    }).join('');
+  }
+
+  function updateCleanOverlay(liveText = lastCaptionText, nowSec = 0) {
+    if (!cleanCaptionSettings.cleanCaptionsEnabled || typeof document === 'undefined') {
+      if (cleanCaptionOverlayEl) cleanCaptionOverlayEl.style.display = 'none';
+      return;
+    }
+
+    if (!cleanCaptionOverlayEl) {
+      cleanCaptionOverlayEl = document.createElement('div');
+      cleanCaptionTextEl = document.createElement('div');
+      cleanCaptionOverlayEl.dataset.isweepCleanCaptions = 'true';
+      cleanCaptionOverlayEl.style.position = 'fixed';
+      cleanCaptionOverlayEl.style.zIndex = '2147483647';
+      cleanCaptionOverlayEl.style.maxWidth = '80vw';
+      cleanCaptionOverlayEl.style.pointerEvents = 'none';
+      cleanCaptionOverlayEl.style.textAlign = 'center';
+      cleanCaptionOverlayEl.appendChild(cleanCaptionTextEl);
+      (document.body || document.documentElement).appendChild(cleanCaptionOverlayEl);
+    }
+
+    const result = getBestCleanCaptionText(liveText, nowSec);
+    const text = result.text || '';
+    cleanCaptionTextEl.textContent = text;
+    cleanCaptionTextEl.style.fontSize = cleanCaptionSettings.cleanCaptionTextSize === 'large'
+      ? '1.8rem'
+      : cleanCaptionSettings.cleanCaptionTextSize === 'small' ? '1rem' : '1.4rem';
+    cleanCaptionTextEl.style.color = cleanCaptionSettings.cleanCaptionStyle === 'black_white' ? '#111' : '#fff';
+    cleanCaptionTextEl.style.background = cleanCaptionSettings.cleanCaptionStyle === 'transparent_white' ? 'transparent' : '#fff';
+    cleanCaptionTextEl.style.textShadow = cleanCaptionSettings.cleanCaptionStyle === 'black_white'
+      ? 'none'
+      : '0 1px 3px #000, 0 1px 8px #000';
+    cleanCaptionTextEl.style.padding = '0.15em 0.35em';
+    cleanCaptionTextEl.style.borderRadius = '3px';
+    cleanCaptionOverlayEl.style.left = `${cleanCaptionSettings.cleanCaptionPosition.x * 100}%`;
+    cleanCaptionOverlayEl.style.top = `${cleanCaptionSettings.cleanCaptionPosition.y * 100}%`;
+    cleanCaptionOverlayEl.style.transform = 'translate(-50%, -50%)';
+    cleanCaptionOverlayEl.style.display = text ? 'block' : 'none';
+  }
+
+  function resolveOverlayDisplayState(current, previous, nowMs, bridgeGapMs, options = {}) {
+    const next = current && current.text ? current : null;
+    if (next) return { ...next, visible: true, bridged: false };
+    if (previous?.visible && previous.text && nowMs - Number(previous.updatedAtMs || 0) <= bridgeGapMs) {
+      return { ...previous, visible: true, bridged: true };
+    }
+    if (options.cleanCaptionsEnabled) {
+      return { text: options.placeholderText || CLEAN_CC_PLACEHOLDER_TEXT, source: 'waiting_audio_text', visible: true, waiting: true };
+    }
+    return { text: '', source: null, visible: false };
+  }
+
+  function estimatePlaceholderWordWindow(text, captionStartSec, captionDurationSec, currentVideoTime, source) {
+    const words = String(text || '').trim().split(/\s+/).filter(Boolean);
+    const index = words.findIndex((word) => REDACTED_PLACEHOLDER_PATTERN.test(word));
+    if (index < 0) return null;
+    const duration = Math.max(Number(captionDurationSec) || 0, PLACEHOLDER_WORD_ESTIMATED_SEC * words.length);
+    const wordDuration = duration / words.length;
+    const estimated = Number(captionStartSec) + index * wordDuration;
+    const adjustedStart = Math.max(estimated - PLACEHOLDER_WORD_PREROLL_SEC, 0);
+    return {
+      text: String(text),
+      captionStartSec: Number(captionStartSec),
+      captionDurationSec: duration,
+      wordsBeforePlaceholder: index,
+      wordsAfterPlaceholder: words.length - index - 1,
+      totalWords: words.length,
+      estimatedPlaceholderStartSec: estimated,
+      estimatedNextCleanWordStartSec: estimated + wordDuration,
+      adjustedStart,
+      muteEndSec: Math.min(estimated + wordDuration + PLACEHOLDER_BLEED_SEC, adjustedStart + MAX_PLACEHOLDER_MUTE_SEC),
+      muteEndSource: 'clean_word_anchor',
+      source,
+    };
+  }
+
+  function hasNearbyAudioMuteMarker(events, startSec, endSec, anchorSec) {
+    return (events || []).some((event) => event?.action === 'mute'
+      && Number(event.end_seconds) >= Number(startSec)
+      && Number(event.start_seconds) <= Number(endSec)
+      && Math.abs(Number(event.start_seconds) - Number(anchorSec)) <= 0.35);
+  }
+
+  function getNormalizedCaptionPosition(width, height, overlayWidth, overlayHeight) {
+    return {
+      x: Math.max(0, Math.min(1, (width - overlayWidth) / Math.max(width, 1))),
+      y: Math.max(0, Math.min(1, (height - overlayHeight) / Math.max(height, 1))),
+    };
+  }
+
+  if (typeof __ISWEEP_TEST_MODE__ === 'undefined' || !__ISWEEP_TEST_MODE__) {
+    setInterval(pollVisibleCaptions, 100);
+    document.addEventListener('yt-navigate-finish', () => handleVideoIdChange(getCurrentVideoId()));
+    chrome?.storage?.local?.get?.([STORAGE_KEYS.PREFS, STORAGE_KEYS.CLEAN_CAPTION_SETTINGS, STORAGE_KEYS.LOCAL_REFERENCES])
+      ?.then?.((values) => {
+        setCachedPreferences(values?.[STORAGE_KEYS.PREFS]);
+        cleanCaptionSettings = normalizeCleanCaptionSettings(values?.[STORAGE_KEYS.CLEAN_CAPTION_SETTINGS]);
+        setCachedLocalReferences(values?.[STORAGE_KEYS.LOCAL_REFERENCES]);
+      })
+      .catch(() => {});
+  }
+
+  if (typeof globalThis !== 'undefined' && globalThis.__ISWEEP_TEST_MODE__) {
+    globalThis.__ISWEEP_YT_TEST_HOOKS__ = {
+      constants: { CLEAN_CAPTION_STALE_MS, CLEAN_CC_BRIDGE_GAP_MS, CLEAN_CC_STT_DISABLED_TEXT, AUDIO_CHUNK_SEC, AUDIO_CHUNK_OVERLAP_SEC, AUDIO_STT_HOLD_MS },
+      normalizeCleanCaptionSettings, setCachedPreferences, setCachedLocalReferences,
+      toCleanCaptionText, stripCategoryLabelsFromCaption, getBestCleanCaptionText,
+      getMuteWindowFromMarker, shouldISweepUnmute, shouldSkipMuteBecauseUserMuted,
+      estimatePlaceholderWordWindow, hasNearbyAudioMuteMarker, getMarkerEarlyWindowSec,
+      shouldFireMarker, resolveOverlayDisplayState, getEntryTimingBounds,
+      normalizePreAnalyzedCaptions, buildAudioResponseCaptions, shouldDedupAudioMarker,
+      markerSourcePriority, buildSelectedWordMuteWindows, deriveWordMatches,
+      isSelectedWordMuteModeEnabled, scheduleSelectedWordMutesFromAudioPayload,
+      extractTimedWordsFromAudioPayload, fuseCaptionWithEvidence,
+      evaluateReferenceAlignmentCandidate, resolveCaptionAlignment,
+      setReferenceAlignmentState, getSourceHierarchy,
+      runFastGuardFromTimedWords, triggerSpeechEndedClear,
+      getCaptionStateSnapshot,
+      getNormalizedCaptionPosition,
+    };
+  }
+
+})();

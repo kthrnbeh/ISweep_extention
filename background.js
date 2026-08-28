@@ -1610,10 +1610,19 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
 
 if (chrome.tabs?.onRemoved?.addListener) {
   chrome.tabs.onRemoved.addListener((tabId) => {
+    captionScriptInjectionByTabId.delete(Number(tabId));
     releaseTabCaptureSession(tabId, 'tab_removed');
     resetCaptionTimelineForTab(tabId, 'tab_closed');
     if (activeTabAudioCapture && Number(activeTabAudioCapture.tabId) === Number(tabId)) {
       stopTabAudioCapture('tab_removed').catch(() => {});
+    }
+  });
+}
+
+if (chrome.tabs?.onUpdated?.addListener) {
+  chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+    if (changeInfo.status === 'loading') {
+      captionScriptInjectionByTabId.delete(Number(tabId));
     }
   });
 }

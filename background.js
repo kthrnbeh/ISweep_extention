@@ -58,6 +58,7 @@ const recentCaptionByText = new Map();
 const recentRelayByTabId = new Map();
 const tabCaptureSessionByTabId = new Map();
 const captionTranscribeQueueByTabId = new Map();
+const captionScriptInjectionByTabId = new Set();
 let activeTabAudioCapture = null;
 let didLogBackendUrl = false;
 const CAPTION_TRANSCRIBE_INTERVAL_MS = 2000;
@@ -1316,7 +1317,18 @@ async function relayAudioCaptionResultToTab(result) {
     const errText = String(err?.message || err || '');
     const isNoReceiver = /receiving end does not exist|could not establish connection/i.test(errText);
     if (isNoReceiver && chrome.scripting?.executeScript) {
-      // Content script not loaded — try to inject youtube_captions.js, then retry once.
+      if (captionScriptInjectionByTabId.has(tabId)) {
+        audioCaptionDebug.relayFailureCount += 1;
+        audioCaptionDebug.lastError = 'relay_receiver_missing_after_injection';
+        audioCaptionDebug.updatedAt = Date.now();
+        console.warn(AUDIO_DIAG_LOG, 'relay failed', {
+          reason: 'receiver_missing_after_injection',
+          tabId,
+        });
+        return false;
+      }
+
+      captionScriptInjectionByTabId.add(tabId);
       try {
         await chrome.scripting.executeScript({
           target: { tabId },
@@ -1326,7 +1338,7 @@ async function relayAudioCaptionResultToTab(result) {
         await trySend(tabId);
         audioCaptionDebug.relaySuccessCount += 1;
         audioCaptionDebug.updatedAt = Date.now();
-        console.log(AUDIO_DIAG_LOG, 'relay success after inject', { tabId });
+        console.log(AUDIO_DIAG_LOG, 'youtube_captions.js injected once', { tabId });
         return true;
       } catch (retryErr) {
         audioCaptionDebug.relayFailureCount += 1;
@@ -1478,12 +1490,12 @@ async function getAuthToken() {
   return token;
 }
 
-async function ensureLocalDevCaptionToken(backendUrl) {
+async function ensureLocalDevCaptionToken(backendUrl, forceRefresh = false) {
   if (!isLocalBackendUrl(backendUrl)) return null;
 
   const store = await chrome.storage.local.get(['isweepLocalCaptionToken']);
   const cachedToken = store.isweepLocalCaptionToken;
-  if (cachedToken) return cachedToken;
+  if (cachedToken && !forceRefresh) return cachedToken;
 
   const payload = {
     email: LOCAL_DEV_CAPTION_EMAIL,
@@ -1524,6 +1536,14 @@ async function ensureLocalDevCaptionToken(backendUrl) {
   }
 
   return null;
+}
+
+async function refreshLocalDevCaptionToken(backendUrl) {
+  await chrome.storage.local.remove(['isweepLocalCaptionToken']);
+  console.warn('[ISWEEP][AUTH] local caption token rejected; refreshing and retrying once');
+  const token = await ensureLocalDevCaptionToken(backendUrl, true);
+  if (token) console.log('[ISWEEP][AUTH] local dev caption token refreshed');
+  return token;
 }
 
 async function fetchPreferences(token, backendUrl) {
@@ -2258,7 +2278,7 @@ async function handleMarkerAnalyze(videoId, forceRefresh = false) {
 // Caption-only audio transcription. Posts to /captions/transcribe and forwards transcript text.
 // Never calls handleCaptionDecision, never calls /event, never creates filter events.
 // Guard: AUDIO_CAPTION_FILTER_ACTIONS_ENABLED must remain false until filtering is intentionally re-enabled.
-async function handleAudioCaptionChunk(videoId, audioChunk, mimeType, startSeconds, endSeconds, audioSamples = null, sampleRate = null, channels = null, chunkMeta = null, tabId = null) {
+async function handleAudioCaptionChunk(videoId, audioChunk, mimeType, startSeconds, endSeconds, audioSamples = null, sampleRate = null, channels = null, chunkMeta = null, tabId = null, localTokenRetry = false) {
   if (!AUDIO_CAPTION_FILTER_ACTIONS_ENABLED) {
     // captions only; never call /event here
   }
@@ -2295,8 +2315,10 @@ async function handleAudioCaptionChunk(videoId, audioChunk, mimeType, startSecon
 
   const backendUrl = await getBackendUrl();
   let token = await getAuthToken();
+  let usingLocalCaptionToken = false;
   if (!token) {
     token = await ensureLocalDevCaptionToken(backendUrl);
+    usingLocalCaptionToken = Boolean(token);
   }
   if (!token) {
     captionReadinessState.lastError = 'missing_token';
@@ -2360,6 +2382,15 @@ async function handleAudioCaptionChunk(videoId, audioChunk, mimeType, startSecon
 
     responseBody = await res.text();
     if (res.status === 401) {
+      if (usingLocalCaptionToken && !localTokenRetry) {
+        token = await refreshLocalDevCaptionToken(backendUrl);
+        if (token) {
+          return handleAudioCaptionChunk(
+            videoId, audioChunk, mimeType, startSeconds, endSeconds,
+            audioSamples, sampleRate, channels, chunkMeta, tabId, true,
+          );
+        }
+      }
       await chrome.storage.local.remove([TOKEN_KEY, STORAGE_KEYS.USER_ID, STORAGE_KEYS.AUTH, STORAGE_KEYS.PREFS]);
       return { status: 'error', events: [], failure_reason: 'unauthorized' };
     }
@@ -2573,7 +2604,7 @@ async function handleAudioCaptionChunk(videoId, audioChunk, mimeType, startSecon
 
 // Receives a real-time audio chunk from youtube_captions.js, forwards to /captions/transcribe,
 // and returns { status, source, events, cleaned_captions, failure_reason, cached }.
-async function handleAudioAhead(videoId, audioChunk, mimeType, startSeconds, endSeconds, audioSamples = null, sampleRate = null, channels = null) {
+async function handleAudioAhead(videoId, audioChunk, mimeType, startSeconds, endSeconds, audioSamples = null, sampleRate = null, channels = null, localTokenRetry = false) {
   const AUDIO_LOG = '[ISWEEP][AUDIO_AHEAD]';
   const AUDIO_CAPTIONS_LOG = '[ISWEEP][AUDIO_CAPTIONS]';
   const cleanVideoId = (videoId || '').trim();
@@ -2593,8 +2624,10 @@ async function handleAudioAhead(videoId, audioChunk, mimeType, startSeconds, end
 
   const backendUrl = await getBackendUrl();
   let token = await getAuthToken();
+  let usingLocalCaptionToken = false;
   if (!token) {
     token = await ensureLocalDevCaptionToken(backendUrl);
+    usingLocalCaptionToken = Boolean(token);
   }
   if (!token) {
     console.warn('[ISWEEP][BG][AUTH] missing token affected /captions/transcribe', {
@@ -2651,6 +2684,15 @@ async function handleAudioAhead(videoId, audioChunk, mimeType, startSeconds, end
 
     responseBody = await res.text();
     if (res.status === 401) {
+      if (usingLocalCaptionToken && !localTokenRetry) {
+        token = await refreshLocalDevCaptionToken(backendUrl);
+        if (token) {
+          return handleAudioAhead(
+            videoId, audioChunk, mimeType, startSeconds, endSeconds,
+            audioSamples, sampleRate, channels, true,
+          );
+        }
+      }
       await chrome.storage.local.remove([TOKEN_KEY, STORAGE_KEYS.USER_ID, STORAGE_KEYS.AUTH, STORAGE_KEYS.PREFS]);
       return { status: 'error', events: [], failure_reason: 'unauthorized' };
     }

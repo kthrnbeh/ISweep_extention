@@ -16,7 +16,12 @@ function loadYoutubeTimingHooks() {
   const context = {
     console: { log() {}, warn() {}, error() {} },
     globalThis: {},
-    window: { innerWidth: 1280, innerHeight: 720 },
+    window: {
+      innerWidth: 1280,
+      innerHeight: 720,
+      location: { href: 'https://www.youtube.com/watch?v=current-video' },
+    },
+    URL,
     document: {
       querySelector(selector) {
         if (selector === 'video') return fakeVideo;
@@ -58,6 +63,173 @@ function loadYoutubeTimingHooks() {
   vm.runInContext(source, context, { filename: 'youtube_captions.js' });
   return context.__ISWEEP_YT_TEST_HOOKS__;
 }
+
+test('clean caption display keeps only the latest two sentences', () => {
+  const hooks = loadYoutubeTimingHooks();
+
+  assert.equal(
+    hooks.limitCaptionText('First sentence. Second sentence. Third sentence.'),
+    'Second sentence. Third sentence.'
+  );
+  assert.equal(
+    hooks.limitCaptionText('First chunk >> Second chunk >> Third chunk.'),
+    'First chunk Second chunk Third chunk.'
+  );
+});
+
+test('caption sizes use the exact configured pixel values', () => {
+  const hooks = loadYoutubeTimingHooks();
+  const extensionRoot = path.resolve(__dirname, '..');
+  const source = fs.readFileSync(path.join(extensionRoot, 'youtube_captions.js'), 'utf8');
+  const remoteSource = fs.readFileSync(path.join(extensionRoot, 'caption_remote.js'), 'utf8');
+
+  assert.equal(hooks.constants.CLEAN_CAPTION_SIZE_PX.small, '14px');
+  assert.equal(hooks.constants.CLEAN_CAPTION_SIZE_PX.medium, '18px');
+  assert.equal(hooks.constants.CLEAN_CAPTION_SIZE_PX.large, '20px');
+  assert.equal(source.includes("small: '14px'"), true);
+  assert.equal(source.includes("medium: '18px'"), true);
+  assert.equal(source.includes("large: '20px'"), true);
+  assert.equal(remoteSource.includes("? '14px'"), true);
+  assert.equal(remoteSource.includes("? '20px' : '18px'"), true);
+});
+
+test('native captions remain available as the restored fallback', () => {
+  const hooks = loadYoutubeTimingHooks();
+  const nowMs = Date.now();
+
+  assert.equal(hooks.constants.ISWEEP_YOUTUBE_DOM_FALLBACK_ENABLED, true);
+  assert.equal(hooks.constants.AUDIO_STT_DISPLAY_REQUIRES_ALIGNMENT, true);
+
+  const nativeOnly = hooks.getBestCleanCaptionText('native caption text', 20, {
+    preAnalyzedCaptions: [],
+    markerEntries: [],
+    liveAudioCaptions: [],
+    preCachedAudioCaptions: [],
+    liveCaptionObservedAtMs: nowMs,
+    nowMs,
+  });
+  assert.equal(nativeOnly.text, 'native caption text');
+  assert.equal(nativeOnly.source, 'live_masked');
+
+  const audioCaption = hooks.getBestCleanCaptionText('native caption text', 20.5, {
+    preAnalyzedCaptions: [],
+    markerEntries: [],
+    liveAudioCaptions: [{
+      start_seconds: 20,
+      end_seconds: 21,
+      text: 'what the ___',
+      clean_text: 'what the ___',
+      words: [
+        { word: 'what', start: 20.0, end: 20.2 },
+        { word: 'the', start: 20.25, end: 20.4 },
+        { word: '___', start: 20.45, end: 20.8 },
+      ],
+    }],
+    preCachedAudioCaptions: [],
+    liveCaptionObservedAtMs: nowMs,
+    nowMs,
+  });
+  assert.equal(audioCaption.source, 'live_masked');
+  assert.equal(audioCaption.text, 'native caption text');
+});
+
+test('native caption remote engine remains loaded as the fallback renderer', () => {
+  const extensionRoot = path.resolve(__dirname, '..');
+  const manifest = JSON.parse(fs.readFileSync(path.join(extensionRoot, 'manifest.json'), 'utf8'));
+  const youtubeScripts = manifest.content_scripts
+    .filter((entry) => entry.matches?.some((match) => String(match).includes('youtube.com/watch')))
+    .flatMap((entry) => entry.js || []);
+
+  assert.equal(youtubeScripts.includes('youtube_captions.js'), true);
+  assert.equal(youtubeScripts.includes('caption_remote.js'), true);
+});
+
+test('filtered caption words use whole-word matching and render as underscores', () => {
+  const hooks = loadYoutubeTimingHooks();
+  hooks.setCachedPreferences({
+    enabled: true,
+    blocklist: { enabled: true, items: ['hell'] },
+    categories: { language: { enabled: true, items: ['hell'] } },
+  });
+
+  const masked = hooks.toCleanCaptionText('What the hell, hello shell.');
+  assert.equal(masked.includes('hell,'), false);
+  assert.equal(masked.includes('___'), true);
+  assert.equal(masked.includes('hello'), true);
+  assert.equal(masked.includes('shell'), true);
+});
+
+test('audio word timestamps stay on the source video timeline', () => {
+  const hooks = loadYoutubeTimingHooks();
+  const entries = hooks.buildAudioResponseCaptions({
+    source: 'audio_stt_live',
+    start_seconds: 60,
+    end_seconds: 63,
+    text: 'hello world',
+    words: [
+      { word: 'hello', start: 60.4, end: 60.8 },
+      { word: 'world', start: 61.1, end: 61.5 },
+    ],
+  }, 60, 63);
+
+  assert.equal(entries.length, 1);
+  const bounds = hooks.getEntryTimingBounds(entries[0]);
+  assert.equal(bounds.start_seconds, 60.4);
+  assert.equal(bounds.end_seconds, 61.5);
+  assert.notEqual(bounds.start_seconds, 30.4);
+  assert.notEqual(bounds.start_seconds, 90.4);
+});
+
+test('audio captions from an earlier video are rejected', () => {
+  const hooks = loadYoutubeTimingHooks();
+
+  assert.equal(hooks.acceptAudioCaptionRelay({
+    video_id: 'previous-video',
+    session_id: 'old-session',
+    sequence_number: 1,
+    start_seconds: 60,
+    end_seconds: 63,
+    text: 'stale caption',
+  }), false);
+});
+
+test('clean caption watch-ahead permits only mute markers within 30 seconds', () => {
+  const hooks = loadYoutubeTimingHooks();
+  const settings = {
+    cleanCaptionsEnabled: true,
+    cleanCaptionWordMuteMode: 'captions_word_mute',
+  };
+
+  assert.equal(hooks.constants.WATCH_AHEAD_SECONDS, 30);
+  assert.equal(hooks.shouldAllowMarkerAction({ action: 'mute', start_seconds: 129 }, 100, settings), true);
+  assert.equal(hooks.shouldAllowMarkerAction({ action: 'mute', start_seconds: 131 }, 100, settings), false);
+  assert.equal(hooks.shouldAllowMarkerAction({ action: 'skip', start_seconds: 101 }, 100, settings), false);
+  assert.equal(hooks.shouldAllowMarkerAction({ action: 'fast_forward', start_seconds: 101 }, 100, settings), false);
+  assert.equal(hooks.shouldAllowMarkerAction({ action: 'mute', start_seconds: 101 }, 100, {
+    cleanCaptionsEnabled: true,
+    cleanCaptionWordMuteMode: 'captions_only',
+  }), false);
+});
+
+test('clean caption display stops at the currently spoken timed word', () => {
+  const hooks = loadYoutubeTimingHooks();
+
+  assert.equal(
+    hooks.limitCaptionText(
+      'one two three four',
+      {
+        words: [
+          { word: 'one', start: 10.0, end: 10.3 },
+          { word: 'two', start: 10.4, end: 10.7 },
+          { word: 'three', start: 10.8, end: 11.1 },
+          { word: 'four', start: 11.2, end: 11.5 },
+        ],
+      },
+      10.55
+    ),
+    'one two'
+  );
+});
 
 test('placeholder timing estimates hidden word position, not line start', () => {
   const hooks = loadYoutubeTimingHooks();
@@ -142,7 +314,7 @@ test('clean caption settings normalization applies defaults safely', () => {
     cleanCaptionTextSize: 'huge',
   });
   assert.equal(fallback.cleanCaptionsEnabled, true);
-  assert.equal(fallback.cleanCaptionStyle, 'transparent_white');
+  assert.equal(fallback.cleanCaptionStyle, 'black_white');
   assert.equal(fallback.cleanCaptionTextSize, 'medium');
   assert.equal(fallback.cleanCaptionPosition.x, 0.5);
   assert.equal(fallback.cleanCaptionPosition.y, 0.8);
@@ -769,6 +941,14 @@ test('overlay drag save helper returns normalized position', () => {
   assert.ok(pos.y > 0 && pos.y < 1);
 });
 
+test('caption position stays inside the player and away from controls', () => {
+  const hooks = loadYoutubeTimingHooks();
+  const pos = hooks.getNormalizedCaptionPosition(1000, 600, 400, 80, -100, 1000);
+
+  assert.equal(pos.x, 0.2);
+  assert.equal(pos.y, (600 - 40 - 46) / 600);
+});
+
 test('audio capture path does not use microphone getUserMedia', () => {
   const filePath = path.resolve(__dirname, '..', 'youtube_captions.js');
   const source = fs.readFileSync(filePath, 'utf8');
@@ -1007,6 +1187,14 @@ test('selected word Hell normalizes to hell and matches', () => {
     ['Hell'],
   );
   assert.equal(windows.length, 1);
+});
+
+test('page selected-word mute duration is adaptive and bounded', () => {
+  const hooks = loadYoutubeTimingHooks();
+  assert.equal(hooks.estimatePageWordDurationSec('what the hell', 0), 0.30);
+  assert.equal(hooks.estimatePageWordDurationSec('what the hell', 1.5), 0.5);
+  assert.equal(hooks.estimatePageSelectedWordMuteDurationSec('hell', 0.30), 0.30);
+  assert.equal(hooks.estimatePageSelectedWordMuteDurationSec('extraordinarilylongword', 4), 0.8);
 });
 
 test('mode captions_only does not schedule selected-word mute windows', () => {

@@ -1,15 +1,14 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8"> <!-- Ensure correct character encoding -->
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"> <!-- Responsive on mobile -->
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>ISweep</title>
-  <link rel="stylesheet" href="popup.css"> <!-- Popup styles -->
+  <link rel="stylesheet" href="popup.css">
 </head>
 <body>
   <!-- Logged Out State -->
-  <div id="stateLoggedOut" class="state-container hidden"> <!-- Container shown when user is signed out -->
-    <!-- Header with Logo -->
+  <div id="stateLoggedOut" class="state-container hidden">
     <div class="header">
       <div class="logo-container">
         <div class="logo-icon">🧹</div>
@@ -17,115 +16,136 @@
       </div>
     </div>
 
-    <!-- Main Content -->
     <div class="content">
       <h1 class="title">Sign in to Enable ISweep</h1>
       <p class="subtitle">Login to enable safe content filtering.</p>
-      
-      <!-- Primary Action -->
+
       <button id="btnLogin" class="btn btn-primary">Log in with Email</button>
-      
-      <!-- Secondary Link -->
+
       <div class="secondary-links">
         <a href="#" id="linkCreateAccount" class="link-secondary">No account? Create one here.</a>
       </div>
 
-      <!-- Quick Email Login (Dev Mode) -->
-      <div id="quickLoginForm" class="quick-login hidden"> <!-- Inline quick login form -->
-        <input type="email" id="emailInput" placeholder="Enter your email" class="email-input"> <!-- Email input -->
-        <input type="password" id="passwordInput" placeholder="Enter your password" class="email-input"> <!-- Password input -->
-        <button id="btnQuickLogin" class="btn btn-secondary">Sign In</button> <!-- Submit quick login -->
+      <div id="quickLoginForm" class="quick-login hidden">
+        <input type="email" id="emailInput" placeholder="Enter your email" class="email-input">
+        <input type="password" id="passwordInput" placeholder="Enter your password" class="email-input">
+        <button id="btnQuickLogin" class="btn btn-secondary">Sign In</button>
         <button id="btnCreateLocalDevAccount" class="btn btn-secondary" type="button">Create Local Dev Account</button>
-        <button id="btnCancelQuickLogin" class="btn-link">Cancel</button> <!-- Cancel quick login -->
+        <button id="btnCancelQuickLogin" class="btn-link">Cancel</button>
       </div>
     </div>
 
-    <!-- Footer -->
     <div class="footer">
       <span>© 2025 ISweep Inc.</span>
     </div>
   </div>
 
   <!-- Logged In State -->
-  <div id="stateLoggedIn" class="state-container hidden"> <!-- Container shown when user is signed in -->
-    <!-- Header with Logo and Avatar -->
+  <div id="stateLoggedIn" class="state-container hidden">
     <div class="header">
       <div class="logo-container">
         <div class="logo-icon">🧹</div>
         <span class="logo-text">ISweep</span>
       </div>
-      <div class="avatar-circle" id="userAvatar"> <!-- Avatar circle shows initials -->
+      <div class="avatar-circle" id="userAvatar">
         <span id="userInitials">KB</span>
       </div>
     </div>
 
-    <!-- Main Content -->
     <div class="content">
       <h2 class="greeting">Welcome back, <span id="userName">User</span>!</h2>
       <p id="signedInStatus" class="subtitle">Signed in.</p>
-      
-      <!-- Status Indicator -->
+
       <div class="status-container">
         <span class="status-dot" id="statusDot"></span>
         <span class="status-text" id="statusText">ISweep is Active</span>
       </div>
 
       <!-- Clean Caption Controls -->
-      <div class="caption-controls" id="captionControls">
+      <section class="caption-controls" id="captionControls" aria-labelledby="captionControlsTitle">
         <div class="caption-controls-header">
-          <button id="btnCleanCaptionsToggle" class="btn-cc" type="button" aria-pressed="true" title="Toggle clean captions">[CC]</button>
-          <button id="btnCaptionAppearance" class="btn-dot" type="button" aria-expanded="false" title="Caption appearance settings">•</button>
+          <div class="caption-controls-copy">
+            <h3 id="captionControlsTitle" class="caption-controls-title">Captions</h3>
+            <p class="caption-controls-subtitle">Use captions as the timing signal for selected-word muting.</p>
+          </div>
+          <button id="btnCleanCaptionsToggle" class="btn-cc" type="button" aria-pressed="true" title="Turn clean captions on or off">[CC]</button>
         </div>
+
         <div id="captionRuntimeStatus" class="caption-runtime-status">Audio captions: STT disabled</div>
-        <div id="captionReadinessPanel" class="caption-readiness-panel" aria-live="polite">
-          <div class="caption-readiness-row"><span class="k">Caption state</span><span id="captionStateValue" class="v">Listening</span></div>
-          <div class="caption-readiness-row"><span class="k">Primary caption source</span><span id="primaryCaptionSourceValue" class="v">Waiting for audio</span></div>
-          <div class="caption-readiness-row"><span class="k">Backend</span><span id="backendStateValue" class="v">Offline</span></div>
-          <div class="caption-readiness-row"><span class="k">URL</span><span id="backendUrlValue" class="v">http://127.0.0.1:5000</span></div>
-          <div class="caption-readiness-row"><span class="k">Last error</span><span id="backendLastErrorValue" class="v">none</span></div>
-          <div class="caption-readiness-row"><span class="k">STT status</span><span id="backendSttStatusValue" class="v">unknown</span></div>
-          <div class="caption-readiness-row"><span class="k">Last caption</span><span id="backendLastSuccessCaptionValue" class="v">never</span></div>
-          <div class="caption-readiness-row"><span class="k">Current chunk</span><span id="currentChunkIdValue" class="v">none</span></div>
-          <div class="caption-readiness-row"><span class="k">Last accepted window</span><span id="lastAcceptedWindowValue" class="v">none</span></div>
-          <div class="caption-readiness-row"><span class="k">Last drop reason</span><span id="lastDropReasonValue" class="v">none</span></div>
-          <div class="caption-readiness-row"><span class="k">Page Text Assist</span><span id="pageTextAssistSourceValue" class="v">unavailable</span></div>
-          <div class="caption-readiness-row"><span class="k">STT/Page agreement</span><span id="sttPageAgreementValue" class="v">unavailable</span></div>
-          <div class="caption-readiness-row"><span class="k">Caption mode</span><span id="captionModeValue" class="v">Captions Only</span></div>
-          <div class="caption-readiness-row"><span class="k">Selected words</span><span id="selectedWordsCountValue" class="v">0</span></div>
-          <div class="caption-readiness-row"><span class="k">Preview</span><span id="selectedWordsPreviewValue" class="v">(none)</span></div>
-        </div>
-        <div id="captionSettingsPanel" class="caption-settings hidden">
-          <label class="caption-setting-row">
-            <span>Style</span>
+
+        <div id="captionSettingsPanel" class="caption-settings">
+          <label class="caption-setting-row" for="cleanCaptionStyle">
+            <span class="caption-setting-label">Caption style</span>
             <select id="cleanCaptionStyle">
-              <option value="transparent_white">Transparent + White</option>
-              <option value="white_black">White + Black</option>
+              <option value="black_white">Black background + White text</option>
+              <option value="transparent_white">Dark/transparent + White text</option>
+              <option value="white_black">White + Black text</option>
             </select>
           </label>
-          <label class="caption-setting-row">
-            <span>Text size</span>
+
+          <label class="caption-setting-row" for="cleanCaptionTextSize">
+            <span class="caption-setting-label">Text size</span>
             <select id="cleanCaptionTextSize">
               <option value="small">Small</option>
               <option value="medium">Medium</option>
               <option value="large">Large</option>
             </select>
           </label>
-          <label class="caption-setting-row">
-            <span>Caption mode</span>
+
+          <label class="caption-setting-row" for="cleanCaptionWordMuteMode">
+            <span class="caption-setting-label">Caption behavior</span>
             <select id="cleanCaptionWordMuteMode">
               <option value="captions_only">Captions Only</option>
               <option value="captions_word_mute">Captions + Selected Word Mute</option>
             </select>
           </label>
-          <button id="btnResetCaptionPosition" class="btn-link" type="button">Reset caption position</button>
-        </div>
-      </div>
 
-      <!-- Primary Action -->
-      <button id="btnOpenSettings" class="btn btn-primary">Open Filters →</button> <!-- Opens Filters page -->
-      <button id="btnSyncPrefs" class="btn btn-secondary btn-sync-prefs">Sync Preferences</button> <!-- Sync preferences with backend -->
-      
-      <!-- Secondary Links -->
+          <p class="caption-setting-help">
+            In Selected Word Mute mode, a selected word appearing in captions tells ISweep to temporarily mute YouTube, then restore the previous sound state after the word passes.
+          </p>
+
+          <button id="btnResetCaptionPosition" class="btn-link caption-reset-position" type="button">Reset caption position</button>
+        </div>
+
+        <div class="caption-selection-summary" aria-live="polite">
+          <div class="caption-selection-row">
+            <span>Mode</span>
+            <strong id="captionModeValue">Captions Only</strong>
+          </div>
+          <div class="caption-selection-row">
+            <span>Selected words</span>
+            <strong id="selectedWordsCountValue">0</strong>
+          </div>
+          <div class="caption-selection-preview">
+            <span>Preview</span>
+            <div id="selectedWordsPreviewValue">(none)</div>
+          </div>
+        </div>
+
+        <button id="btnCaptionAppearance" class="btn-caption-settings" type="button" aria-expanded="true" title="Show or hide caption options">Show / hide caption options</button>
+
+        <details class="caption-diagnostics">
+          <summary>Technical caption status</summary>
+          <div id="captionReadinessPanel" class="caption-readiness-panel" aria-live="polite">
+            <div class="caption-readiness-row"><span class="k">Caption state</span><span id="captionStateValue" class="v">Listening</span></div>
+            <div class="caption-readiness-row"><span class="k">Primary caption source</span><span id="primaryCaptionSourceValue" class="v">Waiting for audio</span></div>
+            <div class="caption-readiness-row"><span class="k">Backend</span><span id="backendStateValue" class="v">Offline</span></div>
+            <div class="caption-readiness-row"><span class="k">URL</span><span id="backendUrlValue" class="v">http://127.0.0.1:5000</span></div>
+            <div class="caption-readiness-row"><span class="k">Last error</span><span id="backendLastErrorValue" class="v">none</span></div>
+            <div class="caption-readiness-row"><span class="k">STT status</span><span id="backendSttStatusValue" class="v">unknown</span></div>
+            <div class="caption-readiness-row"><span class="k">Last caption</span><span id="backendLastSuccessCaptionValue" class="v">never</span></div>
+            <div class="caption-readiness-row"><span class="k">Current chunk</span><span id="currentChunkIdValue" class="v">none</span></div>
+            <div class="caption-readiness-row"><span class="k">Last accepted window</span><span id="lastAcceptedWindowValue" class="v">none</span></div>
+            <div class="caption-readiness-row"><span class="k">Last drop reason</span><span id="lastDropReasonValue" class="v">none</span></div>
+            <div class="caption-readiness-row"><span class="k">Page Text Assist</span><span id="pageTextAssistSourceValue" class="v">unavailable</span></div>
+            <div class="caption-readiness-row"><span class="k">STT/Page agreement</span><span id="sttPageAgreementValue" class="v">unavailable</span></div>
+          </div>
+        </details>
+      </section>
+
+      <button id="btnOpenSettings" class="btn btn-primary">Open Filters →</button>
+      <button id="btnSyncPrefs" class="btn btn-secondary btn-sync-prefs">Sync Preferences</button>
+
       <div class="secondary-links-row">
         <a href="#" id="linkResetFilters" class="link-secondary">Reset Filters</a>
         <span class="link-divider">|</span>
@@ -135,12 +155,11 @@
       </div>
     </div>
 
-    <!-- Footer -->
     <div class="footer">
       <span>© 2025 ISweep Inc.</span>
     </div>
   </div>
 
-  <script src="popup.js"></script> <!-- Popup controller script -->
+  <script src="popup.js"></script>
 </body>
 </html>

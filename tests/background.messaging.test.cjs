@@ -107,6 +107,180 @@ test('caption runtime status prefers YouTube fallback when active tab reports li
   assert.equal(result.sourceLabel, 'YouTube Fallback');
 });
 
+test('preference sync reports explicit empty selections as synced, not missing', async () => {
+  const bg = loadBackgroundContext();
+  bg.getAuthToken = async () => 'token';
+  bg.getBackendUrl = async () => 'http://127.0.0.1:5000';
+  bg.fetch = async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      enabled: true,
+      categories: { language: { enabled: true, items: [] } },
+      blocklist: { enabled: true, items: [] },
+    }),
+  });
+
+  const result = await bg.handleSyncPrefs();
+  assert.equal(result.ok, true);
+  assert.equal(result.selectedWordCount, 0);
+
+  const snapshot = await bg.getCaptionModeSnapshot();
+  assert.equal(snapshot.selectedWordCount, 0);
+  assert.equal(snapshot.selectedWordSource, 'synced');
+});
+
+test('preference sync carries selected hell into extension storage and reports its count', async () => {
+  const bg = loadBackgroundContext();
+  bg.getAuthToken = async () => 'token';
+  bg.getBackendUrl = async () => 'http://127.0.0.1:5000';
+  bg.fetch = async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      enabled: true,
+      categories: { language: { enabled: true, items: ['hell'] } },
+      blocklist: { enabled: true, items: ['hell'] },
+    }),
+  });
+
+  const result = await bg.handleSyncPrefs();
+  assert.equal(result.ok, true);
+  assert.equal(result.selectedWordCount, 1);
+  assert.deepEqual(Array.from(result.selectedWordPreview), ['hell']);
+
+  const snapshot = await bg.getCaptionModeSnapshot();
+  assert.equal(snapshot.selectedWordCount, 1);
+  assert.equal(snapshot.selectedWordSource, 'synced');
+});
+
+test('preference sync repairs an empty backend response from the hosted Filter selection', async () => {
+  const bg = loadBackgroundContext();
+  bg.getAuthToken = async () => 'token';
+  bg.getBackendUrl = async () => 'http://127.0.0.1:5000';
+  const requests = [];
+  bg.fetch = async (url, options = {}) => {
+    requests.push({ url, method: options.method || 'GET', body: options.body || null });
+    if ((options.method || 'GET') === 'PUT') {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          enabled: true,
+          categories: { language: { enabled: true, items: ['hell'] } },
+          blocklist: { enabled: true, items: ['hell'] },
+        }),
+      };
+    }
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        enabled: true,
+        categories: { language: { enabled: true, items: [] } },
+        blocklist: { enabled: true, items: [] },
+      }),
+    };
+  };
+
+  const result = await bg.handleSyncPrefs({
+    expectedSource: 'saved_filter_settings',
+    expectedUserId: '7',
+    expectedPreferences: {
+      enabled: true,
+      categories: { language: { enabled: true, items: ['hell'] } },
+      blocklist: { enabled: true, items: ['hell'] },
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.selectedWordCount, 1);
+  assert.equal(result.preferenceSource, 'hosted_filter_repaired_backend');
+  assert.equal(requests.some((request) => request.method === 'PUT'), true);
+  assert.equal((await bg.getCaptionModeSnapshot()).selectedWordCount, 1);
+});
+
+test('preference sync rejects a backend response without an individual word list', async () => {
+  const bg = loadBackgroundContext();
+  bg.getAuthToken = async () => 'token';
+  bg.getBackendUrl = async () => 'http://127.0.0.1:5000';
+  bg.fetch = async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      enabled: true,
+      categories: { language: { enabled: true } },
+    }),
+  });
+
+  const result = await bg.handleSyncPrefs();
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'preference_word_list_missing');
+});
+
+test('preference sync rejects conflicting individual word lists instead of choosing zero', async () => {
+  const bg = loadBackgroundContext();
+  bg.getAuthToken = async () => 'token';
+  bg.getBackendUrl = async () => 'http://127.0.0.1:5000';
+  bg.fetch = async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      enabled: true,
+      categories: { language: { enabled: true, items: ['hell'] } },
+      blocklist: { enabled: true, items: [] },
+    }),
+  });
+
+  const result = await bg.handleSyncPrefs();
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'preference_word_list_conflict');
+});
+
+test('explicitly empty Filter selection repairs stale backend words to an empty list', async () => {
+  const bg = loadBackgroundContext();
+  bg.getAuthToken = async () => 'token';
+  bg.getBackendUrl = async () => 'http://127.0.0.1:5000';
+  const requests = [];
+  bg.fetch = async (url, options = {}) => {
+    requests.push({ method: options.method || 'GET', body: options.body || null });
+    if ((options.method || 'GET') === 'PUT') {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          enabled: true,
+          categories: { language: { enabled: true, items: [] } },
+          blocklist: { enabled: true, items: [] },
+        }),
+      };
+    }
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        enabled: true,
+        categories: { language: { enabled: true, items: ['hell'] } },
+        blocklist: { enabled: true, items: ['hell'] },
+      }),
+    };
+  };
+
+  const result = await bg.handleSyncPrefs({
+    expectedSource: 'saved_filter_settings',
+    expectedPreferences: {
+      enabled: true,
+      categories: { language: { enabled: true, items: [] } },
+      blocklist: { enabled: true, items: [] },
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.selectedWordCount, 0);
+  assert.equal(result.preferenceSource, 'hosted_filter_repaired_backend');
+  assert.equal(requests.some((request) => request.method === 'PUT'), true);
+});
+
 test('caption runtime status reports listening when health has stt_enabled true and no transcript yet', async () => {
   const bg = loadBackgroundContext();
   bg.getCaptionBackendStatus = async () => ({

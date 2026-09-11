@@ -15,6 +15,8 @@ const AUDIO_SAMPLE_RATE = 16000;
 const AUDIO_CAPTION_CHUNK_SEC = 3.0;
 const AUDIO_CAPTION_OVERLAP_SEC = 1.0;
 const AUDIO_CAPTION_MIN_SEND_SEC = 2.25;
+const VIDEO_CLOCK_POLL_MS = 250;
+const VIDEO_CLOCK_DRIFT_TOLERANCE_SEC = 1.25;
 const VAD_RMS_THRESHOLD = 0.012;
 const VAD_SPEECH_END_HOLD_MS = 1200;
 
@@ -24,6 +26,10 @@ let captureStartedAtMs = 0;
 let activeTabId = null;
 let captureSessionId = '';
 let captureSequenceNumber = 0;
+let videoClockPollTimer = null;
+let videoClockTimeSec = null;
+let videoClockPaused = false;
+let videoClockObservedAtMs = 0;
 let vadSpeechActive = false;
 let vadLastSpeechAtMs = 0;
 let vadLastSentAtMs = 0;
@@ -70,6 +76,80 @@ function buildCaptureSessionId(tabId, videoId) {
   const safeTab = Number.isFinite(Number(tabId)) ? Number(tabId) : 0;
   const safeVideo = String(videoId || '').trim() || 'unknown_video';
   return `${safeTab}:${safeVideo}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function resolveSourceTimelineWindow(chunkStartSec, durationSec, clockTimeSec, paused = false) {
+  const start = Number(chunkStartSec);
+  const duration = Number(durationSec);
+  const clock = Number(clockTimeSec);
+
+  if (!Number.isFinite(start) || !Number.isFinite(duration) || duration <= 0) {
+    return { discard: true, reason: 'invalid_audio_window', start_seconds: Number.isFinite(clock) ? clock : 0 };
+  }
+
+  if (paused && Number.isFinite(clock)) {
+    return { discard: true, reason: 'video_paused', start_seconds: Math.max(clock, 0) };
+  }
+
+  const predictedEnd = start + duration;
+  if (Number.isFinite(clock)) {
+    const drift = clock - predictedEnd;
+    if (Math.abs(drift) > VIDEO_CLOCK_DRIFT_TOLERANCE_SEC) {
+      return { discard: true, reason: 'video_clock_discontinuity', start_seconds: Math.max(clock, 0) };
+    }
+
+    return {
+      discard: false,
+      start_seconds: Math.max(clock - duration, 0),
+      end_seconds: Math.max(clock, 0),
+      clock_aligned: true,
+    };
+  }
+
+  return {
+    discard: false,
+    start_seconds: Math.max(start, 0),
+    end_seconds: Math.max(predictedEnd, start + 0.05),
+    clock_aligned: false,
+  };
+}
+
+async function pollVideoClock() {
+  if (!running || !Number.isFinite(Number(activeTabId)) || !chrome?.tabs?.sendMessage) return;
+
+  try {
+    const response = await chrome.tabs.sendMessage(Number(activeTabId), {
+      type: 'isweep_get_video_clock',
+      video_id: activeVideoId,
+    });
+    const currentTime = Number(response?.current_time);
+    if (
+      response?.ok === true
+      && String(response.video_id || '').trim() === activeVideoId
+      && Number.isFinite(currentTime)
+    ) {
+      videoClockTimeSec = Math.max(currentTime, 0);
+      videoClockPaused = response.paused === true;
+      videoClockObservedAtMs = Date.now();
+    }
+  } catch (_) {
+    // The content script can be between YouTube SPA documents. Keep the last
+    // source clock until the next successful poll rather than shifting time.
+  }
+}
+
+function startVideoClockPolling() {
+  if (videoClockPollTimer) clearInterval(videoClockPollTimer);
+  void pollVideoClock();
+  videoClockPollTimer = setInterval(() => {
+    void pollVideoClock();
+  }, VIDEO_CLOCK_POLL_MS);
+}
+
+if (typeof globalThis !== 'undefined' && globalThis.__ISWEEP_TEST_MODE__) {
+  globalThis.__ISWEEP_OFFSCREEN_TEST_HOOKS__ = {
+    resolveSourceTimelineWindow,
+  };
 }
 
 function encodeWAV(sampleBufs, sampleRate) {
@@ -167,11 +247,27 @@ async function flushAudioChunk(options = {}) {
   if (!force && durationSec < AUDIO_CAPTION_MIN_SEND_SEC) {
     return;
   }
-  const startSec = audioChunkStartSec;
-  let endSec = startSec + durationSec;
-  if (!(endSec > startSec)) {
-    endSec = startSec + 0.05;
+  const sourceWindow = resolveSourceTimelineWindow(
+    audioChunkStartSec,
+    durationSec,
+    videoClockTimeSec,
+    videoClockPaused,
+  );
+  if (sourceWindow.discard) {
+    audioSampleBufs = [];
+    audioChunkWarm = false;
+    audioChunkStartSec = Number(sourceWindow.start_seconds) || 0;
+    audioChunkStartedAtMs = Date.now();
+    console.log(LOG_PREFIX, 'audio window discarded', {
+      videoId: activeVideoId,
+      reason: sourceWindow.reason,
+      source_start_seconds: audioChunkStartSec,
+    });
+    return;
   }
+
+  const startSec = sourceWindow.start_seconds;
+  const endSec = sourceWindow.end_seconds;
   const chunkStartedAt = Number.isFinite(Number(audioChunkStartedAtMs)) && audioChunkStartedAtMs > 0
     ? Number(audioChunkStartedAtMs)
     : Date.now();
@@ -341,6 +437,11 @@ async function stopCapture(reason = 'stopped') {
   audioChunkWarm = false;
   audioChunkStartSec = 0;
   audioChunkStartedAtMs = 0;
+  if (videoClockPollTimer) clearInterval(videoClockPollTimer);
+  videoClockPollTimer = null;
+  videoClockTimeSec = null;
+  videoClockPaused = false;
+  videoClockObservedAtMs = 0;
   captureStartedAtMs = 0;
   captureSequenceNumber = 0;
   vadSpeechActive = false;
@@ -352,10 +453,15 @@ async function stopCapture(reason = 'stopped') {
   console.log(LOG_PREFIX, 'tab capture stopped', { reason });
 }
 
-async function startCapture(streamId, videoId, tabId) {
+async function startCapture(streamId, videoId, tabId, sourceStartSeconds = 0) {
   await stopCapture('restart');
   activeVideoId = String(videoId || '').trim();
   activeTabId = Number.isFinite(Number(tabId)) ? Number(tabId) : null;
+  videoClockTimeSec = Number.isFinite(Number(sourceStartSeconds))
+    ? Math.max(Number(sourceStartSeconds), 0)
+    : 0;
+  videoClockPaused = false;
+  videoClockObservedAtMs = 0;
   captureSessionId = buildCaptureSessionId(activeTabId, activeVideoId);
   captureSequenceNumber = 0;
   console.log(LOG_PREFIX, 'start received', { videoId: activeVideoId });
@@ -418,6 +524,14 @@ async function startCapture(streamId, videoId, tabId) {
 
   workletNode.port.onmessage = (event) => {
     if (!running || !audioCtx) return;
+    if (videoClockPaused) {
+      audioSampleBufs = [];
+      audioChunkWarm = false;
+      if (Number.isFinite(Number(videoClockTimeSec))) {
+        audioChunkStartSec = Math.max(Number(videoClockTimeSec), 0);
+      }
+      return;
+    }
     updateVadFromFrame(event.data);
     if (!audioSampleBufs.length) {
       audioChunkStartedAtMs = Date.now();
@@ -448,12 +562,15 @@ async function startCapture(streamId, videoId, tabId) {
   monitorGainNode = monitorGain;
   workletKeepAliveGainNode = workletKeepAliveGain;
   running = true;
-  audioChunkStartSec = 0;
+  audioChunkStartSec = Number.isFinite(Number(sourceStartSeconds))
+    ? Math.max(Number(sourceStartSeconds), 0)
+    : 0;
   captureStartedAtMs = Date.now();
   audioChunkStartedAtMs = Date.now();
   audioChunkWarm = false;
   audioSampleBufs = [];
   vadLastSpeechAtMs = Date.now();
+  startVideoClockPolling();
   maybeSendVadState(false, 'capture_started');
 }
 
@@ -470,7 +587,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     console.log(LOG_PREFIX, 'start received', {
       videoId: String(message.video_id || '').trim(),
     });
-    startCapture(message.stream_id, message.video_id, message.tab_id)
+    startCapture(
+      message.stream_id,
+      message.video_id,
+      message.tab_id,
+      message.source_start_seconds,
+    )
       .then(() => sendResponse({ ok: true }))
       .catch((error) => sendResponse({ ok: false, failure_reason: classifyCaptureError(error) }));
     return true;

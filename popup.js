@@ -8,7 +8,7 @@
 // Default to public GitHub Pages; allow override via stored setting for local dev.
 const DEFAULT_FRONTEND_BASE = 'https://kthrnbeh.github.io/ISweep';
 const DEFAULT_BACKEND = 'http://127.0.0.1:5000';
-const DEFAULT_LOCAL_FRONTEND_BASE = 'http://127.0.0.1:5500/ISweep_frontend/docs';
+const DEFAULT_LOCAL_FRONTEND_BASE = 'http://127.0.0.1:5500/docs';
 
 // Storage Keys
 const STORAGE_KEYS = {

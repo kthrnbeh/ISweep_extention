@@ -8,8 +8,8 @@ importScripts('background.js');
 
   const ISWEEP_SITE_MATCHERS = [
     /^https:\/\/kthrnbeh\.github\.io\/ISweep\//i,
-    /^http:\/\/127\.0\.0\.1:5500\/(?:ISweep_frontend\/docs|docs)\//i,
-    /^http:\/\/localhost:5500\/(?:ISweep_frontend\/docs|docs)\//i,
+    /^http:\/\/127\.0\.0\.1:5500\/docs\//i,
+    /^http:\/\/localhost:5500\/docs\//i,
   ];
 
   function isIsweepSiteUrl(url) {

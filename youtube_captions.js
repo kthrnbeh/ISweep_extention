@@ -381,6 +381,9 @@
   const PAGE_SELECTED_WORD_MUTE_MAX_SEC = 0.8;
   const PAGE_SELECTED_WORD_MUTE_DEFAULT_WORD_SEC = 0.30;
   const PAGE_SELECTED_WORD_MUTE_RETRIGGER_MS = 900;
+  // Visible captions do not expose word-level timing. Keep this fallback in
+  // one place so it can be tuned or replaced by timed STT/text-track data.
+  const CAPTION_WINDOW_FALLBACK_SEC = 0.85;
 
   const MARKER_SCHEDULER_INTERVAL_MS = 100;
   const WATCH_AHEAD_SECONDS = 30;
@@ -457,6 +460,7 @@
   let lastPageCaptionText = '';
   let lastPageCaptionVideoTime = null;
   let pageSelectedWordMuteTimer = null;
+  const processedCaptionEvents = new Map();
   const nativeCaptionStyleCache = new Map();
 
   const CAPTION_STATE_LOG = '[ISWEEP][CAPTION_STATE]';
@@ -1804,11 +1808,11 @@
         }
       );
 
-      applyMuteWindow(
-        markerStartSec,
-        markerEndSec,
-        `marker:${marker.id}`
-      );
+      requestMute({
+        start: markerStartSec,
+        end: markerEndSec,
+        reason: `marker:${marker.id}`,
+      });
 
       console.log(
         MARKER_LOG_PREFIX,
@@ -4175,6 +4179,96 @@
     return matches;
   }
 
+  function filterCaption(text, options = {}) {
+    const value = String(text || '');
+    const tokens = [];
+    const tokenPattern = /[^\s]+|\s+/g;
+    let token;
+    while ((token = tokenPattern.exec(value))) {
+      if (/^\s+$/.test(token[0])) continue;
+      const wordMatch = token[0].match(/^([^a-z0-9']*)([a-z0-9']+)([^a-z0-9']*)$/i);
+      tokens.push({
+        index: tokens.length,
+        raw: token[0],
+        word: wordMatch ? wordMatch[2] : token[0],
+        start: token.index,
+        end: token.index + token[0].length,
+      });
+    }
+    const derived = deriveWordMatches(tokens.map((entry) => entry.word), value);
+    const captionStart = Number(options.startTime);
+    const captionEnd = Number(options.endTime);
+    const hasWindow = Number.isFinite(captionStart) && Number.isFinite(captionEnd) && captionEnd > captionStart;
+    const startTime = Number.isFinite(captionStart) ? captionStart : null;
+    const endTime = hasWindow ? captionEnd : (startTime === null ? null : startTime + CAPTION_WINDOW_FALLBACK_SEC);
+    return Array.from(derived.values()).map((entry) => ({
+      ...entry,
+      word: entry.matchedVariant,
+      start: tokens[entry.index]?.start ?? 0,
+      end: tokens[entry.index]?.end ?? 0,
+      startTime,
+      endTime,
+      timing: options.timing || (hasWindow ? 'caption_window' : 'fallback_caption_window'),
+    }));
+  }
+
+  function renderMaskedCaption(caption = {}, matches = []) {
+    const text = String(caption.text || '');
+    if (!Array.isArray(matches) || !matches.length) return text;
+    const ranges = matches
+      .filter((match) => Number.isFinite(match.start) && Number.isFinite(match.end))
+      .sort((left, right) => left.start - right.start);
+    let cursor = 0;
+    let rendered = '';
+    for (const match of ranges) {
+      if (match.start < cursor) continue;
+      rendered += text.slice(cursor, match.start);
+      const raw = text.slice(match.start, match.end);
+      const punctuation = raw.match(/^([^a-z0-9']*)(?:[a-z0-9']+)([^a-z0-9']*)$/i);
+      rendered += punctuation ? `${punctuation[1]}___${punctuation[2]}` : '___';
+      cursor = match.end;
+    }
+    return rendered + text.slice(cursor);
+  }
+
+  function requestMute({ start, end, reason = 'caption_match' } = {}) {
+    console.log('[ISWEEP][MUTE] request', { start, end, reason });
+    return applyMuteWindow(start, end, reason);
+  }
+
+  function onCaption(caption = {}) {
+    const text = String(caption.text || '').replace(/\s+/g, ' ').trim();
+    if (!text) return { matches: [], cleanedText: '' };
+    const normalizedCaption = { ...caption, text };
+    console.log('[ISWEEP][CAPTION] received', { source: caption.source || 'unknown' });
+    console.log('[ISWEEP][FILTER] checking caption');
+    const matches = filterCaption(text, normalizedCaption);
+    const cleanedText = renderMaskedCaption(normalizedCaption, matches);
+    if (!matches.length) return { matches, cleanedText };
+
+    console.log('[ISWEEP][FILTER] match found', { words: matches.map((match) => match.word) });
+    const eventKey = `${caption.source || 'caption'}|${normalizeCaptionText(text)}|${Number(caption.startTime).toFixed(3)}`;
+    const unseenMatches = matches.filter((match) => {
+      const key = `${eventKey}|${match.index}|${normalizeCaptionWord(match.word)}`;
+      if (processedCaptionEvents.has(key)) return false;
+      processedCaptionEvents.set(key, Date.now());
+      return true;
+    });
+    if (processedCaptionEvents.size > 200) {
+      const oldest = processedCaptionEvents.keys().next().value;
+      processedCaptionEvents.delete(oldest);
+    }
+
+    if (isSelectedWordMuteModeEnabled() && unseenMatches.length) {
+      for (const match of unseenMatches) {
+        if (Number.isFinite(match.startTime) && Number.isFinite(match.endTime)) {
+          requestMute({ start: match.startTime, end: match.endTime, reason: `caption:${caption.source || 'unknown'}` });
+        }
+      }
+    }
+    return { matches, cleanedText };
+  }
+
   function buildSelectedWordMuteWindows(words, selectedWords) {
     const timedWords = Array.isArray(words) ? words : [];
     const filters = new Set((selectedWords || []).map(normalizeFilterWord).filter(Boolean));
@@ -4415,81 +4509,35 @@
     if (delayMs > 80 && delayMs <= 1500) {
       pageSelectedWordMuteTimer = setTimeout(() => {
         pageSelectedWordMuteTimer = null;
-        applyMuteWindow(startSec, endSec, reason);
+        requestMute({ start: startSec, end: endSec, reason });
       }, delayMs);
       return true;
     }
-    return applyMuteWindow(nowSec, nowSec + Math.max(Number(endSec) - Number(startSec), 0), reason);
+    return requestMute({
+      start: nowSec,
+      end: nowSec + Math.max(Number(endSec) - Number(startSec), 0),
+      reason,
+    });
   }
 
   function observePageCaption(text, source = 'page_caption_dom') {
     const cleanText = String(text || '').replace(/\s+/g, ' ').trim();
     if (!cleanText) return;
-    if (!cleanCaptionSettings.cleanCaptionsEnabled || !isSelectedWordMuteModeEnabled()) return;
     const video = findVideo();
     const nowSec = Number(video?.currentTime || 0);
-    const signature = `${activeVideoId || getCurrentVideoId()}|${normalizeCaptionText(cleanText)}`;
-    const nowMs = Date.now();
-    const previousText = lastPageCaptionText;
-    const previousVideoTime = lastPageCaptionVideoTime;
-    const captionChanged = normalizeCaptionText(cleanText) !== normalizeCaptionText(previousText);
-    const observedCaptionDurationSec = captionChanged && Number.isFinite(Number(previousVideoTime))
-      ? nowSec - Number(previousVideoTime)
-      : 0;
-
+    const captionChanged = normalizeCaptionText(cleanText) !== normalizeCaptionText(lastPageCaptionText);
     if (captionChanged) {
-      if (pageSelectedWordMuteTimer) {
-        clearTimeout(pageSelectedWordMuteTimer);
-        pageSelectedWordMuteTimer = null;
-      }
       lastPageCaptionText = cleanText;
       lastPageCaptionVideoTime = nowSec;
+      if (pageSelectedWordMuteTimer) clearTimeout(pageSelectedWordMuteTimer);
+      pageSelectedWordMuteTimer = null;
     }
-
-    if (signature === lastPageSelectedWordMuteSignature
-      && nowMs - lastPageSelectedWordMuteAtMs < PAGE_SELECTED_WORD_MUTE_RETRIGGER_MS) return;
-
-    const matches = deriveWordMatches([], cleanText);
-    if (!matches.size) return;
-
-    const previousWords = new Set(
-      normalizeCaptionText(previousText).split(/\s+/).filter(Boolean).map(normalizeCaptionWord),
-    );
-    const newlyIntroducedMatches = Array.from(matches.values()).filter((entry) => (
-      !previousWords.has(normalizeCaptionWord(entry.matchedVariant))
-    ));
-    const targetMatches = newlyIntroducedMatches.length
-      ? newlyIntroducedMatches
-      : previousText ? [] : Array.from(matches.values());
-
-    if (!targetMatches.length) return;
-
-    lastPageSelectedWordMuteSignature = signature;
-    lastPageSelectedWordMuteAtMs = nowMs;
-
-    const wordDurationSec = estimatePageWordDurationSec(cleanText, observedCaptionDurationSec);
-    const firstTarget = targetMatches[0];
-    const startsWithNewWord = newlyIntroducedMatches.length > 0;
-    const wordOffsetSec = startsWithNewWord
-      ? 0
-      : Math.max(Number(firstTarget.index) || 0, 0) * wordDurationSec;
-    const muteDurationSec = Math.max(
-      ...targetMatches.map((entry) => estimatePageSelectedWordMuteDurationSec(
-        entry.matchedVariant,
-        wordDurationSec,
-      )),
-    );
-    const startSec = nowSec + wordOffsetSec;
-    const endSec = startSec + muteDurationSec;
-    schedulePageSelectedWordMute(startSec, endSec, `page_caption:${source}`);
-    console.log(WORD_MUTE_LOG_PREFIX, 'page selected word detected', {
-      source,
+    return onCaption({
       text: cleanText,
-      words: targetMatches.map((entry) => entry.matchedVariant),
-      start_seconds: startSec,
-      end_seconds: endSec,
-      duration_seconds: muteDurationSec,
-      timing: startsWithNewWord ? 'new_word_mutation' : 'caption_word_position_estimate',
+      startTime: captionChanged && Number.isFinite(nowSec) ? nowSec : lastPageCaptionVideoTime,
+      endTime: (Number.isFinite(nowSec) ? nowSec : 0) + CAPTION_WINDOW_FALLBACK_SEC,
+      timing: 'fallback_caption_window',
+      source,
     });
   }
 
@@ -4531,8 +4579,8 @@
     if (text) {
       lastCaptionText = text;
       lastLiveCaptionObservedAtMs = Date.now();
-      observePageCaption(text, 'page_caption_dom');
-      updateCleanOverlay(text, video.currentTime || 0);
+      const captionResult = observePageCaption(text, 'page_caption_dom');
+      updateCleanOverlay(captionResult?.cleanedText || text, video.currentTime || 0);
     }
     if (cleanCaptionOverlayEl) positionCleanCaptionOverlay(video);
   }
@@ -4568,21 +4616,7 @@
 
   function toCleanCaptionText(text) {
     const value = String(text || '');
-    const filters = getFilterWords();
-    if (!filters.enabled || !filters.words.length) return value;
-    return value.split(/(\s+)/).map((part) => {
-      const tokenMatch = part.match(/^([^a-z0-9']*)([a-z0-9']+)([^a-z0-9']*)$/i);
-      const word = normalizeCaptionWord(tokenMatch ? tokenMatch[2] : part);
-      const isBlocked = filters.words.some((filter) => (
-        maskToRegex(filter).test(word)
-        || buildStretchRegex(filter).test(word)
-        || expandWordFamily(filter).some((variant) => maskToRegex(variant).test(word))
-      ));
-      if (!isBlocked) return part;
-      return tokenMatch
-        ? `${tokenMatch[1]}___${tokenMatch[3]}`
-        : '___';
-    }).join('');
+    return renderMaskedCaption({ text: value }, filterCaption(value));
   }
 
   function setNativeCaptionVisualHidden(hidden) {
@@ -4966,6 +5000,7 @@
       shouldFireMarker, shouldAllowMarkerAction, resolveOverlayDisplayState, getEntryTimingBounds,
       normalizePreAnalyzedCaptions, buildAudioResponseCaptions, acceptAudioCaptionRelay, shouldDedupAudioMarker,
       markerSourcePriority, buildSelectedWordMuteWindows, deriveWordMatches,
+      filterCaption, renderMaskedCaption, onCaption, requestMute,
       estimatePageWordDurationSec, estimatePageSelectedWordMuteDurationSec,
       isSelectedWordMuteModeEnabled, scheduleSelectedWordMutesFromAudioPayload,
       extractTimedWordsFromAudioPayload, fuseCaptionWithEvidence,
@@ -4974,6 +5009,7 @@
       runFastGuardFromTimedWords, triggerSpeechEndedClear,
       getCaptionStateSnapshot,
       getNormalizedCaptionPosition,
+      getProcessedCaptionEventCount: () => processedCaptionEvents.size,
     };
   }
 

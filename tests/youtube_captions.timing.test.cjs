@@ -1189,6 +1189,48 @@ test('selected word Hell normalizes to hell and matches', () => {
   assert.equal(windows.length, 1);
 });
 
+test('event-driven caption filter handles case, punctuation, and whole words', () => {
+  const hooks = loadYoutubeTimingHooks();
+  hooks.setCachedPreferences({
+    enabled: true,
+    blocklist: { enabled: true, items: ['hell'] },
+    categories: { language: { enabled: true, items: ['hell'] } },
+  });
+
+  assert.equal(hooks.filterCaption('What the hell').length, 1);
+  assert.equal(hooks.filterCaption('What the Hell!').length, 1);
+  assert.equal(hooks.filterCaption('What the heck').length, 0);
+  assert.equal(hooks.filterCaption('hello').length, 0);
+});
+
+test('event-driven renderer masks only matched words and preserves punctuation', () => {
+  const hooks = loadYoutubeTimingHooks();
+  hooks.setCachedPreferences({
+    enabled: true,
+    blocklist: { enabled: true, items: ['hell'] },
+    categories: { language: { enabled: true, items: ['hell'] } },
+  });
+
+  const caption = { text: 'What the hell...' };
+  const matches = hooks.filterCaption(caption.text);
+  assert.equal(hooks.renderMaskedCaption(caption, matches), 'What the ___...');
+  assert.equal(hooks.renderMaskedCaption({ text: 'What the heck' }, []), 'What the heck');
+});
+
+test('repeated caption polling is deduplicated by the caption handler', () => {
+  const hooks = loadYoutubeTimingHooks();
+  hooks.setCachedPreferences({
+    enabled: true,
+    blocklist: { enabled: true, items: ['hell'] },
+    categories: { language: { enabled: true, items: ['hell'] } },
+  });
+  const caption = { text: 'What the hell', startTime: 12, source: 'youtube_caption' };
+
+  hooks.onCaption(caption);
+  hooks.onCaption(caption);
+  assert.equal(hooks.getProcessedCaptionEventCount(), 1);
+});
+
 test('page selected-word mute duration is adaptive and bounded', () => {
   const hooks = loadYoutubeTimingHooks();
   assert.equal(hooks.estimatePageWordDurationSec('what the hell', 0), 0.30);

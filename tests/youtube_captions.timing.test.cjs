@@ -30,6 +30,9 @@ function loadYoutubeTimingHooks() {
       getElementById() {
         return null;
       },
+      contains() {
+        return true;
+      },
       createElement() {
         return {
           style: {},
@@ -318,6 +321,43 @@ test('clean caption settings normalization applies defaults safely', () => {
   assert.equal(fallback.cleanCaptionTextSize, 'medium');
   assert.equal(fallback.cleanCaptionPosition.x, 0.5);
   assert.equal(fallback.cleanCaptionPosition.y, 0.8);
+});
+
+test('live caption setting updates reuse the existing overlay and preserve masking', () => {
+  const hooks = loadYoutubeTimingHooks();
+  hooks.setCachedPreferences({
+    enabled: true,
+    blocklist: { enabled: true, items: ['hell'] },
+    customWords: ['shell'],
+    categories: { language: { enabled: true, items: ['stale-word'] } },
+  });
+
+  assert.equal(hooks.toCleanCaptionText('hell, shell'), '___, shell');
+  hooks.applyCleanCaptionSettings({ cleanCaptionsEnabled: true });
+  const firstOverlay = hooks.getCleanCaptionOverlayElement();
+  assert.ok(firstOverlay, 'enabling captions should create the existing overlay');
+
+  hooks.applyCleanCaptionSettings({
+    cleanCaptionsEnabled: true,
+    cleanCaptionTextSize: 'large',
+  });
+  assert.equal(hooks.getCleanCaptionOverlayElement(), firstOverlay);
+  assert.equal(hooks.getCleanCaptionSettings().cleanCaptionTextSize, 'large');
+
+  hooks.applyCleanCaptionSettings({ cleanCaptionsEnabled: false });
+  assert.equal(hooks.getCleanCaptionOverlayElement(), firstOverlay);
+  assert.equal(hooks.getCleanCaptionSettings().cleanCaptionsEnabled, false);
+});
+
+test('live caption setting communication reaches the shared renderer update path', () => {
+  const youtubeSource = fs.readFileSync(
+    path.resolve(__dirname, '..', 'youtube_captions.js'),
+    'utf8',
+  );
+  assert.match(youtubeSource, /isweep_clean_caption_settings_changed/);
+  assert.match(youtubeSource, /applyCleanCaptionSettings\(message\.settings/);
+  assert.match(youtubeSource, /chrome\.storage\.onChanged/);
+  assert.match(youtubeSource, /applyCleanCaptionSettings\(\s*changes\[STORAGE_KEYS\.CLEAN_CAPTION_SETTINGS\]/);
 });
 
 test('clean caption text masks blocked words', () => {

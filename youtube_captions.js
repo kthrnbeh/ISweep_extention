@@ -68,11 +68,16 @@
     const categories = raw.categories && typeof raw.categories === 'object' ? raw.categories : {};
     const lang = categories.language && typeof categories.language === 'object' ? categories.language : {};
     const words = [];
-    if (Array.isArray(raw?.blocklist?.items)) words.push(...raw.blocklist.items);
-    if (Array.isArray(raw?.customWords)) words.push(...raw.customWords);
-    if (Array.isArray(lang.items)) words.push(...lang.items);
-    if (Array.isArray(lang.words)) words.push(...lang.words);
-    if (Array.isArray(lang.customWords)) words.push(...lang.customWords);
+    if (Array.isArray(raw?.blocklist?.items)) {
+      // The canonical list is authoritative. Do not merge stale legacy fields
+      // into an already-established selected-word list.
+      words.push(...raw.blocklist.items);
+    } else {
+      if (Array.isArray(raw?.customWords)) words.push(...raw.customWords);
+      if (Array.isArray(lang.items)) words.push(...lang.items);
+      if (Array.isArray(lang.words)) words.push(...lang.words);
+      if (Array.isArray(lang.customWords)) words.push(...lang.customWords);
+    }
     const cleaned = Array.from(
       new Set(
         words
@@ -448,6 +453,7 @@
   let cleanCaptionOverlayEnabledLogged = false;
   let cleanCaptionWaitingLogged = false;
   let cleanCaptionNativeWarningLogged = false;
+  let lastAppliedCleanCaptionSettingsSignature = '';
   let lastAppliedCleanCaptionStyle = null;
   let lastAppliedCleanCaptionSize = null;
   let lastAudioCaptionSource = null;
@@ -4607,6 +4613,29 @@
     };
   }
 
+  function applyCleanCaptionSettings(nextSettings, reason = 'settings_changed') {
+    const normalized = normalizeCleanCaptionSettings(nextSettings);
+    const signature = JSON.stringify(normalized);
+    if (signature === lastAppliedCleanCaptionSettingsSignature) {
+      return false;
+    }
+
+    cleanCaptionSettings = normalized;
+    lastAppliedCleanCaptionSettingsSignature = signature;
+
+    if (!cleanCaptionSettings.cleanCaptionsEnabled
+      || !isSelectedWordMuteModeEnabled()) {
+      if (isweepMuteActive) restoreMuteState(reason);
+      if (pageSelectedWordMuteTimer) {
+        clearTimeout(pageSelectedWordMuteTimer);
+        pageSelectedWordMuteTimer = null;
+      }
+    }
+    updateCleanOverlay(lastCaptionText, findVideo()?.currentTime || 0);
+    ensureMarkerSchedulerRunning();
+    return true;
+  }
+
   function stripCategoryLabelsFromCaption(text) {
     return String(text || '')
       .replace(/\b(language|sexual|violence|profanity)\s*:?\s*/gi, '')
@@ -4942,6 +4971,12 @@
         return false;
       }
 
+      if (message?.type === 'isweep_clean_caption_settings_changed') {
+        const applied = applyCleanCaptionSettings(message.settings, 'runtime_message');
+        sendResponse({ ok: true, applied });
+        return false;
+      }
+
       return undefined;
     });
   }
@@ -4951,49 +4986,57 @@
     document.addEventListener('yt-navigate-finish', () => handleVideoIdChange(getCurrentVideoId()));
     window.addEventListener('resize', () => positionCleanCaptionOverlay());
     document.addEventListener('fullscreenchange', () => positionCleanCaptionOverlay());
-    if (typeof chrome !== 'undefined' && chrome.storage?.local) {
-      chrome.storage.local.get?.([
-        STORAGE_KEYS.PREFS,
-        STORAGE_KEYS.CLEAN_CAPTION_SETTINGS,
-        STORAGE_KEYS.LOCAL_REFERENCES,
-      ])
-        ?.then?.((values) => {
-          setCachedPreferences(values?.[STORAGE_KEYS.PREFS]);
-          cleanCaptionSettings = normalizeCleanCaptionSettings(values?.[STORAGE_KEYS.CLEAN_CAPTION_SETTINGS]);
-          setCachedLocalReferences(values?.[STORAGE_KEYS.LOCAL_REFERENCES]);
-        })
-        .catch(() => {});
+  }
 
-      chrome.storage.onChanged?.addListener?.((changes, areaName) => {
+  if (typeof chrome !== 'undefined' && chrome.storage?.local) {
+    chrome.storage.local.get?.([
+      STORAGE_KEYS.PREFS,
+      STORAGE_KEYS.CLEAN_CAPTION_SETTINGS,
+      STORAGE_KEYS.LOCAL_REFERENCES,
+    ])
+      ?.then?.((values) => {
+        setCachedPreferences(values?.[STORAGE_KEYS.PREFS]);
+        cleanCaptionSettings = normalizeCleanCaptionSettings(values?.[STORAGE_KEYS.CLEAN_CAPTION_SETTINGS]);
+        lastAppliedCleanCaptionSettingsSignature = JSON.stringify(cleanCaptionSettings);
+        setCachedLocalReferences(values?.[STORAGE_KEYS.LOCAL_REFERENCES]);
+      })
+      .catch(() => {});
+
+    chrome.storage.onChanged?.addListener?.((changes, areaName) => {
         if (areaName !== 'local') return;
         if (changes[STORAGE_KEYS.PREFS]) {
-          setCachedPreferences(changes[STORAGE_KEYS.PREFS].newValue);
+          const incomingPreferences = changes[STORAGE_KEYS.PREFS].newValue;
+          const hasCanonicalOrLegacyWordList = incomingPreferences
+            && typeof incomingPreferences === 'object'
+            && (
+              Array.isArray(incomingPreferences?.blocklist?.items)
+              || Array.isArray(incomingPreferences?.customWords)
+              || Array.isArray(incomingPreferences?.categories?.language?.items)
+              || Array.isArray(incomingPreferences?.categories?.language?.words)
+              || Array.isArray(incomingPreferences?.categories?.language?.customWords)
+            );
+          if (hasCanonicalOrLegacyWordList || !cachedPreferences) {
+            setCachedPreferences(incomingPreferences);
+            updateCleanOverlay(lastCaptionText, findVideo()?.currentTime || 0);
+          }
           lastPageSelectedWordMuteSignature = '';
           lastPageSelectedWordMuteAtMs = 0;
         }
         if (changes[STORAGE_KEYS.CLEAN_CAPTION_SETTINGS]) {
-          cleanCaptionSettings = normalizeCleanCaptionSettings(
+          applyCleanCaptionSettings(
             changes[STORAGE_KEYS.CLEAN_CAPTION_SETTINGS].newValue,
+            'storage_changed',
           );
-          if (!cleanCaptionSettings.cleanCaptionsEnabled
-            || !isSelectedWordMuteModeEnabled()) {
-            if (isweepMuteActive) restoreMuteState('caption_settings_changed');
-            if (pageSelectedWordMuteTimer) {
-              clearTimeout(pageSelectedWordMuteTimer);
-              pageSelectedWordMuteTimer = null;
-            }
-          }
-          updateCleanOverlay(lastCaptionText, findVideo()?.currentTime || 0);
-          ensureMarkerSchedulerRunning();
         }
-      });
-    }
+    });
   }
 
   if (typeof globalThis !== 'undefined' && globalThis.__ISWEEP_TEST_MODE__) {
     globalThis.__ISWEEP_YT_TEST_HOOKS__ = {
       constants: { CLEAN_CAPTION_STALE_MS, CLEAN_CC_BRIDGE_GAP_MS, CLEAN_CC_STT_DISABLED_TEXT, AUDIO_CHUNK_SEC, AUDIO_CHUNK_OVERLAP_SEC, AUDIO_STT_HOLD_MS, WATCH_AHEAD_SECONDS, CLEAN_CAPTION_SIZE_PX, ISWEEP_YOUTUBE_DOM_FALLBACK_ENABLED, AUDIO_STT_DISPLAY_REQUIRES_ALIGNMENT },
-      normalizeCleanCaptionSettings, setCachedPreferences, setCachedLocalReferences,
+      normalizeCleanCaptionSettings, applyCleanCaptionSettings, setCachedPreferences, setCachedLocalReferences,
+      getCleanCaptionSettings: () => ({ ...cleanCaptionSettings, cleanCaptionPosition: { ...cleanCaptionSettings.cleanCaptionPosition } }),
+      getCleanCaptionOverlayElement: () => cleanCaptionOverlayEl,
       toCleanCaptionText, stripCategoryLabelsFromCaption, limitCaptionText, getCleanCaptionDisplayText, getBestCleanCaptionText,
       getMuteWindowFromMarker, shouldISweepUnmute, shouldSkipMuteBecauseUserMuted,
       estimatePlaceholderWordWindow, hasNearbyAudioMuteMarker, getMarkerEarlyWindowSec,

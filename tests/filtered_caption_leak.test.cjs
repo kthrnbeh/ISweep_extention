@@ -212,6 +212,26 @@ test('site bridge can expand the saved Filter selection when backend cache is ab
   assert.equal(snapshot.prefs.blocklist.items.includes('hell'), true);
 });
 
+test('Filter selection feeds the extension masking path without broad matching', async () => {
+  const bridge = loadSiteBridgeHooks({
+    'isweep-settings': JSON.stringify({
+      filters_enabled: { language: true },
+      predefined_words: { language: { profanity: { selectedIds: ['profanity-15'] } } },
+      custom_words: { language: [] },
+    }),
+  });
+  const snapshot = await bridge.readExpectedPreferenceSnapshot();
+  assert.deepEqual(Array.from(snapshot.prefs.blocklist.items), ['hell']);
+
+  const youtube = loadYoutubeHooks();
+  youtube.setCachedPreferences(snapshot.prefs);
+  assert.equal(youtube.toCleanCaptionText('hell Hell, shell'), '___ ___, shell');
+
+  const remote = loadRemoteCaptionHooks();
+  remote.setPreferencesForTest(snapshot.prefs);
+  assert.equal(remote.maskSelectedText('hell, Hell, shell'), '___, ___, shell');
+});
+
 test('site bridge ignores an explicit cache owned by another account', async () => {
   const hooks = loadSiteBridgeHooks({
     'isweep-user-id': 'current-account',

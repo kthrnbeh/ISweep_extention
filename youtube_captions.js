@@ -1403,6 +1403,12 @@
       return true;
     }
 
+    // A timed live/cached STT entry is displayable when its source-video
+    // bounds have already been validated by findTimedCleanCaptionEntry().
+    if (value === 'audio_stt_live' || value === 'audio_stt_cached' || value === 'audio_stt') {
+      return true;
+    }
+
     if (
       !AUDIO_STT_DISPLAY_REQUIRES_ALIGNMENT
       && value.startsWith('audio_stt')
@@ -1424,9 +1430,10 @@
       };
     }
 
-    // Priority order after recovery:
-    // 1) pre-analyzed/reference captions, 2) visible page captions, 3) approved STT only.
-    // Raw STT that disagrees with the page is not shown because it causes hallucinated captions.
+    // Display priority is based on current, validated source evidence:
+    // current timed STT, fresh native captions, then valid stored/reference
+    // captions and marker text. WATCH_AHEAD_SECONDS is reserved for processing
+    // and mute scheduling; it is never used as a display look-ahead.
     const preCachedAudioCaptions = Array.isArray(options.preCachedAudioCaptions)
       ? options.preCachedAudioCaptions
       : preCachedAudioCleanCaptions;
@@ -1454,9 +1461,15 @@
     const nowMs = Number.isFinite(Number(options.nowMs))
       ? Number(options.nowMs)
       : Date.now();
-    const lookaheadSec = Number.isFinite(Number(options.lookaheadSec))
+    const requestedLookaheadSec = Number.isFinite(Number(options.lookaheadSec))
       ? Number(options.lookaheadSec)
       : CLEAN_CAPTION_LOOKAHEAD_SEC;
+    // Watch-ahead is processing context only. Display selection may never use
+    // a large window that makes a caption appear materially before speech.
+    const lookaheadSec = Math.min(
+      Math.max(requestedLookaheadSec, 0),
+      CLEAN_CAPTION_LOOKAHEAD_SEC,
+    );
     const staleMs = Number.isFinite(Number(options.staleMs))
       ? Number(options.staleMs)
       : CLEAN_CAPTION_STALE_MS;
@@ -1464,38 +1477,89 @@
       ? Number(options.audioHoldMs)
       : AUDIO_STT_HOLD_MS;
 
-    const preAnalyzedEntry = findTimedCleanCaptionEntry(
-      preAnalyzedCaptions,
+    const buildResult = (entry, source, text, observedAtMs = null) => {
+      const bounds = getEntryTimingBounds(entry);
+      const words = normalizeTimedWords(entry?.words);
+      const ageMs = Number.isFinite(Number(observedAtMs)) && Number(observedAtMs) > 0
+        ? Math.max(0, nowMs - Number(observedAtMs))
+        : null;
+      return {
+        text: text || '',
+        source,
+        stale: false,
+        cleanResumeTime: Number.isFinite(Number(entry?.clean_resume_time))
+          ? Number(entry.clean_resume_time)
+          : null,
+        diagnostics: {
+          selected_source: source,
+          caption_start_time: bounds?.start_seconds ?? null,
+          caption_end_time: bounds?.end_seconds ?? null,
+          current_video_time: Number(nowSec),
+          age_ms: ageMs,
+          word_timestamps_available: words.length > 0,
+          rejection_reason: null,
+        },
+      };
+    };
+
+    const buildEmptyResult = (reason, stale = false) => ({
+      text: '',
+      source: null,
+      stale,
+      diagnostics: {
+        selected_source: null,
+        caption_start_time: null,
+        caption_end_time: null,
+        current_video_time: Number(nowSec),
+        age_ms: null,
+        word_timestamps_available: false,
+        rejection_reason: reason,
+      },
+    });
+
+    const liveAudioEntry = findTimedCleanCaptionEntry(
+      liveAudioCaptions,
       nowSec,
       lookaheadSec
     );
-
-    if (preAnalyzedEntry) {
-      return {
-        text: getCleanCaptionDisplayText(preAnalyzedEntry, nowSec),
-        source: 'pre_analyzed',
-        stale: false,
-        cleanResumeTime: Number.isFinite(Number(preAnalyzedEntry.clean_resume_time))
-          ? Number(preAnalyzedEntry.clean_resume_time)
-          : null,
-      };
+    if (liveAudioEntry) {
+      const entrySource = String(liveAudioEntry.source || '').trim() || 'audio_stt_live';
+      const entryText = getCleanCaptionDisplayText(liveAudioEntry, nowSec);
+      if (entryText && isApprovedAudioCaptionSource(entrySource)) {
+        return buildResult(liveAudioEntry, entrySource, entryText, audioCaptionObservedAtMs);
+      }
     }
 
-    const markerTextEntry = findTimedCleanCaptionEntry(
-      markers,
+    const preCachedAudioEntry = findTimedCleanCaptionEntry(
+      preCachedAudioCaptions,
       nowSec,
       lookaheadSec
     );
+    if (preCachedAudioEntry) {
+      const entrySource = String(preCachedAudioEntry.source || '').trim() || 'audio_stt_cached';
+      const entryText = getCleanCaptionDisplayText(preCachedAudioEntry, nowSec);
+      if (entryText && isApprovedAudioCaptionSource(entrySource)) {
+        return buildResult(preCachedAudioEntry, entrySource, entryText);
+      }
+    }
 
-    if (markerTextEntry) {
-      return {
-        text: getCleanCaptionDisplayText(markerTextEntry, nowSec),
-        source: 'marker_text',
-        stale: false,
-        cleanResumeTime: Number.isFinite(Number(markerTextEntry.clean_resume_time))
-          ? Number(markerTextEntry.clean_resume_time)
-          : null,
-      };
+    const normalizedAudioSource = String(audioCaptionSource || '').toLowerCase();
+    const freshAudioText = limitCaptionText(
+      stripCategoryLabelsFromCaption(toCleanCaptionText(String(audioCaptionText || '').trim())),
+      null,
+      nowSec
+    );
+    const audioAgeMs = audioCaptionObservedAtMs > 0
+      ? nowMs - audioCaptionObservedAtMs
+      : Number.POSITIVE_INFINITY;
+
+    if (
+      freshAudioText
+      && normalizedAudioSource.startsWith('audio_stt')
+      && isApprovedAudioCaptionSource(normalizedAudioSource)
+      && audioAgeMs <= audioHoldMs
+    ) {
+      return buildResult(null, normalizedAudioSource || 'audio_stt_live', freshAudioText, audioCaptionObservedAtMs);
     }
 
     const maskedLiveText = limitCaptionText(
@@ -1510,111 +1574,33 @@
         && (nowMs - liveCaptionObservedAtMs) > staleMs;
 
       if (isStale) {
-        return {
-          text: '',
-          source: 'live_masked',
-          stale: true,
-        };
+        // Keep searching for a valid timed source, but never expose stale DOM
+        // text as if it were current caption content.
+        if (!preAnalyzedCaptions.length && !preCachedAudioCaptions.length && !liveAudioCaptions.length) {
+          return buildEmptyResult('stale_live_caption', true);
+        }
+      } else {
+        return buildResult(null, 'live_masked', maskedLiveText, liveCaptionObservedAtMs);
       }
-
-      return {
-        text: maskedLiveText,
-        source: 'live_masked',
-        stale: false,
-        cleanResumeTime: null,
-      };
     }
 
-    const preCachedAudioEntry = findTimedCleanCaptionEntry(
-      preCachedAudioCaptions,
+    const preAnalyzedEntry = findTimedCleanCaptionEntry(
+      preAnalyzedCaptions,
       nowSec,
       lookaheadSec
     );
-
-    if (preCachedAudioEntry) {
-      const entrySource =
-        String(preCachedAudioEntry.source || '').trim()
-        || 'audio_stt_cached';
-
-      if (isApprovedAudioCaptionSource(entrySource)) {
-        return {
-          text: getCleanCaptionDisplayText(preCachedAudioEntry, nowSec),
-          source: entrySource,
-          stale: false,
-          cleanResumeTime: Number.isFinite(
-            Number(preCachedAudioEntry.clean_resume_time)
-          )
-            ? Number(preCachedAudioEntry.clean_resume_time)
-            : null,
-        };
-      }
+    if (preAnalyzedEntry) {
+      const entryText = getCleanCaptionDisplayText(preAnalyzedEntry, nowSec);
+      if (entryText) return buildResult(preAnalyzedEntry, 'pre_analyzed', entryText);
     }
 
-    const liveAudioEntry = findTimedCleanCaptionEntry(
-      liveAudioCaptions,
-      nowSec,
-      lookaheadSec
-    );
-
-    if (liveAudioEntry) {
-      const entrySource =
-        String(liveAudioEntry.source || '').trim()
-        || 'audio_stt_live';
-
-      if (isApprovedAudioCaptionSource(entrySource)) {
-        return {
-          text: getCleanCaptionDisplayText(liveAudioEntry, nowSec),
-          source: entrySource,
-          stale: false,
-          cleanResumeTime: Number.isFinite(
-            Number(liveAudioEntry.clean_resume_time)
-          )
-            ? Number(liveAudioEntry.clean_resume_time)
-            : null,
-        };
-      }
+    const markerTextEntry = findTimedCleanCaptionEntry(markers, nowSec, lookaheadSec);
+    if (markerTextEntry) {
+      const entryText = getCleanCaptionDisplayText(markerTextEntry, nowSec);
+      if (entryText) return buildResult(markerTextEntry, 'marker_text', entryText);
     }
 
-    const normalizedAudioSource =
-      String(audioCaptionSource || '').toLowerCase();
-
-    const freshAudioText = limitCaptionText(
-      stripCategoryLabelsFromCaption(toCleanCaptionText(String(audioCaptionText || '').trim())),
-      null,
-      nowSec
-    );
-
-    const audioAgeMs =
-      audioCaptionObservedAtMs > 0
-        ? nowMs - audioCaptionObservedAtMs
-        : Number.POSITIVE_INFINITY;
-
-    if (
-      freshAudioText
-      && normalizedAudioSource.startsWith('audio_stt')
-      && isApprovedAudioCaptionSource(normalizedAudioSource)
-      && audioAgeMs <= audioHoldMs
-    ) {
-      return {
-        text: freshAudioText,
-        source:
-          normalizedAudioSource
-          || (
-            normalizedAudioSource.includes('cached')
-              ? 'audio_stt_cached'
-              : 'audio_stt_live'
-          ),
-        stale: false,
-        cleanResumeTime: null,
-      };
-    }
-
-    return {
-      text: '',
-      source: null,
-      stale: false,
-      cleanResumeTime: null,
-    };
+    return buildEmptyResult('no_valid_current_caption');
   }
 
   function resetMarkerEngine(reason) {

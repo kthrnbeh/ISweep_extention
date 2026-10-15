@@ -92,8 +92,7 @@ test('caption sizes use the exact configured pixel values', () => {
   assert.equal(source.includes("small: '14px'"), true);
   assert.equal(source.includes("medium: '18px'"), true);
   assert.equal(source.includes("large: '20px'"), true);
-  assert.equal(remoteSource.includes("? '14px'"), true);
-  assert.equal(remoteSource.includes("? '20px' : '18px'"), true);
+  assert.equal(remoteSource.includes('textNode.textContent ='), false);
 });
 
 test('native captions remain available as the restored fallback', () => {
@@ -132,8 +131,8 @@ test('native captions remain available as the restored fallback', () => {
     liveCaptionObservedAtMs: nowMs,
     nowMs,
   });
-  assert.equal(audioCaption.source, 'live_masked');
-  assert.equal(audioCaption.text, 'native caption text');
+  assert.equal(audioCaption.source, 'audio_stt_live');
+  assert.equal(audioCaption.text, 'what the ___');
 });
 
 test('native caption remote engine remains loaded as the fallback renderer', () => {
@@ -380,7 +379,7 @@ test('clean caption text keeps blocked words silent in display text', () => {
   assert.equal(stripped, 'That was ___');
 });
 
-test('clean caption text follows precedence order: pre-analyzed, marker, audio, then live', () => {
+test('clean caption text prefers current timed sources before stored text', () => {
   const hooks = loadYoutubeTimingHooks();
   hooks.setCachedPreferences({
     enabled: true,
@@ -406,8 +405,8 @@ test('clean caption text follows precedence order: pre-analyzed, marker, audio, 
     nowMs,
   });
 
-  assert.equal(audioCachedResult.text, 'pre analyzed line');
-  assert.equal(audioCachedResult.source, 'pre_analyzed');
+  assert.equal(audioCachedResult.text, 'audio live line');
+  assert.equal(audioCachedResult.source, 'audio_stt_live');
   assert.equal(audioCachedResult.stale, false);
 
   const audioLiveResult = hooks.getBestCleanCaptionText('live fallback', 11.2, {
@@ -423,11 +422,11 @@ test('clean caption text follows precedence order: pre-analyzed, marker, audio, 
     nowMs,
   });
 
-  assert.equal(audioLiveResult.text, 'marker line');
-  assert.equal(audioLiveResult.source, 'marker_text');
+  assert.equal(audioLiveResult.text, 'audio live line');
+  assert.equal(audioLiveResult.source, 'audio_stt_live');
   assert.equal(audioLiveResult.stale, false);
 
-  const preAnalyzedResult = hooks.getBestCleanCaptionText('live fallback', 10.2, {
+  const preAnalyzedResult = hooks.getBestCleanCaptionText('', 10.2, {
     preCachedAudioCaptions: [],
     liveAudioCaptions: [],
     preAnalyzedCaptions: [
@@ -445,7 +444,7 @@ test('clean caption text follows precedence order: pre-analyzed, marker, audio, 
   assert.equal(preAnalyzedResult.stale, false);
   assert.equal(preAnalyzedResult.cleanResumeTime, null);
 
-  const markerResult = hooks.getBestCleanCaptionText('live fallback', 15.05, {
+  const markerResult = hooks.getBestCleanCaptionText('', 15.05, {
     preCachedAudioCaptions: [],
     liveAudioCaptions: [],
     preAnalyzedCaptions: [],
@@ -470,9 +469,9 @@ test('clean caption text follows precedence order: pre-analyzed, marker, audio, 
     nowMs,
   });
 
-  assert.equal(liveResult.source, null);
+  assert.equal(liveResult.source, 'live_masked');
   assert.equal(liveResult.stale, false);
-  assert.equal(liveResult.text, '');
+  assert.equal(liveResult.text, 'that was ___');
 });
 
 test('mute window preserves backend preroll and clean resume time', () => {
@@ -501,7 +500,7 @@ test('user-muted video skips new ISweep mute windows', () => {
   assert.equal(hooks.shouldSkipMuteBecauseUserMuted(false, false), false);
 });
 
-test('YouTube DOM fallback is disabled when no pre-analyzed caption exists', () => {
+test('YouTube DOM fallback remains available when no timed caption exists', () => {
   const hooks = loadYoutubeTimingHooks();
   hooks.setCachedPreferences({
     enabled: true,
@@ -515,9 +514,36 @@ test('YouTube DOM fallback is disabled when no pre-analyzed caption exists', () 
     nowMs: Date.now(),
   });
 
-  assert.equal(result.source, null);
+  assert.equal(result.source, 'live_masked');
   assert.equal(result.stale, false);
+  assert.equal(result.text, 'that was ___');
+});
+
+test('caption display selection clamps watch-ahead and reports timing diagnostics', () => {
+  const hooks = loadYoutubeTimingHooks();
+  const result = hooks.getBestCleanCaptionText('', 20, {
+    preAnalyzedCaptions: [
+      { start_seconds: 49, end_seconds: 50, clean_text: 'too early' },
+    ],
+    markerEntries: [],
+    liveCaptionObservedAtMs: 0,
+    nowMs: 20000,
+    lookaheadSec: 30,
+  });
+
   assert.equal(result.text, '');
+  assert.equal(result.source, null);
+  assert.equal(result.diagnostics.rejection_reason, 'no_valid_current_caption');
+  assert.equal(result.diagnostics.current_video_time, 20);
+});
+
+test('caption_remote does not compete for the shared visible overlay', () => {
+  const source = fs.readFileSync(
+    path.resolve(__dirname, '..', 'caption_remote.js'),
+    'utf8',
+  );
+  assert.equal(source.includes('textNode.textContent ='), false);
+  assert.equal(source.includes("data-isweep-caption-source = 'remote'"), false);
 });
 
 test('fresh audio STT outranks native caption fallback', () => {
@@ -551,12 +577,12 @@ test('stale live caption text is not displayed', () => {
 
   assert.equal(result.text, '');
   assert.equal(result.source, null);
-  assert.equal(result.stale, false);
+  assert.equal(result.stale, true);
 });
 
 test('marker text is used when timed metadata matches and no pre-analyzed caption exists', () => {
   const hooks = loadYoutubeTimingHooks();
-  const result = hooks.getBestCleanCaptionText('fallback live', 15.05, {
+  const result = hooks.getBestCleanCaptionText('', 15.05, {
     preAnalyzedCaptions: [],
     markerEntries: [
       { start_seconds: 15, end_seconds: 15.4, caption_text: 'marker caption line' },
@@ -663,8 +689,13 @@ test('stale captions still clear', () => {
   assert.equal(resolved.source, 'stale');
 });
 
-test('pre-analyzed remains preferred over live-masked', () => {
+test('current live captions take precedence over pre-analyzed text', () => {
   const hooks = loadYoutubeTimingHooks();
+  hooks.setCachedPreferences({
+    enabled: true,
+    blocklist: { enabled: true, items: ['shit'] },
+    categories: { language: { enabled: true, items: ['shit'] } },
+  });
   const nowMs = Date.now();
   const result = hooks.getBestCleanCaptionText('this is shit', 42.1, {
     preAnalyzedCaptions: [
@@ -675,8 +706,8 @@ test('pre-analyzed remains preferred over live-masked', () => {
     nowMs,
   });
 
-  assert.equal(result.source, 'pre_analyzed');
-  assert.equal(result.text, 'clean from pre');
+  assert.equal(result.source, 'live_masked');
+  assert.equal(result.text, 'this is ___');
   assert.equal(result.stale, false);
 });
 
@@ -697,7 +728,7 @@ test('timed entry bounds prefer word timings over segment bounds', () => {
 
 test('best clean caption selection matches using word-timing lookahead', () => {
   const hooks = loadYoutubeTimingHooks();
-  const result = hooks.getBestCleanCaptionText('live fallback', 12.86, {
+  const result = hooks.getBestCleanCaptionText('', 12.86, {
     preAnalyzedCaptions: [
       {
         start_seconds: 12.0,

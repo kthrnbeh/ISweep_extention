@@ -1,7 +1,7 @@
 // ISweep live caption remote.
-// Uses YouTube's visible caption stream for fast masking and overlay style repair.
-// youtube_captions.js owns playback mute so this observer cannot create a second
-// mute window for the same caption mutation.
+// Observes YouTube's visible caption stream for compatibility and diagnostics.
+// youtube_captions.js is the sole visible ISweep overlay owner; this observer
+// must not create or mutate that shared overlay.
 (function () {
   'use strict';
 
@@ -76,44 +76,6 @@
     };
   }
 
-  function ensureRemoteStyles() {
-    if (document.getElementById('isweep-caption-remote-style')) return;
-    const style = document.createElement('style');
-    style.id = 'isweep-caption-remote-style';
-    style.textContent = `
-      [data-isweep-clean-captions="true"] {
-        position: fixed !important;
-        left: var(--isweep-caption-left, 50%) !important;
-        top: var(--isweep-caption-top, 80%) !important;
-        transform: translate(-50%, -50%) !important;
-        max-width: var(--isweep-caption-max-width, 80vw) !important;
-      }
-      [data-isweep-clean-captions="true"][data-isweep-remote-style="transparent_white"] > div {
-        color: #fff !important;
-        background: rgba(0, 0, 0, 0.78) !important;
-        border: 1px solid rgba(255, 255, 255, 0.9) !important;
-        text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9) !important;
-      }
-      [data-isweep-clean-captions="true"][data-isweep-remote-style="white_black"] > div {
-        color: #111 !important;
-        background: rgba(255, 255, 255, 0.94) !important;
-        border: 1px solid rgba(17, 17, 17, 0.9) !important;
-        text-shadow: none !important;
-      }
-      [data-isweep-clean-captions="true"][data-isweep-remote-style="black_white"] > div {
-        color: #fff !important;
-        background: #000 !important;
-        border: 1px solid rgba(255, 255, 255, 0.9) !important;
-        text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9) !important;
-      }
-    `;
-    (document.head || document.documentElement).appendChild(style);
-  }
-
-  function getVideo() {
-    return document.querySelector('video');
-  }
-
   function extractCaptionText() {
     return Array.from(document.querySelectorAll('.ytp-caption-segment'))
       .map((node) => String(node.textContent || '').trim())
@@ -164,60 +126,12 @@
   }
 
   function updateCleanOverlay(nativeCaptionText) {
-    ensureRemoteStyles();
-
-    const overlay = document.querySelector('[data-isweep-clean-captions="true"]');
-    const textNode = overlay?.firstElementChild;
-    const nativeContainer = document.querySelector('.ytp-caption-window-container');
-
-    if (!preferencesReady) {
-      // Never leave a raw remote overlay visible while the shared preference
-      // snapshot is loading. Native captions remain visible until the main
-      // renderer has a filtered replacement.
-      if (overlay?.dataset.isweepCaptionSource === 'remote') {
-        overlay.style.display = 'none';
-      }
-      if (nativeContainer) nativeContainer.style.visibility = '';
-      return;
-    }
-
-    if (!settings.cleanCaptionsEnabled || !overlay || !textNode) {
-      if (nativeContainer) nativeContainer.style.visibility = '';
-      return;
-    }
-
-    const cleanText = limitCaptionText(maskSelectedText(nativeCaptionText));
-    const mainRendererOwnsText = Boolean(
-      overlay.dataset.isweepCaptionSource
-      && overlay.dataset.isweepCaptionSource !== 'remote'
-      && textNode.textContent.trim()
-    );
-    if (cleanText && !mainRendererOwnsText && textNode.textContent !== cleanText) {
-      textNode.textContent = cleanText;
-      overlay.dataset.isweepCaptionSource = 'remote';
-    }
-
-    overlay.dataset.isweepRemoteStyle = settings.cleanCaptionStyle;
-
-    const video = getVideo();
-    if (video) {
-      const rect = video.getBoundingClientRect();
-      overlay.style.setProperty('--isweep-caption-left', `${rect.left + (rect.width * settings.cleanCaptionPosition.x)}px`);
-      overlay.style.setProperty('--isweep-caption-top', `${rect.top + (rect.height * settings.cleanCaptionPosition.y)}px`);
-      overlay.style.setProperty('--isweep-caption-max-width', `${Math.max(rect.width * 0.82, 220)}px`);
-    }
-
-    textNode.style.fontSize = settings.cleanCaptionTextSize === 'small'
-      ? '14px'
-      : settings.cleanCaptionTextSize === 'large' ? '20px' : '18px';
-    textNode.style.fontWeight = '600';
-    textNode.style.lineHeight = '1.3';
-    textNode.style.padding = '0.18em 0.4em';
-    textNode.style.borderRadius = '3px';
-
-    if (nativeContainer) {
-      nativeContainer.style.visibility = cleanText ? 'hidden' : '';
-    }
+    // youtube_captions.js polls the same native caption stream and owns the
+    // shared overlay, native visibility, styling, positioning, and timing.
+    // Keep this return value for diagnostics and test hooks without creating a
+    // second renderer or competing over the overlay DOM.
+    if (!preferencesReady || !settings.cleanCaptionsEnabled) return '';
+    return limitCaptionText(maskSelectedText(nativeCaptionText));
   }
 
   function processCaption() {
@@ -297,7 +211,6 @@
 
   loadState()
     .then(() => {
-      ensureRemoteStyles();
       startObserver();
       processCaption();
     })

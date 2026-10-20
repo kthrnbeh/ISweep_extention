@@ -11,7 +11,7 @@ Wires the browser to the ISweep backend: signs in, syncs preferences, and applie
 4) Click the toolbar icon → **Log in with Email**:
    - Enter the same email/password created via the frontend/backend.
    - On success we store `isweepToken` + `isweepUserId` in `chrome.storage.local`.
-5) (Optional) Open Settings or Account links to the site at `http://127.0.0.1:5500/docs/`.
+5) (Optional) Open Settings or Account links to the frontend at `http://127.0.0.1:5500/ISweep_frontend/docs/`.
 
 ## YouTube testing flow
 - Open any YouTube video with captions on (`*://*.youtube.com/watch*`).
@@ -24,34 +24,10 @@ Wires the browser to the ISweep backend: signs in, syncs preferences, and applie
 - Watch DevTools console for `[ISWEEP]` logs (content + background).
 
 ## Storage keys (chrome.storage.local)
-- `isweep_auth_token`, `isweepUserId`: canonical auth session for backend calls.
-- Legacy site keys (`isweep-token`, `auth-state`) are migrated by the site bridge when available.
+- `isweepToken`, `isweepUserId`: auth session for backend calls.
 - `isweepBackendUrl`: configured backend base URL.
 - `isweepPreferences`: last downloaded preferences (fallback).
 - `isweepEnabled`: toggle for icon state.
-
-## Canonical preferences
-
-The selected words used by the Filter page, backend, popup, and caption listener
-are stored in `blocklist.items`. Category data remains available for display and
-future actions, but the normalized selected-word list is the blocklist list:
-
-```json
-{
-  "categories": {
-    "language": { "items": [] },
-    "intimacy": { "items": [] },
-    "violence": { "items": [] },
-    "substances": { "items": [] },
-    "horror": { "items": [] }
-  },
-  "blocklist": { "items": [] }
-}
-```
-
-The extension reports the selected-word count, preview, preference source, and
-sync failure reason in its caption runtime status. A missing word list is not
-treated as a verified successful non-empty sync.
 
 ## Permissions
 - `storage`, `activeTab`, `tabs`, `scripting` + host permissions for backend URLs and YouTube captions.

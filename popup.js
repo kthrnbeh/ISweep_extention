@@ -8,7 +8,7 @@
 // Default to public GitHub Pages; allow override via stored setting for local dev.
 const DEFAULT_FRONTEND_BASE = 'https://kthrnbeh.github.io/ISweep';
 const DEFAULT_BACKEND = 'http://127.0.0.1:5000';
-const DEFAULT_LOCAL_FRONTEND_BASE = 'http://127.0.0.1:5500/docs';
+const DEFAULT_LOCAL_FRONTEND_BASE = 'http://127.0.0.1:5500/ISweep_frontend/docs';
 
 // Storage Keys
 const STORAGE_KEYS = {
@@ -17,7 +17,6 @@ const STORAGE_KEYS = {
   TOKEN: 'isweep_auth_token',      // Unified token key
   USER_ID: 'isweepUserId',         // Legacy user id key
   PREFS: 'isweepPreferences',      // Cached preferences
-  PREFS_META: 'isweepPreferencesMeta',
   BACKEND_URL: 'isweepBackendUrl', // Backend base URL
   FRONTEND_URL: 'isweepFrontendUrl',// Frontend base URL override
   CLEAN_CAPTION_SETTINGS: 'isweepCleanCaptionSettings',
@@ -26,7 +25,7 @@ const STORAGE_KEYS = {
 
 const CLEAN_CAPTION_DEFAULTS = {
   cleanCaptionsEnabled: true,
-  cleanCaptionStyle: 'black_white',
+  cleanCaptionStyle: 'transparent_white',
   cleanCaptionTextSize: 'medium',
   cleanCaptionWordMuteMode: 'captions_only',
   cleanCaptionPosition: { x: 0.5, y: 0.8 },
@@ -34,9 +33,7 @@ const CLEAN_CAPTION_DEFAULTS = {
 
 function normalizeCleanCaptionSettings(raw) {
   const data = raw && typeof raw === 'object' ? raw : {};
-  const style = ['black_white', 'white_black', 'transparent_white'].includes(data.cleanCaptionStyle)
-    ? data.cleanCaptionStyle
-    : CLEAN_CAPTION_DEFAULTS.cleanCaptionStyle;
+  const style = data.cleanCaptionStyle === 'white_black' ? 'white_black' : 'transparent_white';
   const textSize = ['small', 'medium', 'large'].includes(data.cleanCaptionTextSize)
     ? data.cleanCaptionTextSize
     : 'medium';
@@ -596,7 +593,7 @@ async function notifyActiveYouTubeTabCleanCaptionSettings(settings) {
 
 async function handleSyncPrefs(e) {
   if (e) e.preventDefault();
-  console.log('[ISWEEP][PREF_SYNC] popup refresh start');
+  console.log(LOG_PREFIX, 'prefs sync start');
   try {
     const preStore = await chrome.storage.local.get([
       TOKEN_KEY,
@@ -652,37 +649,15 @@ async function handleSyncPrefs(e) {
         return { ok: false, error: 'background not available' };
       });
     if (!res || !res.ok) {
-      const reason = res?.reason || res?.error || 'unknown';
-      console.warn('[ISWEEP][PREF_SYNC] popup refresh failed', {
-        reason,
-        status: res?.status || null,
-        diagnostic: res?.diagnostic || null,
-      });
-      if (signedInStatus) signedInStatus.textContent = `Preference sync failed: ${reason}`;
-      alert(`Preference sync failed: ${reason}`);
+      console.warn(LOG_PREFIX, 'prefs sync failed', res?.error || 'unknown');
+      alert('Sync failed. Are you logged in?');
       return;
     }
-    const selectedWordCount = Number.isFinite(Number(res.selectedWordCount))
-      ? Number(res.selectedWordCount)
-      : 0;
-    await refreshCaptionRuntimeStatus();
-    console.log('[ISWEEP][PREF_SYNC] popup refresh success', {
-      status: res.status || '',
-      selectedWordCount,
-      selectedWordPreview: res.selectedWordPreview || [],
-      preferenceSource: res.preferenceSource || 'unknown',
-      diagnostic: res.diagnostic || null,
-    });
-    if (signedInStatus) {
-      signedInStatus.textContent = `Preferences synced — ${selectedWordCount} selected language words.`;
-    }
-    alert(`Preferences synced — ${selectedWordCount} selected language words.`);
+    console.log(LOG_PREFIX, 'prefs sync success', res.status || '');
+    alert('Preferences synced.');
   } catch (err) {
-    console.error('[ISWEEP][PREF_SYNC] popup refresh failed', {
-      reason: err?.message || String(err),
-    });
-    if (signedInStatus) signedInStatus.textContent = `Preference sync failed: ${err?.message || err}`;
-    alert(`Preference sync failed: ${err?.message || err}`);
+    console.error(LOG_PREFIX, 'prefs sync failed', err);
+    alert('Sync failed.');
   }
 }
 
@@ -914,7 +889,6 @@ async function handleLogout(e) {
       STORAGE_KEYS.AUTH,
       STORAGE_KEYS.USER_ID,
       STORAGE_KEYS.PREFS,
-      STORAGE_KEYS.PREFS_META,
       TOKEN_KEY,
     ]);
     setSyncPrefsAvailability(false);

@@ -27,7 +27,7 @@
     }
   },
   "background": {
-    "service_worker": "background_entry.js"
+    "service_worker": "background.js"
   },
   "content_scripts": [
     {
@@ -37,14 +37,14 @@
     },
     {
       "matches": ["*://*.youtube.com/watch*"],
-      "js": ["caption_bootstrap.js", "youtube_captions.js", "caption_remote.js"],
+      "js": ["youtube_captions.js", "caption_remote.js"],
       "run_at": "document_idle"
     },
     {
       "matches": [
         "https://kthrnbeh.github.io/ISweep/*",
-        "http://127.0.0.1:5500/docs/*",
-        "http://localhost:5500/docs/*",
+        "http://127.0.0.1:5500/ISweep_frontend/docs/*",
+        "http://localhost:5500/ISweep_frontend/docs/*",
         "http://127.0.0.1:5500/docs/*",
         "http://localhost:5500/docs/*"
       ],

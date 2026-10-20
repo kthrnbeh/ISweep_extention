@@ -120,6 +120,7 @@
   let suppressMuteChangeEventsUntilMs = 0;
   let muteStateVideo = null;
   let muteStateVolumeHandler = null;
+  let muteStatePlaybackHandlers = null;
   let userChangedMuteDuringWindow = false;
 
   function watchVideoMuteChanges(video) {
@@ -128,18 +129,61 @@
     if (muteStateVideo && muteStateVolumeHandler && typeof muteStateVideo.removeEventListener === 'function') {
       muteStateVideo.removeEventListener('volumechange', muteStateVolumeHandler);
     }
+    if (muteStateVideo && muteStatePlaybackHandlers && typeof muteStateVideo.removeEventListener === 'function') {
+      Object.entries(muteStatePlaybackHandlers).forEach(([eventName, handler]) => {
+        muteStateVideo.removeEventListener(eventName, handler);
+      });
+    }
     muteStateVideo = video;
     muteStateVolumeHandler = () => {
       if (muteControlInProgress > 0 || Date.now() <= suppressMuteChangeEventsUntilMs) return;
-      // volumechange also fires for ordinary volume-slider changes. Only
-      // release ISweep's ownership when the user actually unmutes the video.
-      if (isweepMuteActive && !Boolean(video.muted)) {
+      // An external mute change belongs to the viewer/site. Preserve it when
+      // this filter window ends instead of undoing the viewer's action.
+      if (isweepMuteActive && Boolean(video.muted) !== true) {
         userChangedMuteDuringWindow = true;
         lastMuteOwner = 'user';
         console.log('[ISWEEP][WORD_MUTE] user changed mute during ISweep window; playback ownership released');
+      } else if (isweepMuteActive && Boolean(video.muted) === true) {
+        userChangedMuteDuringWindow = true;
+        lastMuteOwner = 'user';
+        console.log('[ISWEEP][WORD_MUTE] external mute change during ISweep window; restore will preserve it');
       }
     };
     video.addEventListener('volumechange', muteStateVolumeHandler);
+    muteStatePlaybackHandlers = {
+      timeupdate: () => syncMuteWindowToPlayback('timeupdate'),
+      play: () => syncMuteWindowToPlayback('play'),
+      pause: () => clearMuteRestoreTimers(),
+      seeking: () => syncMuteWindowToPlayback('seeking'),
+      emptied: () => restoreMuteState('video_emptied'),
+    };
+    Object.entries(muteStatePlaybackHandlers).forEach(([eventName, handler]) => {
+      video.addEventListener(eventName, handler);
+    });
+  }
+
+  function clearMuteRestoreTimers() {
+    if (restoreMuteTimeout) clearTimeout(restoreMuteTimeout);
+    if (hardRestoreTimeout) clearTimeout(hardRestoreTimeout);
+    restoreMuteTimeout = null;
+    hardRestoreTimeout = null;
+  }
+
+  function syncMuteWindowToPlayback(reason = 'playback') {
+    if (!isweepMuteActive) return;
+    const video = muteStateVideo || findVideo();
+    if (!video || !Number.isFinite(Number(video.currentTime))) return;
+    const nowSec = Number(video.currentTime);
+    if (nowSec >= muteLockUntilSec) {
+      restoreMuteState(`${reason}_window_elapsed`);
+      return;
+    }
+    if (video.paused) {
+      clearMuteRestoreTimers();
+      return;
+    }
+    if (!userChangedMuteDuringWindow && !video.muted) setMutedState(true, `enforcement:${reason}`);
+    rescheduleMuteRestoreTimers(nowSec);
   }
 
   function clearMuteState(reason) {
@@ -151,6 +195,17 @@
     hardRestoreTimeout = null;
     muteEnforceInterval = null;
     pageSelectedWordMuteTimer = null;
+    if (muteStateVideo && muteStateVolumeHandler && typeof muteStateVideo.removeEventListener === 'function') {
+      muteStateVideo.removeEventListener('volumechange', muteStateVolumeHandler);
+    }
+    if (muteStateVideo && muteStatePlaybackHandlers && typeof muteStateVideo.removeEventListener === 'function') {
+      Object.entries(muteStatePlaybackHandlers).forEach(([eventName, handler]) => {
+        muteStateVideo.removeEventListener(eventName, handler);
+      });
+    }
+    muteStateVideo = null;
+    muteStateVolumeHandler = null;
+    muteStatePlaybackHandlers = null;
     muteUntilNextCaption = false;
     muteLockUntilSec = 0;
     previousMuteState = null;
@@ -205,7 +260,7 @@
     extensionContextInvalidated = true;
     console.warn('[ISWEEP][AUDIO_CAPTIONS] extension context invalidated; refresh page required');
     stopLocalCaptionTimers('extension_context_invalidated');
-    clearMuteState('extension_context_invalidated');
+    restoreMuteState('extension_context_invalidated');
     try {
       stopAudioCapture('extension_context_invalidated');
     } catch (_) {}
@@ -3816,6 +3871,9 @@
   // ──────────────────────────────────────────────────────
 
   function handleVideoIdChange(newVideoId) {
+    if (activeVideoId && newVideoId !== activeVideoId && isweepMuteActive) {
+      restoreMuteState('video_changed');
+    }
     if (!newVideoId) {
       if (activeVideoId) {
         console.log(
@@ -4410,13 +4468,13 @@
   }
 
   function rescheduleMuteRestoreTimers(nowSec) {
-    if (restoreMuteTimeout) clearTimeout(restoreMuteTimeout);
-    if (hardRestoreTimeout) clearTimeout(hardRestoreTimeout);
-    const video = findVideo();
+    clearMuteRestoreTimers();
+    const video = muteStateVideo || findVideo();
     if (!video || muteLockUntilSec <= nowSec) {
       restoreMuteState('window_elapsed');
       return;
     }
+    if (video.paused) return;
     const delayMs = Math.max((muteLockUntilSec - (video.currentTime || nowSec)) * 1000, 0);
     restoreMuteTimeout = setTimeout(() => restoreMuteState('word_ended'), delayMs + 10);
     hardRestoreTimeout = setTimeout(() => restoreMuteState('hard_timeout'), delayMs + HARD_RESTORE_GRACE_MS + 50);
@@ -5025,6 +5083,14 @@
       getCleanCaptionOverlayElement: () => cleanCaptionOverlayEl,
       toCleanCaptionText, stripCategoryLabelsFromCaption, limitCaptionText, getCleanCaptionDisplayText, getBestCleanCaptionText,
       getMuteWindowFromMarker, shouldISweepUnmute, shouldSkipMuteBecauseUserMuted,
+      applyMuteWindow, restoreMuteState, syncMuteWindowToPlayback,
+      getMuteControllerState: () => ({
+        active: isweepMuteActive,
+        previousMuted: previousMuteState,
+        owner: lastMuteOwner,
+        windowEnd: muteLockUntilSec,
+        userChanged: userChangedMuteDuringWindow,
+      }),
       estimatePlaceholderWordWindow, hasNearbyAudioMuteMarker, getMarkerEarlyWindowSec,
       shouldFireMarker, shouldAllowMarkerAction, resolveOverlayDisplayState, getEntryTimingBounds,
       normalizePreAnalyzedCaptions, buildAudioResponseCaptions, acceptAudioCaptionRelay, shouldDedupAudioMarker,

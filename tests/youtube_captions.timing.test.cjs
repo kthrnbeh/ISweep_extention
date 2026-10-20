@@ -12,6 +12,18 @@ function loadYoutubeTimingHooks() {
     muted: false,
     volume: 1,
     paused: false,
+    listeners: new Map(),
+    addEventListener(name, handler) {
+      const handlers = this.listeners.get(name) || new Set();
+      handlers.add(handler);
+      this.listeners.set(name, handlers);
+    },
+    removeEventListener(name, handler) {
+      this.listeners.get(name)?.delete(handler);
+    },
+    dispatch(name) {
+      this.listeners.get(name)?.forEach((handler) => handler());
+    },
   };
   const context = {
     console: { log() {}, warn() {}, error() {} },
@@ -64,7 +76,14 @@ function loadYoutubeTimingHooks() {
   context.globalThis = context;
   vm.createContext(context);
   vm.runInContext(source, context, { filename: 'youtube_captions.js' });
-  return context.__ISWEEP_YT_TEST_HOOKS__;
+  const hooks = context.__ISWEEP_YT_TEST_HOOKS__;
+  hooks.__testVideo = fakeVideo;
+  return hooks;
+}
+
+function loadMuteControllerHooks() {
+  const hooks = loadYoutubeTimingHooks();
+  return hooks;
 }
 
 test('clean caption display keeps only the latest two sentences', () => {
@@ -498,6 +517,50 @@ test('user-muted video skips new ISweep mute windows', () => {
   assert.equal(hooks.shouldSkipMuteBecauseUserMuted(true, false), true);
   assert.equal(hooks.shouldSkipMuteBecauseUserMuted(true, true), false);
   assert.equal(hooks.shouldSkipMuteBecauseUserMuted(false, false), false);
+});
+
+test('mute controller merges caption and speech windows without early restore', () => {
+  const hooks = loadMuteControllerHooks();
+  assert.equal(hooks.applyMuteWindow(0, 1, 'caption'), true);
+  assert.equal(hooks.applyMuteWindow(0.5, 2, 'speech'), true);
+  assert.equal(hooks.getMuteControllerState().windowEnd, 2);
+  assert.equal(hooks.getMuteControllerState().active, true);
+  hooks.restoreMuteState('test_cleanup');
+});
+
+test('mute controller preserves an initially muted video', () => {
+  const hooks = loadMuteControllerHooks();
+  hooks.__testVideo.muted = true;
+  assert.equal(hooks.applyMuteWindow(0, 1, 'caption'), false);
+  assert.equal(hooks.__testVideo.muted, true);
+  assert.equal(hooks.shouldISweepUnmute(true), false);
+  assert.equal(hooks.shouldSkipMuteBecauseUserMuted(true, false), true);
+});
+
+test('mute controller follows playback time across pause and seek', () => {
+  const hooks = loadMuteControllerHooks();
+  assert.equal(hooks.applyMuteWindow(0, 2, 'caption'), true);
+  hooks.__testVideo.paused = true;
+  hooks.__testVideo.dispatch('pause');
+  hooks.__testVideo.currentTime = 1;
+  hooks.__testVideo.dispatch('timeupdate');
+  assert.equal(hooks.getMuteControllerState().active, true);
+  hooks.__testVideo.paused = false;
+  hooks.__testVideo.dispatch('play');
+  hooks.__testVideo.currentTime = 2.1;
+  hooks.__testVideo.dispatch('seeking');
+  assert.equal(hooks.getMuteControllerState().active, false);
+});
+
+test('manual mute changes are not undone at the end of a filter window', () => {
+  const hooks = loadMuteControllerHooks();
+  assert.equal(hooks.applyMuteWindow(0, 1, 'caption'), true);
+  hooks.__testVideo.muted = false;
+  hooks.__testVideo.dispatch('volumechange');
+  hooks.__testVideo.currentTime = 1.1;
+  hooks.__testVideo.dispatch('timeupdate');
+  assert.equal(hooks.__testVideo.muted, false);
+  assert.equal(hooks.getMuteControllerState().active, false);
 });
 
 test('YouTube DOM fallback remains available when no timed caption exists', () => {
